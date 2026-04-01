@@ -5,6 +5,9 @@ import { IsoDateTime, NonNegativeInt, ProjectId, TrimmedNonEmptyString } from ".
 export const BrowserSessionId = TrimmedNonEmptyString;
 export type BrowserSessionId = typeof BrowserSessionId.Type;
 
+export const BrowserTabId = TrimmedNonEmptyString;
+export type BrowserTabId = typeof BrowserTabId.Type;
+
 export const BrowserPaneBounds = Schema.Struct({
   x: NonNegativeInt,
   y: NonNegativeInt,
@@ -34,11 +37,25 @@ export const BrowserSessionSummary = Schema.Struct({
 });
 export type BrowserSessionSummary = typeof BrowserSessionSummary.Type;
 
+export const BrowserTabSummary = Schema.Struct({
+  tabId: BrowserTabId,
+  sessionId: BrowserSessionId,
+  projectId: ProjectId,
+  inspectMode: Schema.Boolean,
+  hasSelection: Schema.Boolean,
+  navigation: BrowserNavigationState,
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type BrowserTabSummary = typeof BrowserTabSummary.Type;
+
 export const BrowserSessionSnapshot = Schema.Struct({
   paneOpen: Schema.Boolean,
   paneProjectId: Schema.NullOr(ProjectId),
   paneBounds: Schema.NullOr(BrowserPaneBounds),
   session: Schema.NullOr(BrowserSessionSummary),
+  tabs: Schema.optional(Schema.Array(BrowserTabSummary)),
+  activeTabId: Schema.optional(Schema.NullOr(BrowserTabId)),
 });
 export type BrowserSessionSnapshot = typeof BrowserSessionSnapshot.Type;
 
@@ -106,6 +123,24 @@ export const BrowserProjectInput = Schema.Struct({
   projectId: ProjectId,
 });
 export type BrowserProjectInput = typeof BrowserProjectInput.Type;
+
+export const BrowserCreateTabInput = Schema.Struct({
+  projectId: ProjectId,
+  url: Schema.optional(TrimmedNonEmptyString),
+});
+export type BrowserCreateTabInput = typeof BrowserCreateTabInput.Type;
+
+export const BrowserActivateTabInput = Schema.Struct({
+  projectId: ProjectId,
+  tabId: BrowserTabId,
+});
+export type BrowserActivateTabInput = typeof BrowserActivateTabInput.Type;
+
+export const BrowserCloseTabInput = Schema.Struct({
+  projectId: ProjectId,
+  tabId: BrowserTabId,
+});
+export type BrowserCloseTabInput = typeof BrowserCloseTabInput.Type;
 
 export const BrowserNavigateInput = Schema.Struct({
   projectId: ProjectId,

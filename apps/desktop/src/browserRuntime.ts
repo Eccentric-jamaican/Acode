@@ -9,6 +9,7 @@ import type {
   BrowserRuntimeEvent,
   BrowserSessionSnapshot,
   BrowserSessionSummary,
+  BrowserTabId,
   ProjectId,
 } from "@t3tools/contracts";
 import { BrowserWindow, WebContentsView } from "electron";
@@ -237,15 +238,23 @@ const WAIT_POLL_INTERVAL_MS = 100;
 const ATTACHED_BOUNDS_REAPPLY_DELAYS_MS = [0, 75, 200, 500] as const;
 const INTEGRATED_BROWSER_VIEWPORT_SELECTOR = '[data-integrated-browser-native-viewport="true"]';
 
-interface BrowserRuntimeRecord {
-  projectId: ProjectId;
+interface BrowserTabRuntimeRecord {
+  tabId: BrowserTabId;
   sessionId: string;
+  projectId: ProjectId;
   view: Electron.WebContentsView;
   createdAt: string;
   updatedAt: string;
   inspectMode: boolean;
   hasSelection: boolean;
   navigation: BrowserNavigationState;
+}
+
+interface BrowserProjectRuntimeRecord {
+  projectId: ProjectId;
+  tabs: Map<BrowserTabId, BrowserTabRuntimeRecord>;
+  tabOrder: BrowserTabId[];
+  activeTabId: BrowserTabId | null;
 }
 
 function isNavigationAbortError(error: unknown): boolean {
@@ -334,15 +343,28 @@ function scaleBoundsByZoomFactor(bounds: BrowserPaneBounds, zoomFactor: number):
   });
 }
 
-function toSummary(runtime: BrowserRuntimeRecord): BrowserSessionSummary {
+function toSessionSummary(tab: BrowserTabRuntimeRecord): BrowserSessionSummary {
   return {
-    sessionId: runtime.sessionId,
-    projectId: runtime.projectId,
-    inspectMode: runtime.inspectMode,
-    hasSelection: runtime.hasSelection,
-    navigation: runtime.navigation,
-    createdAt: runtime.createdAt,
-    updatedAt: runtime.updatedAt,
+    sessionId: tab.sessionId,
+    projectId: tab.projectId,
+    inspectMode: tab.inspectMode,
+    hasSelection: tab.hasSelection,
+    navigation: tab.navigation,
+    createdAt: tab.createdAt,
+    updatedAt: tab.updatedAt,
+  };
+}
+
+function toTabSummary(tab: BrowserTabRuntimeRecord) {
+  return {
+    tabId: tab.tabId,
+    sessionId: tab.sessionId,
+    projectId: tab.projectId,
+    inspectMode: tab.inspectMode,
+    hasSelection: tab.hasSelection,
+    navigation: tab.navigation,
+    createdAt: tab.createdAt,
+    updatedAt: tab.updatedAt,
   };
 }
 
@@ -395,10 +417,11 @@ export interface BrowserRuntimeRegistryOptions {
 export class BrowserRuntimeRegistry extends EventEmitter<{
   event: [BrowserRuntimeEvent];
 }> {
-  private readonly runtimes = new Map<ProjectId, BrowserRuntimeRecord>();
+  private readonly runtimes = new Map<ProjectId, BrowserProjectRuntimeRecord>();
   private readonly browserPreloadPath: string;
   private window: BrowserWindow | null = null;
   private attachedProjectId: ProjectId | null = null;
+  private attachedTabId: BrowserTabId | null = null;
   private paneOpen = false;
   private paneProjectId: ProjectId | null = null;
   private paneBounds: BrowserPaneBounds | null = null;
@@ -413,40 +436,38 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     if (this.window === window) {
       return;
     }
-    if (this.window && this.attachedProjectId) {
+    if (this.window && this.attachedProjectId && this.attachedTabId) {
       this.detachAttachedView(this.window);
     }
     this.window = window;
     if (window && this.paneOpen && this.paneProjectId && this.paneBounds) {
-      this.attachProject(window, this.paneProjectId, this.paneBounds);
+      this.attachActiveTab(window, this.paneProjectId, this.paneBounds);
     }
   }
 
   handlePageEvent(projectId: ProjectId, payload: { type: string; hasSelection?: unknown }): void {
-    const runtime = this.runtimes.get(projectId);
-    if (!runtime) {
+    const projectRuntime = this.runtimes.get(projectId);
+    const activeTab = this.getActiveTab(projectRuntime);
+    if (!activeTab) {
       return;
     }
-    if (payload.type !== "inspect-selection-changed") {
+    this.applyPageEvent(activeTab, payload);
+  }
+
+  handlePageEventByWebContentsId(
+    webContentsId: number,
+    payload: { type: string; hasSelection?: unknown },
+  ): void {
+    const context = this.findTabByWebContentsId(webContentsId);
+    if (!context) {
       return;
     }
-    runtime.hasSelection = payload.hasSelection === true;
-    runtime.updatedAt = nowIso();
-    this.emitStateUpdated(projectId);
-    this.emit("event", {
-      type: "inspect.selection.changed",
-      projectId,
-      hasSelection: runtime.hasSelection,
-    });
+    this.applyPageEvent(context.tab, payload);
   }
 
   findProjectIdByWebContentsId(webContentsId: number): ProjectId | null {
-    for (const runtime of this.runtimes.values()) {
-      if (runtime.view.webContents.id === webContentsId) {
-        return runtime.projectId;
-      }
-    }
-    return null;
+    const context = this.findTabByWebContentsId(webContentsId);
+    return context?.tab.projectId ?? null;
   }
 
   async getState(projectId: ProjectId): Promise<BrowserSessionSnapshot> {
@@ -480,7 +501,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
       this.paneBounds = measuredBounds;
     }
     if (this.window) {
-      this.attachProject(this.window, projectId, this.paneBounds);
+      this.attachActiveTab(this.window, projectId, this.paneBounds);
     }
     this.emitStateUpdated(projectId);
     return this.snapshotForProject(projectId);
@@ -506,81 +527,148 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     });
   }
 
+  async newTab(projectId: ProjectId, url?: string): Promise<BrowserSessionSnapshot> {
+    const projectRuntime = await this.ensureRuntime(projectId);
+    const initialUrl =
+      typeof url === "string" && url.trim().length > 0 ? this.normalizeUrl(url) : "about:blank";
+    await this.createTab(projectRuntime, { url: initialUrl, activate: true });
+
+    if (this.window && this.paneOpen && this.paneProjectId === projectId && this.paneBounds) {
+      this.attachActiveTab(this.window, projectId, this.paneBounds);
+    }
+    this.emitStateUpdated(projectId);
+    return this.snapshotForProject(projectId);
+  }
+
+  async activateTab(projectId: ProjectId, tabId: BrowserTabId): Promise<BrowserSessionSnapshot> {
+    const projectRuntime = await this.ensureRuntime(projectId);
+    if (!projectRuntime.tabs.has(tabId)) {
+      throw new Error(`Tab '${tabId}' was not found.`);
+    }
+    projectRuntime.activeTabId = tabId;
+
+    if (this.window && this.paneOpen && this.paneProjectId === projectId && this.paneBounds) {
+      this.attachActiveTab(this.window, projectId, this.paneBounds);
+    }
+    this.emitStateUpdated(projectId);
+    return this.snapshotForProject(projectId);
+  }
+
+  async closeTab(projectId: ProjectId, tabId: BrowserTabId): Promise<BrowserSessionSnapshot> {
+    const projectRuntime = await this.ensureRuntime(projectId);
+    const tab = projectRuntime.tabs.get(tabId);
+    if (!tab) {
+      return this.snapshotForProject(projectId);
+    }
+
+    const previousTabOrder = [...projectRuntime.tabOrder];
+    const closedIndex = previousTabOrder.indexOf(tabId);
+
+    if (this.window && this.attachedProjectId === projectId && this.attachedTabId === tabId) {
+      this.detachAttachedView(this.window);
+    }
+
+    projectRuntime.tabs.delete(tabId);
+    projectRuntime.tabOrder = projectRuntime.tabOrder.filter((entry) => entry !== tabId);
+    tab.view.webContents.close({ waitForBeforeUnload: false });
+
+    if (projectRuntime.tabOrder.length === 0) {
+      await this.createTab(projectRuntime, { url: "about:blank", activate: true });
+    } else if (
+      projectRuntime.activeTabId === tabId ||
+      !projectRuntime.activeTabId ||
+      !projectRuntime.tabs.has(projectRuntime.activeTabId)
+    ) {
+      const nextIndex = Math.min(
+        Math.max(closedIndex, 0),
+        Math.max(projectRuntime.tabOrder.length - 1, 0),
+      );
+      projectRuntime.activeTabId =
+        projectRuntime.tabOrder[nextIndex] ?? projectRuntime.tabOrder[0] ?? null;
+    }
+
+    if (this.window && this.paneOpen && this.paneProjectId === projectId && this.paneBounds) {
+      this.attachActiveTab(this.window, projectId, this.paneBounds);
+    }
+    this.emitStateUpdated(projectId);
+    return this.snapshotForProject(projectId);
+  }
+
   async navigate(projectId: ProjectId, url: string): Promise<BrowserSessionSnapshot> {
-    const runtime = await this.ensureRuntime(projectId);
+    const tab = await this.ensureActiveTab(projectId);
     const targetUrl = this.normalizeUrl(url);
-    await this.loadUrl(runtime, targetUrl);
-    runtime.navigation = {
-      ...runtime.navigation,
+    await this.loadUrl(tab, targetUrl);
+    tab.navigation = {
+      ...tab.navigation,
       url: targetUrl,
       lastCommittedAt: nowIso(),
     };
-    runtime.updatedAt = nowIso();
+    tab.updatedAt = nowIso();
     this.emitStateUpdated(projectId);
     return this.snapshotForProject(projectId);
   }
 
   async back(projectId: ProjectId): Promise<BrowserSessionSnapshot> {
-    const runtime = await this.ensureRuntime(projectId);
-    if (runtime.view.webContents.navigationHistory.canGoBack()) {
-      runtime.view.webContents.navigationHistory.goBack();
+    const tab = await this.ensureActiveTab(projectId);
+    if (tab.view.webContents.navigationHistory.canGoBack()) {
+      tab.view.webContents.navigationHistory.goBack();
     }
     return this.snapshotForProject(projectId);
   }
 
   async forward(projectId: ProjectId): Promise<BrowserSessionSnapshot> {
-    const runtime = await this.ensureRuntime(projectId);
-    if (runtime.view.webContents.navigationHistory.canGoForward()) {
-      runtime.view.webContents.navigationHistory.goForward();
+    const tab = await this.ensureActiveTab(projectId);
+    if (tab.view.webContents.navigationHistory.canGoForward()) {
+      tab.view.webContents.navigationHistory.goForward();
     }
     return this.snapshotForProject(projectId);
   }
 
   async reload(projectId: ProjectId): Promise<BrowserSessionSnapshot> {
-    const runtime = await this.ensureRuntime(projectId);
-    runtime.view.webContents.reload();
+    const tab = await this.ensureActiveTab(projectId);
+    tab.view.webContents.reload();
     return this.snapshotForProject(projectId);
   }
 
   async kill(projectId: ProjectId): Promise<void> {
-    const runtime = this.runtimes.get(projectId);
-    if (!runtime) {
+    const projectRuntime = this.runtimes.get(projectId);
+    if (!projectRuntime) {
       return;
     }
     if (this.window && this.attachedProjectId === projectId) {
       this.detachAttachedView(this.window);
     }
+    for (const tab of projectRuntime.tabs.values()) {
+      tab.view.webContents.close({ waitForBeforeUnload: false });
+    }
     this.runtimes.delete(projectId);
-    runtime.view.webContents.close({ waitForBeforeUnload: false });
     if (this.paneProjectId === projectId) {
       this.paneProjectId = null;
       this.paneOpen = false;
       this.paneBounds = null;
     }
+    this.emitStateUpdated(projectId);
   }
 
   async setInspectMode(projectId: ProjectId, enabled: boolean): Promise<BrowserSessionSnapshot> {
-    const runtime = await this.ensureRuntime(projectId);
-    runtime.inspectMode = enabled;
-    runtime.updatedAt = nowIso();
+    const tab = await this.ensureActiveTab(projectId);
+    tab.inspectMode = enabled;
+    tab.updatedAt = nowIso();
     if (enabled) {
-      await runtime.view.webContents.executeJavaScript(INSPECT_SCRIPT, true);
+      await tab.view.webContents.executeJavaScript(INSPECT_SCRIPT, true);
     } else {
-      runtime.hasSelection = await runtime.view.webContents.executeJavaScript(
-        DISABLE_INSPECT_SCRIPT,
-        true,
-      );
+      tab.hasSelection = await tab.view.webContents.executeJavaScript(DISABLE_INSPECT_SCRIPT, true);
     }
     this.emitStateUpdated(projectId);
     return this.snapshotForProject(projectId);
   }
 
   async captureInspectSelection(projectId: ProjectId): Promise<BrowserInspectCapture | null> {
-    const runtime = this.runtimes.get(projectId);
-    if (!runtime) {
+    const tab = this.getActiveTab(this.runtimes.get(projectId));
+    if (!tab) {
       return null;
     }
-    const selection = (await runtime.view.webContents.executeJavaScript(
+    const selection = (await tab.view.webContents.executeJavaScript(
       CAPTURE_SELECTION_SCRIPT,
       true,
     )) as
@@ -593,19 +681,19 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     }
 
     const screenshotDataUrl = await capturePngDataUrl(
-      runtime.view.webContents,
+      tab.view.webContents,
       captureRectForSelection(selection.boundingBox),
     );
 
-    await runtime.view.webContents.executeJavaScript(CLEAR_SELECTION_SCRIPT, true);
-    runtime.hasSelection = false;
-    runtime.inspectMode = false;
-    runtime.updatedAt = nowIso();
-    await runtime.view.webContents.executeJavaScript(DISABLE_INSPECT_SCRIPT, true);
+    await tab.view.webContents.executeJavaScript(CLEAR_SELECTION_SCRIPT, true);
+    tab.hasSelection = false;
+    tab.inspectMode = false;
+    tab.updatedAt = nowIso();
+    await tab.view.webContents.executeJavaScript(DISABLE_INSPECT_SCRIPT, true);
     this.emitStateUpdated(projectId);
 
     return {
-      sessionId: runtime.sessionId,
+      sessionId: tab.sessionId,
       projectId,
       url: selection.url,
       tagName: selection.tagName,
@@ -628,8 +716,8 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
   }
 
   async snapshot(projectId: ProjectId): Promise<Record<string, unknown>> {
-    const runtime = await this.ensureRuntime(projectId);
-    const result = await runtime.view.webContents.executeJavaScript(
+    const tab = await this.ensureActiveTab(projectId);
+    const result = await tab.view.webContents.executeJavaScript(
       `(() => ({
         url: window.location.href,
         title: document.title,
@@ -642,9 +730,9 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
   }
 
   async screenshot(projectId: ProjectId): Promise<string> {
-    const runtime = await this.ensureRuntime(projectId);
-    const bounds = runtime.view.getBounds();
-    return capturePngDataUrl(runtime.view.webContents, {
+    const tab = await this.ensureActiveTab(projectId);
+    const bounds = tab.view.getBounds();
+    return capturePngDataUrl(tab.view.webContents, {
       x: 0,
       y: 0,
       width: bounds.width,
@@ -653,11 +741,11 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
   }
 
   async waitFor(projectId: ProjectId, input: { selector?: string; text?: string; timeoutMs?: number }) {
-    const runtime = await this.ensureRuntime(projectId);
+    const tab = await this.ensureActiveTab(projectId);
     const timeoutMs = Math.max(100, Math.min(input.timeoutMs ?? 10_000, 60_000));
     const startedAt = Date.now();
     while (Date.now() - startedAt < timeoutMs) {
-      const matched = await runtime.view.webContents.executeJavaScript(
+      const matched = await tab.view.webContents.executeJavaScript(
         `(async () => {
           const selector = ${JSON.stringify(input.selector ?? "")};
           const text = ${JSON.stringify(input.text ?? "")};
@@ -680,9 +768,9 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
   }
 
   async click(projectId: ProjectId, selector: string): Promise<void> {
-    const runtime = await this.ensureRuntime(projectId);
+    const tab = await this.ensureActiveTab(projectId);
     await evaluateSelectorTarget<void>(
-      runtime.view.webContents,
+      tab.view.webContents,
       selector,
       `
       element.scrollIntoView({ block: "center", inline: "center" });
@@ -693,9 +781,9 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
   }
 
   async hover(projectId: ProjectId, selector: string): Promise<void> {
-    const runtime = await this.ensureRuntime(projectId);
+    const tab = await this.ensureActiveTab(projectId);
     await evaluateSelectorTarget<void>(
-      runtime.view.webContents,
+      tab.view.webContents,
       selector,
       `
       element.scrollIntoView({ block: "center", inline: "center" });
@@ -705,9 +793,9 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
   }
 
   async fill(projectId: ProjectId, input: { selector: string; value: string }): Promise<void> {
-    const runtime = await this.ensureRuntime(projectId);
+    const tab = await this.ensureActiveTab(projectId);
     await evaluateSelectorTarget<void>(
-      runtime.view.webContents,
+      tab.view.webContents,
       input.selector,
       `
       if (!("value" in element)) {
@@ -723,9 +811,9 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
   }
 
   async typeText(projectId: ProjectId, input: { selector: string; text: string }): Promise<void> {
-    const runtime = await this.ensureRuntime(projectId);
+    const tab = await this.ensureActiveTab(projectId);
     await evaluateSelectorTarget<void>(
-      runtime.view.webContents,
+      tab.view.webContents,
       input.selector,
       `
       if (!("value" in element)) {
@@ -741,15 +829,15 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
   }
 
   async pressKey(projectId: ProjectId, key: string): Promise<void> {
-    const runtime = await this.ensureRuntime(projectId);
-    runtime.view.webContents.sendInputEvent({ type: "keyDown", keyCode: key });
-    runtime.view.webContents.sendInputEvent({ type: "char", keyCode: key });
-    runtime.view.webContents.sendInputEvent({ type: "keyUp", keyCode: key });
+    const tab = await this.ensureActiveTab(projectId);
+    tab.view.webContents.sendInputEvent({ type: "keyDown", keyCode: key });
+    tab.view.webContents.sendInputEvent({ type: "char", keyCode: key });
+    tab.view.webContents.sendInputEvent({ type: "keyUp", keyCode: key });
   }
 
   async evaluate(projectId: ProjectId, expression: string): Promise<unknown> {
-    const runtime = await this.ensureRuntime(projectId);
-    return runtime.view.webContents.executeJavaScript(
+    const tab = await this.ensureActiveTab(projectId);
+    return tab.view.webContents.executeJavaScript(
       `(async () => {
         return await (0, eval)(${JSON.stringify(expression)});
       })()`,
@@ -757,13 +845,64 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     );
   }
 
-  private async ensureRuntime(projectId: ProjectId): Promise<BrowserRuntimeRecord> {
+  private applyPageEvent(
+    tab: BrowserTabRuntimeRecord,
+    payload: { type: string; hasSelection?: unknown },
+  ): void {
+    if (payload.type !== "inspect-selection-changed") {
+      return;
+    }
+    tab.hasSelection = payload.hasSelection === true;
+    tab.updatedAt = nowIso();
+    this.emitStateUpdated(tab.projectId);
+    this.emit("event", {
+      type: "inspect.selection.changed",
+      projectId: tab.projectId,
+      hasSelection: tab.hasSelection,
+    });
+  }
+
+  private async ensureRuntime(projectId: ProjectId): Promise<BrowserProjectRuntimeRecord> {
     const existing = this.runtimes.get(projectId);
     if (existing) {
       return existing;
     }
 
-    const partition = `t3-browser-${String(projectId)}`;
+    const projectRuntime: BrowserProjectRuntimeRecord = {
+      projectId,
+      tabs: new Map(),
+      tabOrder: [],
+      activeTabId: null,
+    };
+    this.runtimes.set(projectId, projectRuntime);
+    await this.createTab(projectRuntime, { url: "about:blank", activate: true });
+    return projectRuntime;
+  }
+
+  private async ensureActiveTab(projectId: ProjectId): Promise<BrowserTabRuntimeRecord> {
+    const projectRuntime = await this.ensureRuntime(projectId);
+    const activeTab = this.getActiveTab(projectRuntime);
+    if (!activeTab) {
+      return this.createTab(projectRuntime, { url: "about:blank", activate: true });
+    }
+    return activeTab;
+  }
+
+  private getActiveTab(
+    projectRuntime: BrowserProjectRuntimeRecord | undefined,
+  ): BrowserTabRuntimeRecord | null {
+    if (!projectRuntime || !projectRuntime.activeTabId) {
+      return null;
+    }
+    return projectRuntime.tabs.get(projectRuntime.activeTabId) ?? null;
+  }
+
+  private async createTab(
+    projectRuntime: BrowserProjectRuntimeRecord,
+    input: { url: string; activate: boolean },
+  ): Promise<BrowserTabRuntimeRecord> {
+    const tabId = randomUUID() as BrowserTabId;
+    const partition = `persist:t3-browser-${String(projectRuntime.projectId)}`;
     const preloadPath = Path.resolve(this.browserPreloadPath);
     const view = new WebContentsView({
       webPreferences: {
@@ -775,9 +914,10 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
       },
     });
     const createdAt = nowIso();
-    const runtime: BrowserRuntimeRecord = {
-      projectId,
+    const tab: BrowserTabRuntimeRecord = {
+      tabId,
       sessionId: randomUUID(),
+      projectId: projectRuntime.projectId,
       view,
       createdAt,
       updatedAt: createdAt,
@@ -792,43 +932,58 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
         lastCommittedAt: null,
       },
     };
-    this.installListeners(runtime);
-    this.runtimes.set(projectId, runtime);
-    await view.webContents.loadURL("about:blank");
-    return runtime;
+    this.installListeners(tab);
+    projectRuntime.tabs.set(tabId, tab);
+    projectRuntime.tabOrder.push(tabId);
+    if (input.activate) {
+      projectRuntime.activeTabId = tabId;
+    }
+
+    try {
+      await this.loadUrl(tab, input.url);
+      return tab;
+    } catch (error) {
+      projectRuntime.tabs.delete(tabId);
+      projectRuntime.tabOrder = projectRuntime.tabOrder.filter((entry) => entry !== tabId);
+      if (projectRuntime.activeTabId === tabId) {
+        projectRuntime.activeTabId = projectRuntime.tabOrder[0] ?? null;
+      }
+      tab.view.webContents.close({ waitForBeforeUnload: false });
+      throw error;
+    }
   }
 
-  private installListeners(runtime: BrowserRuntimeRecord): void {
+  private installListeners(tab: BrowserTabRuntimeRecord): void {
     const syncNavigation = () => {
-      runtime.navigation = {
-        url: runtime.view.webContents.getURL() || null,
-        title: runtime.view.webContents.getTitle() || null,
-        canGoBack: runtime.view.webContents.navigationHistory.canGoBack(),
-        canGoForward: runtime.view.webContents.navigationHistory.canGoForward(),
-        isLoading: runtime.view.webContents.isLoading(),
+      tab.navigation = {
+        url: tab.view.webContents.getURL() || null,
+        title: tab.view.webContents.getTitle() || null,
+        canGoBack: tab.view.webContents.navigationHistory.canGoBack(),
+        canGoForward: tab.view.webContents.navigationHistory.canGoForward(),
+        isLoading: tab.view.webContents.isLoading(),
         lastCommittedAt: nowIso(),
       };
-      runtime.updatedAt = nowIso();
-      this.emitStateUpdated(runtime.projectId);
+      tab.updatedAt = nowIso();
+      this.emitStateUpdated(tab.projectId);
     };
 
-    runtime.view.webContents.on("did-navigate", syncNavigation);
-    runtime.view.webContents.on("did-navigate-in-page", syncNavigation);
-    runtime.view.webContents.on("page-title-updated", syncNavigation);
-    runtime.view.webContents.on("did-start-loading", syncNavigation);
-    runtime.view.webContents.on("did-stop-loading", syncNavigation);
-    runtime.view.webContents.on("dom-ready", () => {
-      this.scheduleAttachedBoundsReapply(runtime.projectId);
+    tab.view.webContents.on("did-navigate", syncNavigation);
+    tab.view.webContents.on("did-navigate-in-page", syncNavigation);
+    tab.view.webContents.on("page-title-updated", syncNavigation);
+    tab.view.webContents.on("did-start-loading", syncNavigation);
+    tab.view.webContents.on("did-stop-loading", syncNavigation);
+    tab.view.webContents.on("dom-ready", () => {
+      this.scheduleAttachedBoundsReapply(tab.projectId, tab.tabId);
     });
-    runtime.view.webContents.on("did-finish-load", () => {
-      this.scheduleAttachedBoundsReapply(runtime.projectId);
+    tab.view.webContents.on("did-finish-load", () => {
+      this.scheduleAttachedBoundsReapply(tab.projectId, tab.tabId);
     });
-    runtime.view.webContents.on("did-stop-loading", () => {
-      this.scheduleAttachedBoundsReapply(runtime.projectId);
+    tab.view.webContents.on("did-stop-loading", () => {
+      this.scheduleAttachedBoundsReapply(tab.projectId, tab.tabId);
     });
-    runtime.view.webContents.on("render-process-gone", () => {
-      runtime.updatedAt = nowIso();
-      this.emitStateUpdated(runtime.projectId);
+    tab.view.webContents.on("render-process-gone", () => {
+      tab.updatedAt = nowIso();
+      this.emitStateUpdated(tab.projectId);
     });
   }
 
@@ -841,20 +996,27 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
   }
 
   private snapshotForProject(projectId: ProjectId): BrowserSessionSnapshot {
-    const runtime = this.runtimes.get(projectId);
+    const projectRuntime = this.runtimes.get(projectId);
+    const activeTab = this.getActiveTab(projectRuntime);
     return {
       paneOpen: this.paneOpen,
       paneProjectId: this.paneProjectId,
       paneBounds: this.paneBounds,
-      session: runtime ? toSummary(runtime) : null,
+      session: activeTab ? toSessionSummary(activeTab) : null,
+      tabs:
+        projectRuntime?.tabOrder
+          .map((tabId) => projectRuntime.tabs.get(tabId))
+          .filter((tab): tab is BrowserTabRuntimeRecord => tab !== undefined)
+          .map((tab) => toTabSummary(tab)) ?? [],
+      activeTabId: projectRuntime?.activeTabId ?? null,
     };
   }
 
-  private async loadUrl(runtime: BrowserRuntimeRecord, url: string): Promise<void> {
+  private async loadUrl(tab: BrowserTabRuntimeRecord, url: string): Promise<void> {
     try {
-      await runtime.view.webContents.loadURL(url);
+      await tab.view.webContents.loadURL(url);
     } catch (error) {
-      const committedUrl = runtime.view.webContents.getURL();
+      const committedUrl = tab.view.webContents.getURL();
       if (
         isNavigationAbortError(error) &&
         committedUrl.length > 0 &&
@@ -867,7 +1029,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
   }
 
   private applyBounds(
-    runtime: BrowserRuntimeRecord,
+    tab: BrowserTabRuntimeRecord,
     bounds: BrowserPaneBounds,
     options: { forceViewportRefresh?: boolean } = {},
   ): void {
@@ -890,13 +1052,13 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
         nudgedBounds.width !== nextBounds.width ||
         nudgedBounds.height !== nextBounds.height
       ) {
-        runtime.view.setBounds(nudgedBounds);
+        tab.view.setBounds(nudgedBounds);
       }
     }
 
-    runtime.view.setBounds(nextBounds);
-    runtime.view.setVisible(shouldShow);
-    void runtime.view.webContents
+    tab.view.setBounds(nextBounds);
+    tab.view.setVisible(shouldShow);
+    void tab.view.webContents
       .executeJavaScript(
         `window.dispatchEvent(new Event("resize")); window.visualViewport?.dispatchEvent?.(new Event("resize"));`,
         true,
@@ -904,50 +1066,63 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
       .catch(() => undefined);
   }
 
-  private attachProject(window: BrowserWindow, projectId: ProjectId, bounds: BrowserPaneBounds): void {
-    const runtime = this.runtimes.get(projectId);
-    if (!runtime) {
+  private attachActiveTab(window: BrowserWindow, projectId: ProjectId, bounds: BrowserPaneBounds): void {
+    const projectRuntime = this.runtimes.get(projectId);
+    const activeTab = this.getActiveTab(projectRuntime);
+    if (!activeTab) {
       return;
     }
+
     const contentView = (window as BrowserWindow & {
-      contentView: { addChildView: (view: Electron.WebContentsView) => void; removeChildView: (view: Electron.WebContentsView) => void };
+      contentView: {
+        addChildView: (view: Electron.WebContentsView) => void;
+        removeChildView: (view: Electron.WebContentsView) => void;
+      };
     }).contentView;
 
-    if (this.attachedProjectId && this.attachedProjectId !== projectId) {
-      const attached = this.runtimes.get(this.attachedProjectId);
-      if (attached) {
-        contentView.removeChildView(attached.view);
+    const sameAttachment =
+      this.attachedProjectId === projectId && this.attachedTabId === activeTab.tabId;
+
+    if (!sameAttachment && this.attachedProjectId && this.attachedTabId) {
+      const attachedProjectRuntime = this.runtimes.get(this.attachedProjectId);
+      const attachedTab = attachedProjectRuntime?.tabs.get(this.attachedTabId) ?? null;
+      if (attachedTab) {
+        contentView.removeChildView(attachedTab.view);
       }
     }
-    if (this.attachedProjectId !== projectId) {
-      contentView.addChildView(runtime.view);
+    if (!sameAttachment) {
+      contentView.addChildView(activeTab.view);
     }
-    this.applyBounds(runtime, bounds, { forceViewportRefresh: true });
+
+    this.applyBounds(activeTab, bounds, { forceViewportRefresh: true });
     this.attachedProjectId = projectId;
-    this.scheduleAttachedBoundsReapply(projectId);
+    this.attachedTabId = activeTab.tabId;
+    this.scheduleAttachedBoundsReapply(projectId, activeTab.tabId);
   }
 
-  private scheduleAttachedBoundsReapply(projectId: ProjectId): void {
+  private scheduleAttachedBoundsReapply(projectId: ProjectId, tabId: BrowserTabId): void {
     for (const delayMs of ATTACHED_BOUNDS_REAPPLY_DELAYS_MS) {
       globalThis.setTimeout(() => {
-        void this.reapplyAttachedBounds(projectId);
+        void this.reapplyAttachedBounds(projectId, tabId);
       }, delayMs);
     }
   }
 
-  private async reapplyAttachedBounds(projectId: ProjectId): Promise<void> {
+  private async reapplyAttachedBounds(projectId: ProjectId, tabId: BrowserTabId): Promise<void> {
     const requestVersion = this.paneRequestVersion;
     if (
       !this.window ||
       !this.paneOpen ||
       !this.paneBounds ||
       this.paneProjectId !== projectId ||
-      this.attachedProjectId !== projectId
+      this.attachedProjectId !== projectId ||
+      this.attachedTabId !== tabId
     ) {
       return;
     }
-    const runtime = this.runtimes.get(projectId);
-    if (!runtime) {
+    const projectRuntime = this.runtimes.get(projectId);
+    const tab = projectRuntime?.tabs.get(tabId);
+    if (!tab) {
       return;
     }
     const measuredBounds = await readIntegratedBrowserViewportBounds(this.window);
@@ -957,30 +1132,47 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
       !this.paneOpen ||
       !this.paneBounds ||
       this.paneProjectId !== projectId ||
-      this.attachedProjectId !== projectId
+      this.attachedProjectId !== projectId ||
+      this.attachedTabId !== tabId
     ) {
       return;
     }
     if (measuredBounds) {
       this.paneBounds = measuredBounds;
     }
-    this.applyBounds(runtime, this.paneBounds, { forceViewportRefresh: true });
+    this.applyBounds(tab, this.paneBounds, { forceViewportRefresh: true });
   }
 
   private detachAttachedView(window: BrowserWindow): void {
-    if (!this.attachedProjectId) {
+    if (!this.attachedProjectId || !this.attachedTabId) {
       return;
     }
-    const runtime = this.runtimes.get(this.attachedProjectId);
-    if (!runtime) {
+    const projectRuntime = this.runtimes.get(this.attachedProjectId);
+    const tab = projectRuntime?.tabs.get(this.attachedTabId) ?? null;
+    if (!tab) {
       this.attachedProjectId = null;
+      this.attachedTabId = null;
       return;
     }
     const contentView = (window as BrowserWindow & {
       contentView: { removeChildView: (view: Electron.WebContentsView) => void };
     }).contentView;
-    contentView.removeChildView(runtime.view);
+    contentView.removeChildView(tab.view);
     this.attachedProjectId = null;
+    this.attachedTabId = null;
+  }
+
+  private findTabByWebContentsId(
+    webContentsId: number,
+  ): { tab: BrowserTabRuntimeRecord } | null {
+    for (const projectRuntime of this.runtimes.values()) {
+      for (const tab of projectRuntime.tabs.values()) {
+        if (tab.view.webContents.id === webContentsId) {
+          return { tab };
+        }
+      }
+    }
+    return null;
   }
 
   private normalizeUrl(value: string): string {

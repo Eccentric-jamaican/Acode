@@ -289,6 +289,7 @@ export function syncServerReadModel(state: AppState, readModel: OrchestrationRea
             id: message.id,
             role: message.role,
             text: message.text,
+            ...(message.turnId ? { turnId: message.turnId } : {}),
             createdAt: message.createdAt,
             streaming: message.streaming,
             ...(message.streaming ? {} : { completedAt: message.updatedAt }),

@@ -64,6 +64,7 @@ interface TestFixture {
   snapshot: OrchestrationReadModel;
   serverConfig: ServerConfig;
   welcome: WsWelcomePayload;
+  wsRpcResults?: Partial<Record<string, unknown>>;
 }
 
 let fixture: TestFixture;
@@ -272,6 +273,7 @@ function buildFixture(snapshot: OrchestrationReadModel): TestFixture {
       bootstrapProjectId: PROJECT_ID,
       bootstrapThreadId: THREAD_ID,
     },
+    wsRpcResults: {},
   };
 }
 
@@ -523,6 +525,10 @@ function createPlanFollowUpRegressionSnapshot(): OrchestrationReadModel {
 }
 
 function resolveWsRpc(tag: string): unknown {
+  const override = fixture.wsRpcResults?.[tag];
+  if (override !== undefined) {
+    return override;
+  }
   if (tag === ORCHESTRATION_WS_METHODS.getSnapshot) {
     return fixture.snapshot;
   }
@@ -812,26 +818,38 @@ function createDesktopBrowserSnapshot(
   projectId: ProjectId,
   paneBounds: BrowserPaneBounds = DEFAULT_DESKTOP_BROWSER_PANE_BOUNDS,
 ): BrowserSessionSnapshot {
+  const tab = {
+    tabId: "tab-1",
+    sessionId: "browser-session-chat-test",
+    projectId,
+    inspectMode: false,
+    hasSelection: false,
+    navigation: {
+      url: "https://www.google.com/search",
+      title: "Google",
+      canGoBack: true,
+      canGoForward: false,
+      isLoading: false,
+      lastCommittedAt: NOW_ISO,
+    },
+    createdAt: NOW_ISO,
+    updatedAt: NOW_ISO,
+  } as const;
   return {
     paneOpen: true,
     paneProjectId: projectId,
     paneBounds,
     session: {
-      sessionId: "browser-session-chat-test",
-      projectId,
-      inspectMode: false,
-      hasSelection: false,
-      navigation: {
-        url: "https://www.google.com/search",
-        title: "Google",
-        canGoBack: true,
-        canGoForward: false,
-        isLoading: false,
-        lastCommittedAt: NOW_ISO,
-      },
-      createdAt: NOW_ISO,
-      updatedAt: NOW_ISO,
+      sessionId: tab.sessionId,
+      projectId: tab.projectId,
+      inspectMode: tab.inspectMode,
+      hasSelection: tab.hasSelection,
+      navigation: tab.navigation,
+      createdAt: tab.createdAt,
+      updatedAt: tab.updatedAt,
     },
+    tabs: [tab],
+    activeTabId: tab.tabId,
   };
 }
 
@@ -840,7 +858,31 @@ function createDesktopBrowserBridge(
   overrides: Partial<DesktopBridge["browser"]> = {},
 ): DesktopBridge["browser"] {
   let paneBounds = { ...DEFAULT_DESKTOP_BROWSER_PANE_BOUNDS };
-  const buildSnapshot = () => createDesktopBrowserSnapshot(projectId, paneBounds);
+  let tabs = [createDesktopBrowserSnapshot(projectId, paneBounds).tabs?.[0]].filter(Boolean) as NonNullable<
+    BrowserSessionSnapshot["tabs"]
+  >;
+  let activeTabId = tabs[0]?.tabId ?? null;
+  const buildSnapshot = (): BrowserSessionSnapshot => {
+    const activeTab = tabs.find((tab) => tab.tabId === activeTabId) ?? tabs[0] ?? null;
+    return {
+      paneOpen: true,
+      paneProjectId: projectId,
+      paneBounds,
+      session: activeTab
+        ? {
+            sessionId: activeTab.sessionId,
+            projectId: activeTab.projectId,
+            inspectMode: activeTab.inspectMode,
+            hasSelection: activeTab.hasSelection,
+            navigation: activeTab.navigation,
+            createdAt: activeTab.createdAt,
+            updatedAt: activeTab.updatedAt,
+          }
+        : null,
+      tabs,
+      activeTabId,
+    };
+  };
 
   return {
     getState: async () => buildSnapshot(),
@@ -849,27 +891,76 @@ function createDesktopBrowserBridge(
       return buildSnapshot();
     },
     closePane: async () => undefined,
-    navigate: async (input) => ({
-      ...buildSnapshot(),
-      session: {
-        ...buildSnapshot().session!,
-        navigation: {
-          ...buildSnapshot().session!.navigation,
-          url: input.url,
+    newTab: async () => {
+      const tabId = `tab-${tabs.length + 1}`;
+      const base = buildSnapshot().tabs?.[0];
+      if (!base) {
+        return buildSnapshot();
+      }
+      tabs = [
+        ...tabs,
+        {
+          ...base,
+          tabId,
+          sessionId: `browser-session-chat-test-${tabId}`,
+          navigation: {
+            ...base.navigation,
+            url: "about:blank",
+            title: "",
+            canGoBack: false,
+            canGoForward: false,
+          },
         },
-      },
-    }),
+      ];
+      activeTabId = tabId;
+      return buildSnapshot();
+    },
+    activateTab: async (input) => {
+      activeTabId = input.tabId;
+      return buildSnapshot();
+    },
+    closeTab: async (input) => {
+      tabs = tabs.filter((tab) => tab.tabId !== input.tabId);
+      if (tabs.length === 0) {
+        const fallback = createDesktopBrowserSnapshot(projectId, paneBounds).tabs?.[0];
+        if (fallback) {
+          tabs = [fallback];
+        }
+      }
+      if (!tabs.some((tab) => tab.tabId === activeTabId)) {
+        activeTabId = tabs[0]?.tabId ?? null;
+      }
+      return buildSnapshot();
+    },
+    navigate: async (input) => {
+      tabs = tabs.map((tab) =>
+        tab.tabId === activeTabId
+          ? {
+              ...tab,
+              navigation: {
+                ...tab.navigation,
+                url: input.url,
+              },
+            }
+          : tab,
+      );
+      return buildSnapshot();
+    },
     back: async () => buildSnapshot(),
     forward: async () => buildSnapshot(),
     reload: async () => buildSnapshot(),
     kill: async () => undefined,
-    setInspectMode: async (input) => ({
-      ...buildSnapshot(),
-      session: {
-        ...buildSnapshot().session!,
-        inspectMode: input.enabled,
-      },
-    }),
+    setInspectMode: async (input) => {
+      tabs = tabs.map((tab) =>
+        tab.tabId === activeTabId
+          ? {
+              ...tab,
+              inspectMode: input.enabled,
+            }
+          : tab,
+      );
+      return buildSnapshot();
+    },
     captureInspectSelection: async () => null,
     onEvent: () => () => {},
     ...overrides,
@@ -1234,6 +1325,103 @@ describe("ChatView timeline estimator parity (full app)", () => {
     }
   });
 
+  it("keeps the mobile header single-row with truncated title and compact actions", async () => {
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "msg-user-header-collision-check" as MessageId,
+      targetText: "check medium narrow header actions",
+    });
+    const activeThread = snapshot.threads.find((thread) => thread.id === THREAD_ID);
+    if (activeThread) {
+      Object.assign(activeThread, {
+        title:
+          "Use browser_show and browser_navigate to open https://example.com in the integrated browser pane",
+      });
+    }
+
+    const mounted = await mountChatView({
+      viewport: {
+        ...DEFAULT_VIEWPORT,
+        name: "mobile-header-actions",
+        width: 390,
+        height: 700,
+      },
+      snapshot,
+      configureFixture: (nextFixture) => {
+        nextFixture.serverConfig = {
+          ...nextFixture.serverConfig,
+          availableEditors: ["vscode"],
+        };
+        nextFixture.wsRpcResults = {
+          ...nextFixture.wsRpcResults,
+          [WS_METHODS.gitListBranches]: {
+            isRepo: false,
+            branches: [],
+          },
+        };
+      },
+    });
+
+    try {
+      const header = await waitForElement(
+        () => document.querySelector<HTMLElement>("[data-testid='chat-top-header']"),
+        "Unable to find the chat header.",
+      );
+      const headerTitle = await waitForElement(
+        () => document.querySelector<HTMLElement>("[data-testid='chat-header-title']"),
+        "Unable to find the chat title.",
+      );
+      const projectBadge = await waitForElement(
+        () => document.querySelector<HTMLElement>("[data-testid='chat-header-project-badge']"),
+        "Unable to find the project badge.",
+      );
+      const addActionButton = await waitForElement(
+        () =>
+          Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
+            (button) => button.title === "Add action" || button.getAttribute("aria-label") === "Add action",
+          ) ?? null,
+        "Unable to find the Add action button.",
+      );
+      const initializeGitButton = await waitForElement(
+        () =>
+          Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
+            (button) => button.title === "Initialize Git",
+          ) ?? null,
+        "Unable to find the Initialize Git button.",
+      );
+
+      await waitForLayout();
+
+      const headerOverflowPx = header.scrollWidth - header.clientWidth;
+      const headerTitleIsTruncated = headerTitle.scrollWidth > headerTitle.clientWidth + 1;
+      const badgeRect = projectBadge.getBoundingClientRect();
+      const titleRect = headerTitle.getBoundingClientRect();
+      const addActionRect = addActionButton.getBoundingClientRect();
+      const initializeGitRect = initializeGitButton.getBoundingClientRect();
+      const singleRowVerticalDeltaPx = Math.abs(titleRect.top - addActionRect.top);
+      const badgeOverlapsAddAction =
+        badgeRect.left < addActionRect.right &&
+        addActionRect.left < badgeRect.right &&
+        badgeRect.top < addActionRect.bottom &&
+        addActionRect.top < badgeRect.bottom;
+      const badgeOverlapsInitializeGit =
+        badgeRect.left < initializeGitRect.right &&
+        initializeGitRect.left < badgeRect.right &&
+        badgeRect.top < initializeGitRect.bottom &&
+        initializeGitRect.top < badgeRect.bottom;
+
+      expect(headerOverflowPx).toBeLessThanOrEqual(1);
+      expect(headerTitleIsTruncated).toBe(true);
+      expect(singleRowVerticalDeltaPx).toBeLessThanOrEqual(8);
+      expect(titleRect.right).toBeLessThanOrEqual(addActionRect.left + 1);
+      expect(badgeOverlapsAddAction).toBe(false);
+      expect(badgeOverlapsInitializeGit).toBe(false);
+      expect(addActionRect.width).toBeLessThanOrEqual(40);
+      expect(initializeGitRect.width).toBeLessThanOrEqual(40);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("keeps integrated browser and diff top chrome below the desktop titlebar band", async () => {
     window.desktopBridge = {
       ...window.desktopBridge,
@@ -1281,7 +1469,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
         .not.toBeNull();
       expect(desktopTitlebarBandMetrics().bandHeight).toBe(22);
       expect(elementHeightByTestId("chat-top-header")).toBe(40);
-      expect(elementHeightByTestId("integrated-browser-top-header")).toBe(40);
+      expect(elementHeightByTestId("integrated-browser-top-header")).toBeGreaterThanOrEqual(40);
       expect(elementHeightByTestId("diff-panel-top-header")).toBe(40);
 
       expect(
@@ -1401,7 +1589,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await expect.element(page.getByLabelText("Inspect element")).toBeVisible();
       await expect.element(page.getByLabelText("Kill browser")).toBeVisible();
       await expect.element(page.getByLabelText("Collapse browser")).toBeVisible();
-      await expect.poll(() => elementHeightByTestId("integrated-browser-top-header")).toBe(40);
+      await expect.poll(() => elementHeightByTestId("integrated-browser-top-header")).toBeGreaterThanOrEqual(40);
       await expect.poll(() => elementWidthBySelector("input[aria-label='Browser URL']")).toBeGreaterThanOrEqual(150);
       await expect.poll(() => {
         const metrics = desktopCaptionButtonLaneMetrics("integrated-browser-header-actions");

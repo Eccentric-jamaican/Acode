@@ -1017,6 +1017,13 @@ export default function ChatView({ threadId }: ChatViewProps) {
     }
     return byMessageId;
   }, [turnDiffSummaries]);
+  const turnDiffSummaryByTurnId = useMemo(() => {
+    const byTurnId = new Map<TurnId, TurnDiffSummary>();
+    for (const summary of turnDiffSummaries) {
+      byTurnId.set(summary.turnId, summary);
+    }
+    return byTurnId;
+  }, [turnDiffSummaries]);
   const revertTurnCountByUserMessageId = useMemo(() => {
     const byUserMessageId = new Map<MessageId, number>();
     for (let index = 0; index < timelineEntries.length; index += 1) {
@@ -1033,7 +1040,11 @@ export default function ChatView({ threadId }: ChatViewProps) {
         if (nextEntry.message.role === "user") {
           break;
         }
-        const summary = turnDiffSummaryByAssistantMessageId.get(nextEntry.message.id);
+        const summary =
+          turnDiffSummaryByAssistantMessageId.get(nextEntry.message.id) ??
+          (nextEntry.message.turnId
+            ? turnDiffSummaryByTurnId.get(nextEntry.message.turnId)
+            : undefined);
         if (!summary) {
           continue;
         }
@@ -1048,7 +1059,12 @@ export default function ChatView({ threadId }: ChatViewProps) {
     }
 
     return byUserMessageId;
-  }, [inferredCheckpointTurnCountByTurnId, timelineEntries, turnDiffSummaryByAssistantMessageId]);
+  }, [
+    inferredCheckpointTurnCountByTurnId,
+    timelineEntries,
+    turnDiffSummaryByAssistantMessageId,
+    turnDiffSummaryByTurnId,
+  ]);
 
   const completionSummary = useMemo(() => {
     if (!latestTurnSettled) return null;
@@ -3394,6 +3410,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
             completionDividerBeforeEntryId={completionDividerBeforeEntryId}
             completionSummary={completionSummary}
             turnDiffSummaryByAssistantMessageId={turnDiffSummaryByAssistantMessageId}
+            turnDiffSummaryByTurnId={turnDiffSummaryByTurnId}
             nowIso={nowIso}
             expandedWorkGroups={expandedWorkGroups}
             onToggleWorkGroup={onToggleWorkGroup}
@@ -3971,31 +3988,59 @@ const ChatHeader = memo(function ChatHeader({
   onToggleDiff,
   onToggleBrowser,
 }: ChatHeaderProps) {
+  const hasConstrainedHeaderWidth = browserPaneOpen || diffOpen;
+  const hasSecondaryBadges = Boolean(activeProjectName || activeTaskTitle);
+  const headerTitleWidthClass = hasConstrainedHeaderWidth
+    ? hasSecondaryBadges
+      ? "max-w-[8ch] min-[420px]:max-w-[10ch] min-[480px]:max-w-[12ch] sm:max-w-[14ch] md:max-w-[18ch] lg:max-w-[20ch]"
+      : "max-w-[11ch] min-[480px]:max-w-[16ch] sm:max-w-[20ch] md:max-w-[24ch] lg:max-w-[28ch]"
+    : hasSecondaryBadges
+      ? "max-w-[10ch] min-[420px]:max-w-[12ch] min-[480px]:max-w-[14ch] sm:max-w-[18ch] md:max-w-[22ch] lg:max-w-[26ch]"
+      : "max-w-[14ch] min-[480px]:max-w-[20ch] sm:max-w-[32ch] min-[1100px]:max-w-none";
+  const projectBadgeWidthClass = hasConstrainedHeaderWidth
+    ? hasSecondaryBadges
+      ? "max-w-[5.5ch] min-[420px]:max-w-[7ch] min-[480px]:max-w-[9ch] sm:max-w-[11ch]"
+      : "max-w-[7ch] min-[480px]:max-w-[9ch] sm:max-w-[10ch]"
+    : hasSecondaryBadges
+      ? "max-w-[6.5ch] min-[420px]:max-w-[8ch] min-[480px]:max-w-[10ch] sm:max-w-[14ch]"
+      : "max-w-[8ch] min-[480px]:max-w-[11ch] sm:max-w-28";
+
   return (
-    <div className="flex min-w-0 flex-1 items-center gap-2">
-      <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden sm:gap-3">
+    <div className="grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5 sm:gap-2">
+      <div className="flex min-w-0 items-center gap-2 overflow-hidden sm:gap-3">
         <SidebarInsetTrigger className="shrink-0 md:hidden" />
         <h2
-          className="min-w-0 shrink truncate text-sm font-medium text-foreground"
+          className={cn(
+            "min-w-0 shrink truncate text-sm font-medium text-foreground",
+            headerTitleWidthClass,
+          )}
           data-testid="chat-header-title"
           title={activeThreadTitle}
         >
           {activeThreadTitle}
         </h2>
         {activeProjectName && (
-          <Badge variant="outline" className="max-w-28 shrink-0 truncate">
-            {activeProjectName}
+          <Badge
+            variant="outline"
+            className={cn(
+              "min-w-0 shrink overflow-hidden justify-start px-1.5",
+              projectBadgeWidthClass,
+            )}
+            data-testid="chat-header-project-badge"
+            title={activeProjectName}
+          >
+            <span className="min-w-0 truncate">{activeProjectName}</span>
           </Badge>
         )}
         {activeTaskTitle ? (
-          <Badge variant="outline" className="max-w-36 shrink-0 truncate gap-1">
+          <Badge variant="outline" className="min-w-0 max-w-24 truncate gap-1 sm:max-w-36">
             <KanbanSquareIcon className="size-3" />
             <span className="truncate">{activeTaskTitle}</span>
           </Badge>
         ) : null}
       </div>
       <div
-        className="@container/header-actions desktop-top-edge-actions-safe flex min-w-0 flex-1 items-center justify-end gap-2 @sm/header-actions:gap-3"
+        className="@container/header-actions desktop-top-edge-actions-safe flex min-w-0 items-center justify-end justify-self-end gap-1.5 @lg/header-actions:gap-2"
         data-testid="chat-header-actions"
       >
         {activeProjectScripts && (
@@ -4726,11 +4771,11 @@ const OpenInPicker = memo(function OpenInPicker({
         onClick={() => openInEditor(effectiveEditor)}
       >
         {primaryOption?.Icon && <primaryOption.Icon aria-hidden="true" className="size-3.5" />}
-        <span className="sr-only @sm/header-actions:not-sr-only @sm/header-actions:ml-0.5">
+        <span className="sr-only @lg/header-actions:not-sr-only @lg/header-actions:ml-0.5">
           Open
         </span>
       </Button>
-      <GroupSeparator className="hidden @sm/header-actions:block" />
+      <GroupSeparator className="hidden @lg/header-actions:block" />
       <Menu>
         <MenuTrigger render={<Button aria-label="Copy options" size="icon-xs" variant="outline" />}>
           <ChevronDownIcon aria-hidden="true" className="size-4" />

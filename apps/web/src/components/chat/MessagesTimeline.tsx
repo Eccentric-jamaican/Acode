@@ -119,6 +119,7 @@ export interface MessagesTimelineProps {
   completionDividerBeforeEntryId: string | null;
   completionSummary: string | null;
   turnDiffSummaryByAssistantMessageId: Map<MessageId, TurnDiffSummary>;
+  turnDiffSummaryByTurnId: Map<TurnId, TurnDiffSummary>;
   nowIso: string;
   expandedWorkGroups: Record<string, boolean>;
   onToggleWorkGroup: (groupId: string) => void;
@@ -862,6 +863,7 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
     completionDividerBeforeEntryId,
     completionSummary,
     turnDiffSummaryByAssistantMessageId,
+    turnDiffSummaryByTurnId,
     nowIso,
     expandedWorkGroups,
     onToggleWorkGroup,
@@ -1669,7 +1671,11 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
                   />
                 </div>
                 {(() => {
-                  const turnSummary = turnDiffSummaryByAssistantMessageId.get(row.message.id);
+                  const turnSummary =
+                    turnDiffSummaryByAssistantMessageId.get(row.message.id) ??
+                    (row.message.turnId
+                      ? turnDiffSummaryByTurnId.get(row.message.turnId)
+                      : undefined);
                   if (!turnSummary) return null;
                   const checkpointFiles = turnSummary.files;
                   if (checkpointFiles.length === 0) return null;

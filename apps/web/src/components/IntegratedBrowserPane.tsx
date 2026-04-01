@@ -2,6 +2,7 @@ import type {
   BrowserPaneBounds,
   BrowserInspectCapture,
   BrowserSessionSnapshot,
+  BrowserTabId,
   ProjectId,
   RuntimeMode,
   ThreadId,
@@ -26,6 +27,7 @@ import {
 } from "react";
 
 import { BROWSER_PANE_MIN_WIDTH, useBrowserPaneStore } from "~/browserPaneStore";
+import { useAppSettings } from "~/appSettings";
 import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { toastManager } from "~/components/ui/toast";
@@ -35,6 +37,8 @@ import { readNativeApi } from "~/nativeApi";
 import { cn } from "~/lib/utils";
 
 const BOUNDS_SETTLE_DELAYS_MS = [0, 50, 150, 300] as const;
+const CHAT_MIN_WIDTH_PX = 540;
+const BROWSER_MIN_EFFECTIVE_WIDTH_PX = 280;
 
 function arePaneBoundsEqual(left: BrowserPaneBounds | null, right: BrowserPaneBounds | null): boolean {
   return (
@@ -43,6 +47,11 @@ function arePaneBoundsEqual(left: BrowserPaneBounds | null, right: BrowserPaneBo
     left?.width === right?.width &&
     left?.height === right?.height
   );
+}
+
+function resolvePaneWidthClamp(width: number, containerWidth: number): number {
+  const maxWidth = Math.max(BROWSER_MIN_EFFECTIVE_WIDTH_PX, containerWidth - CHAT_MIN_WIDTH_PX);
+  return Math.max(BROWSER_MIN_EFFECTIVE_WIDTH_PX, Math.min(width, maxWidth));
 }
 
 function dataUrlToFile(dataUrl: string, name: string): File {
@@ -124,6 +133,7 @@ interface BrowserPaneProps {
 
 export default function IntegratedBrowserPane(props: BrowserPaneProps) {
   const { activeProjectId, activeThreadId } = props;
+  const { settings } = useAppSettings();
   const open = useBrowserPaneStore((state) => state.open);
   const width = useBrowserPaneStore((state) => state.width);
   const setOpen = useBrowserPaneStore((state) => state.setOpen);
@@ -135,7 +145,13 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
   const [snapshot, setSnapshot] = useState<BrowserSessionSnapshot | null>(null);
   const [urlInput, setUrlInput] = useState("");
   const [isSyncingBounds, setIsSyncingBounds] = useState(false);
+  const [containerWidth, setContainerWidth] = useState(() =>
+    typeof window === "undefined" ? 0 : window.innerWidth,
+  );
+  const activeProjectIdRef = useRef<ProjectId | null>(activeProjectId);
+  const activeThreadIdRef = useRef<ThreadId | null>(activeThreadId);
   const captureInFlightRef = useRef(false);
+  const pendingCapturesRef = useRef(0);
   const lastSyncedBoundsRef = useRef<BrowserPaneBounds | null>(null);
   const pendingBoundsRef = useRef<BrowserPaneBounds | null>(null);
   const syncInFlightRef = useRef(false);
@@ -143,6 +159,17 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
   const isDesktopBrowserAvailable =
     api && typeof window !== "undefined" && Boolean(window.desktopBridge?.browser);
   const session = snapshot?.session ?? null;
+  const tabs = snapshot?.tabs ?? [];
+  const activeTabId = snapshot?.activeTabId ?? null;
+  const activeTab =
+    (activeTabId ? tabs.find((tab) => tab.tabId === activeTabId) : null) ??
+    (tabs.length > 0 ? tabs[0] : null);
+  const effectivePaneWidth =
+    containerWidth > 0 ? resolvePaneWidthClamp(width, containerWidth) : width;
+  const maxPaneWidth =
+    containerWidth > 0
+      ? Math.max(BROWSER_MIN_EFFECTIVE_WIDTH_PX, containerWidth - CHAT_MIN_WIDTH_PX)
+      : width;
 
   const handleBrowserError = useCallback((action: string, error: unknown) => {
     if (isBenignBrowserError(error)) {
@@ -168,6 +195,73 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
   );
 
   useEffect(() => {
+    activeProjectIdRef.current = activeProjectId;
+    activeThreadIdRef.current = activeThreadId;
+  }, [activeProjectId, activeThreadId]);
+
+  const drainCaptureQueue = useCallback(() => {
+    if (!api?.browser || captureInFlightRef.current) {
+      return;
+    }
+
+    const projectId = activeProjectIdRef.current;
+    const threadId = activeThreadIdRef.current;
+    if (!projectId || !threadId || pendingCapturesRef.current <= 0) {
+      return;
+    }
+
+    pendingCapturesRef.current -= 1;
+    captureInFlightRef.current = true;
+    void api.browser
+      .captureInspectSelection({ projectId })
+      .then(async (capture) => {
+        if (!capture) {
+          return;
+        }
+
+        const liveThreadId = activeThreadIdRef.current;
+        const liveProjectId = activeProjectIdRef.current;
+        if (!liveThreadId || !liveProjectId || liveProjectId !== projectId) {
+          return;
+        }
+
+        const prompt = buildInspectPrompt(capture);
+        const currentPrompt =
+          useComposerDraftStore.getState().draftsByThreadId[liveThreadId]?.prompt ?? "";
+        const nextPrompt = currentPrompt.trim().length > 0 ? `${currentPrompt}\n\n${prompt}` : prompt;
+        setPrompt(liveThreadId, nextPrompt);
+        addImage(liveThreadId, createImageAttachment(capture.screenshotDataUrl));
+
+        if (settings.keepInspectModeAfterCapture) {
+          const nextSnapshot = await runBrowserAction("restore inspect mode", () =>
+            api.browser.setInspectMode({ projectId, enabled: true }),
+          );
+          if (nextSnapshot) {
+            setSnapshot(nextSnapshot);
+          }
+        }
+      })
+      .catch((error) => {
+        handleBrowserError("capture inspect selection", error);
+      })
+      .finally(() => {
+        captureInFlightRef.current = false;
+        const projectIdAfterCapture = activeProjectIdRef.current;
+        if (api?.browser && projectIdAfterCapture) {
+          void api.browser
+            .getState({ projectId: projectIdAfterCapture })
+            .then((nextSnapshot) => {
+              setSnapshot(nextSnapshot);
+            })
+            .catch(() => undefined);
+        }
+        if (pendingCapturesRef.current > 0) {
+          drainCaptureQueue();
+        }
+      });
+  }, [addImage, api, handleBrowserError, runBrowserAction, setPrompt, settings.keepInspectModeAfterCapture]);
+
+  useEffect(() => {
     if (!api?.browser) {
       return;
     }
@@ -182,44 +276,18 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
         setSnapshot(event.snapshot);
         return;
       }
-      if (
-        event.type === "inspect.selection.changed" &&
-        event.hasSelection &&
-        activeThreadId &&
-        !captureInFlightRef.current
-      ) {
-        captureInFlightRef.current = true;
-        void api.browser
-          .captureInspectSelection({ projectId: activeProjectId })
-          .then((capture) => {
-            if (!capture) {
-              return;
-            }
-            const prompt = buildInspectPrompt(capture);
-            const currentPrompt =
-              useComposerDraftStore.getState().draftsByThreadId[activeThreadId]?.prompt ?? "";
-            const nextPrompt =
-              currentPrompt.trim().length > 0 ? `${currentPrompt}\n\n${prompt}` : prompt;
-            setPrompt(activeThreadId, nextPrompt);
-            addImage(activeThreadId, createImageAttachment(capture.screenshotDataUrl));
-          })
-          .catch((error) => {
-            handleBrowserError("capture inspect selection", error);
-          })
-          .finally(() => {
-            captureInFlightRef.current = false;
-          });
+      if (event.type === "inspect.selection.changed" && event.hasSelection && activeThreadId) {
+        pendingCapturesRef.current += 1;
+        drainCaptureQueue();
       }
     });
     return unsubscribe;
   }, [
     activeProjectId,
     activeThreadId,
-    addImage,
     api,
-    handleBrowserError,
+    drainCaptureQueue,
     setOpen,
-    setPrompt,
   ]);
 
   useEffect(() => {
@@ -237,9 +305,9 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
   }, [activeProjectId, api]);
 
   useEffect(() => {
-    const nextUrl = session?.navigation.url ?? "";
+    const nextUrl = activeTab?.navigation.url ?? session?.navigation.url ?? "";
     setUrlInput(nextUrl);
-  }, [session?.navigation.url]);
+  }, [activeTab?.navigation.url, session?.navigation.url]);
 
   useEffect(() => {
     if (!open || !activeProjectId) {
@@ -248,6 +316,11 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
       syncInFlightRef.current = false;
     }
   }, [activeProjectId, open]);
+
+  useEffect(() => {
+    pendingCapturesRef.current = 0;
+    captureInFlightRef.current = false;
+  }, [activeProjectId, activeThreadId]);
 
   useEffect(
     () => () => {
@@ -258,6 +331,26 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
     },
     [api],
   );
+
+  useLayoutEffect(() => {
+    const parent = paneRef.current?.parentElement;
+    if (!parent) {
+      return;
+    }
+
+    const updateContainerWidth = () => {
+      setContainerWidth(parent.clientWidth);
+    };
+
+    updateContainerWidth();
+    const observer = new ResizeObserver(updateContainerWidth);
+    observer.observe(parent);
+    window.addEventListener("resize", updateContainerWidth);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updateContainerWidth);
+    };
+  }, [open]);
 
   useLayoutEffect(() => {
     if (!open || !api?.browser || !activeProjectId || !viewportRef.current) {
@@ -361,7 +454,7 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
       window.removeEventListener("resize", requestBoundsSync);
       window.removeEventListener("scroll", requestBoundsSync, true);
     };
-  }, [activeProjectId, api, open, runBrowserAction, width]);
+  }, [activeProjectId, api, effectivePaneWidth, open, runBrowserAction]);
 
   const onResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!paneRef.current) {
@@ -371,7 +464,8 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
     const startWidth = width;
     const onMove = (moveEvent: PointerEvent) => {
       const delta = startX - moveEvent.clientX;
-      setWidth(startWidth + delta);
+      const nextWidth = startWidth + delta;
+      setWidth(Math.min(nextWidth, maxPaneWidth));
     };
     const onUp = () => {
       window.removeEventListener("pointermove", onMove);
@@ -404,6 +498,47 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
     void navigate();
   };
 
+  const createTab = () => {
+    if (!api?.browser || !activeProjectId) {
+      return;
+    }
+    void runBrowserAction("new browser tab", () =>
+      api.browser.newTab({
+        projectId: activeProjectId,
+      }),
+    ).then((nextSnapshot) => {
+      if (nextSnapshot) {
+        setSnapshot(nextSnapshot);
+      }
+    });
+  };
+
+  const activateTab = (tabId: BrowserTabId) => {
+    if (!api?.browser || !activeProjectId) {
+      return;
+    }
+    void runBrowserAction("switch browser tab", () =>
+      api.browser.activateTab({ projectId: activeProjectId, tabId }),
+    ).then((nextSnapshot) => {
+      if (nextSnapshot) {
+        setSnapshot(nextSnapshot);
+      }
+    });
+  };
+
+  const closeTab = (tabId: BrowserTabId) => {
+    if (!api?.browser || !activeProjectId) {
+      return;
+    }
+    void runBrowserAction("close browser tab", () =>
+      api.browser.closeTab({ projectId: activeProjectId, tabId }),
+    ).then((nextSnapshot) => {
+      if (nextSnapshot) {
+        setSnapshot(nextSnapshot);
+      }
+    });
+  };
+
   const browserOpen = open && isDesktopBrowserAvailable && activeProjectId !== null;
   const controlsDisabled = !browserOpen || !activeProjectId || !api?.browser;
 
@@ -418,8 +553,8 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
       data-testid="integrated-browser-pane"
       style={
         {
-          width,
-          minWidth: BROWSER_PANE_MIN_WIDTH,
+          width: effectivePaneWidth,
+          minWidth: Math.min(BROWSER_PANE_MIN_WIDTH, effectivePaneWidth),
         } as CSSProperties
       }
     >
@@ -428,133 +563,185 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
         onPointerDown={onResizeStart}
       />
       <div className="flex min-w-0 flex-1 flex-col">
-        <div
-          className="flex h-[var(--app-desktop-content-header-height)] min-w-0 shrink-0 items-center gap-2 border-b border-border px-2"
-          data-testid="integrated-browser-top-header"
-        >
-          <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
+        <div className="flex min-w-0 shrink-0 flex-col border-b border-border" data-testid="integrated-browser-top-header">
+          <div className="flex h-8 min-w-0 items-center gap-1 px-2">
+            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+              {tabs.map((tab) => {
+                const isActive = tab.tabId === activeTab?.tabId;
+                const tabLabel = tab.navigation.title?.trim() || tab.navigation.url || "New tab";
+                return (
+                  <button
+                    key={tab.tabId}
+                    type="button"
+                    className={cn(
+                      "group flex min-w-0 max-w-[180px] items-center gap-1 rounded border px-2 py-0.5 text-xs",
+                      isActive
+                        ? "border-border bg-muted/70 text-foreground"
+                        : "border-transparent bg-muted/40 text-muted-foreground hover:border-border/70 hover:text-foreground",
+                    )}
+                    onClick={() => activateTab(tab.tabId)}
+                    title={tabLabel}
+                  >
+                    <span className="truncate">{tabLabel}</span>
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Close tab ${tabLabel}`}
+                      className="rounded p-0.5 opacity-70 hover:bg-background hover:opacity-100"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        closeTab(tab.tabId);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          closeTab(tab.tabId);
+                        }
+                      }}
+                    >
+                      <XIcon className="size-3" />
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
             <Button
               type="button"
               variant="ghost"
               size="icon-xs"
-              aria-label="Back"
-              disabled={controlsDisabled || !session?.navigation.canGoBack}
-              onClick={() => {
-                if (!activeProjectId) {
-                  return;
-                }
-                void runBrowserAction("go back", () =>
-                  api.browser.back({ projectId: activeProjectId }),
-                ).then((nextSnapshot) => {
-                  if (nextSnapshot) {
-                    setSnapshot(nextSnapshot);
-                  }
-                });
-              }}
-            >
-              <ArrowLeftIcon />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              aria-label="Forward"
-              disabled={controlsDisabled || !session?.navigation.canGoForward}
-              onClick={() => {
-                if (!activeProjectId) {
-                  return;
-                }
-                void runBrowserAction("go forward", () =>
-                  api.browser.forward({ projectId: activeProjectId }),
-                ).then((nextSnapshot) => {
-                  if (nextSnapshot) {
-                    setSnapshot(nextSnapshot);
-                  }
-                });
-              }}
-            >
-              <ArrowRightIcon />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              aria-label="Reload"
+              aria-label="New tab"
               disabled={controlsDisabled}
-              onClick={() => {
-                if (!activeProjectId) {
-                  return;
-                }
-                void runBrowserAction("reload page", () =>
-                  api.browser.reload({ projectId: activeProjectId }),
-                ).then((nextSnapshot) => {
-                  if (nextSnapshot) {
-                    setSnapshot(nextSnapshot);
-                  }
-                });
-              }}
+              onClick={createTab}
             >
-              <RefreshCwIcon className={cn(session?.navigation.isLoading && "animate-spin")} />
+              +
             </Button>
-            <Input
-              value={urlInput}
-              onChange={(event) => setUrlInput(event.target.value)}
-              onKeyDown={onUrlKeyDown}
-              className="h-8 min-w-[160px] flex-1 basis-0 rounded-md border-border bg-muted/40 text-xs"
-              spellCheck={false}
-              aria-label="Browser URL"
-            />
           </div>
-          <div className="flex shrink-0 items-center gap-1" data-testid="integrated-browser-header-actions">
-            <Toggle
-              pressed={session?.inspectMode === true}
-              onPressedChange={(next) => {
-                if (!activeProjectId) {
-                  return;
-                }
-                void runBrowserAction("toggle inspect mode", () =>
-                  api.browser.setInspectMode({ projectId: activeProjectId, enabled: next }),
-                ).then((nextSnapshot) => {
-                  if (nextSnapshot) {
-                    setSnapshot(nextSnapshot);
+          <div className="flex h-9 min-w-0 items-center gap-2 px-2">
+            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Back"
+                disabled={controlsDisabled || !activeTab?.navigation.canGoBack}
+                onClick={() => {
+                  if (!activeProjectId) {
+                    return;
                   }
-                });
-              }}
-              variant="outline"
-              size="sm"
-              aria-label="Inspect element"
-              disabled={controlsDisabled}
-            >
-              <SearchIcon className="size-3.5" />
-            </Toggle>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              aria-label="Kill browser"
-              disabled={controlsDisabled}
-              onClick={() => {
-                if (!activeProjectId) {
-                  return;
-                }
-                void runBrowserAction("kill browser", () =>
-                  api.browser.kill({ projectId: activeProjectId }),
-                ).then(() => {
-                  setSnapshot(null);
-                });
-              }}
-            >
-              <GlobeIcon />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              aria-label="Collapse browser"
-              onClick={() => setOpen(false)}
-            >
-              <XIcon />
-            </Button>
+                  void runBrowserAction("go back", () =>
+                    api.browser.back({ projectId: activeProjectId }),
+                  ).then((nextSnapshot) => {
+                    if (nextSnapshot) {
+                      setSnapshot(nextSnapshot);
+                    }
+                  });
+                }}
+              >
+                <ArrowLeftIcon />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Forward"
+                disabled={controlsDisabled || !activeTab?.navigation.canGoForward}
+                onClick={() => {
+                  if (!activeProjectId) {
+                    return;
+                  }
+                  void runBrowserAction("go forward", () =>
+                    api.browser.forward({ projectId: activeProjectId }),
+                  ).then((nextSnapshot) => {
+                    if (nextSnapshot) {
+                      setSnapshot(nextSnapshot);
+                    }
+                  });
+                }}
+              >
+                <ArrowRightIcon />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Reload"
+                disabled={controlsDisabled}
+                onClick={() => {
+                  if (!activeProjectId) {
+                    return;
+                  }
+                  void runBrowserAction("reload page", () =>
+                    api.browser.reload({ projectId: activeProjectId }),
+                  ).then((nextSnapshot) => {
+                    if (nextSnapshot) {
+                      setSnapshot(nextSnapshot);
+                    }
+                  });
+                }}
+              >
+                <RefreshCwIcon className={cn(activeTab?.navigation.isLoading && "animate-spin")} />
+              </Button>
+              <Input
+                value={urlInput}
+                onChange={(event) => setUrlInput(event.target.value)}
+                onKeyDown={onUrlKeyDown}
+                className="h-8 min-w-[120px] flex-1 basis-0 rounded-md border-border bg-muted/40 text-xs"
+                spellCheck={false}
+                aria-label="Browser URL"
+              />
+            </div>
+            <div className="flex shrink-0 items-center gap-1" data-testid="integrated-browser-header-actions">
+              <Toggle
+                pressed={activeTab?.inspectMode === true}
+                onPressedChange={(next) => {
+                  if (!activeProjectId) {
+                    return;
+                  }
+                  void runBrowserAction("toggle inspect mode", () =>
+                    api.browser.setInspectMode({ projectId: activeProjectId, enabled: next }),
+                  ).then((nextSnapshot) => {
+                    if (nextSnapshot) {
+                      setSnapshot(nextSnapshot);
+                    }
+                  });
+                }}
+                variant="outline"
+                size="sm"
+                aria-label="Inspect element"
+                disabled={controlsDisabled}
+              >
+                <SearchIcon className="size-3.5" />
+              </Toggle>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Kill browser"
+                disabled={controlsDisabled}
+                onClick={() => {
+                  if (!activeProjectId) {
+                    return;
+                  }
+                  void runBrowserAction("kill browser", () =>
+                    api.browser.kill({ projectId: activeProjectId }),
+                  ).then(() => {
+                    setSnapshot(null);
+                  });
+                }}
+              >
+                <GlobeIcon />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Collapse browser"
+                onClick={() => setOpen(false)}
+              >
+                <XIcon />
+              </Button>
+            </div>
           </div>
         </div>
         <div className="relative min-h-0 flex-1">
@@ -563,7 +750,7 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
             className="absolute inset-0"
             data-integrated-browser-native-viewport="true"
           />
-          {(isSyncingBounds || !session) && (
+          {(isSyncingBounds || !activeTab) && (
             <div className="absolute inset-0 flex items-center justify-center bg-background/80 text-xs text-muted-foreground">
               Loading browser...
             </div>

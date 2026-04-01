@@ -85,6 +85,51 @@ const TOOL_DEFINITIONS = [
     },
   },
   {
+    name: "browser_new_tab",
+    description: "Create a new browser tab and make it active.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectId: { type: "string" },
+        url: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "browser_activate_tab",
+    description: "Activate a browser tab by tab id.",
+    inputSchema: {
+      type: "object",
+      required: ["tabId"],
+      properties: {
+        projectId: { type: "string" },
+        tabId: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "browser_close_tab",
+    description: "Close a browser tab by tab id.",
+    inputSchema: {
+      type: "object",
+      required: ["tabId"],
+      properties: {
+        projectId: { type: "string" },
+        tabId: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "browser_list_tabs",
+    description: "List browser tabs and return the active tab id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectId: { type: "string" },
+      },
+    },
+  },
+  {
     name: "browser_navigate",
     description: "Navigate the project browser to a URL.",
     inputSchema: {
@@ -218,6 +263,14 @@ async function callTool(name: string, args: Record<string, unknown> | undefined)
       return client.call("browser.show", args);
     case "browser_kill":
       return client.call("browser.kill", args);
+    case "browser_new_tab":
+      return client.call("browser.new_tab", args);
+    case "browser_activate_tab":
+      return client.call("browser.activate_tab", args);
+    case "browser_close_tab":
+      return client.call("browser.close_tab", args);
+    case "browser_list_tabs":
+      return client.call("browser.list_tabs", args);
     case "browser_navigate":
       return client.call("browser.navigate", args);
     case "browser_back":

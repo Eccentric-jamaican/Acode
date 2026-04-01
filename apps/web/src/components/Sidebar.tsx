@@ -90,6 +90,7 @@ import {
   SidebarGroup,
   SidebarHeader,
   SidebarMenu,
+  SidebarMenuAction,
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarMenuSub,
@@ -640,6 +641,12 @@ const PRIMARY_NAV_ITEMS: Array<{
     label: "Skills",
     action: "placeholder",
     testId: "sidebar-primary-skills",
+  },
+  {
+    icon: LayoutGridIcon,
+    label: "Plugins",
+    action: "placeholder",
+    testId: "sidebar-primary-plugins",
   },
   {
     icon: KanbanSquareIcon ?? BriefcaseBusinessIcon,
@@ -2005,6 +2012,20 @@ export default function Sidebar() {
                 <FolderIcon className="size-3.5 shrink-0 text-muted-foreground/70" />
                 <span className="flex-1 truncate">{project.name}</span>
               </CollapsibleTrigger>
+              <SidebarMenuAction
+                showOnHover
+                aria-label={`New thread in ${project.name}`}
+                title={`New thread in ${project.name}`}
+                data-testid={`sidebar-project-new-thread-${project.id}`}
+                className="right-1.5 top-1.5 text-muted-foreground/70 hover:bg-accent/80 hover:text-foreground"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  void handleNewThread(project.id);
+                }}
+              >
+                <SquarePenIcon className="size-3.5" />
+              </SidebarMenuAction>
             </div>
             <CollapsibleContent>
               <SidebarMenuSub className="mx-0 mt-1 border-l border-border/60 px-0 py-0 pl-4">
@@ -2032,6 +2053,7 @@ export default function Sidebar() {
       handleProjectDragOver,
       handleProjectDragStart,
       handleProjectDrop,
+      handleNewThread,
       renderThreadRow,
       shouldShowProjectGroups,
       toggleProject,

@@ -15,6 +15,9 @@ import type {
   GitStatusResult,
 } from "./git";
 import type {
+  BrowserActivateTabInput,
+  BrowserCloseTabInput,
+  BrowserCreateTabInput,
   BrowserInspectCapture,
   BrowserNavigateInput,
   BrowserOpenInput,
@@ -129,6 +132,9 @@ export interface DesktopBridge {
     getState: (input: BrowserProjectInput) => Promise<BrowserSessionSnapshot>;
     open: (input: BrowserOpenInput) => Promise<BrowserSessionSnapshot>;
     closePane: () => Promise<void>;
+    newTab: (input: BrowserCreateTabInput) => Promise<BrowserSessionSnapshot>;
+    activateTab: (input: BrowserActivateTabInput) => Promise<BrowserSessionSnapshot>;
+    closeTab: (input: BrowserCloseTabInput) => Promise<BrowserSessionSnapshot>;
     navigate: (input: BrowserNavigateInput) => Promise<BrowserSessionSnapshot>;
     back: (input: BrowserProjectInput) => Promise<BrowserSessionSnapshot>;
     forward: (input: BrowserProjectInput) => Promise<BrowserSessionSnapshot>;
@@ -217,6 +223,9 @@ export interface NativeApi {
     getState: (input: BrowserProjectInput) => Promise<BrowserSessionSnapshot>;
     open: (input: BrowserOpenInput) => Promise<BrowserSessionSnapshot>;
     closePane: () => Promise<void>;
+    newTab: (input: BrowserCreateTabInput) => Promise<BrowserSessionSnapshot>;
+    activateTab: (input: BrowserActivateTabInput) => Promise<BrowserSessionSnapshot>;
+    closeTab: (input: BrowserCloseTabInput) => Promise<BrowserSessionSnapshot>;
     navigate: (input: BrowserNavigateInput) => Promise<BrowserSessionSnapshot>;
     back: (input: BrowserProjectInput) => Promise<BrowserSessionSnapshot>;
     forward: (input: BrowserProjectInput) => Promise<BrowserSessionSnapshot>;

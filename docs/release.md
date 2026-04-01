@@ -6,15 +6,12 @@ This document covers how to run desktop releases from one tag, first without sig
 
 - Trigger: push tag matching `v*.*.*`.
 - Runs quality gates first: lint, typecheck, test.
-- Builds four artifacts in parallel:
-  - macOS `arm64` DMG
-  - macOS `x64` DMG
-  - Linux `x64` AppImage
+- Builds one artifact:
   - Windows `x64` NSIS installer
 - Publishes one GitHub Release with all produced files.
 - Includes Electron auto-update metadata (for example `latest*.yml` and `*.blockmap`) in release assets.
 - Publishes the CLI package (`apps/server`, npm package `t3`) with OIDC trusted publishing.
-- Signing is optional and auto-detected per platform from secrets.
+- Windows signing is optional and auto-detected from Azure Trusted Signing secrets.
 
 ## Desktop auto-update notes
 
@@ -31,7 +28,7 @@ This document covers how to run desktop releases from one tag, first without sig
   - set `T3CODE_DESKTOP_UPDATE_GITHUB_TOKEN` (or `GH_TOKEN`) in the desktop app runtime environment.
   - the app forwards it as an `Authorization: Bearer <token>` request header for updater HTTP calls.
 - Required release assets for updater:
-  - platform installers (`.exe`, `.dmg`, `.AppImage`, plus macOS `.zip` for Squirrel.Mac update payloads)
+  - Windows installer (`.exe`)
   - `latest*.yml` metadata
   - `*.blockmap` files (used for differential downloads)
 
@@ -63,40 +60,10 @@ Use this first to validate the release pipeline.
    - `git tag v0.0.0-test.1`
    - `git push origin v0.0.0-test.1`
 3. Wait for `.github/workflows/release.yml` to finish.
-4. Verify the GitHub Release contains all platform artifacts.
-5. Download each artifact and sanity-check installation on each OS.
+4. Verify the GitHub Release contains the expected Windows artifacts.
+5. Download the installer and sanity-check installation on Windows.
 
-## 2) Apple signing + notarization setup (macOS)
-
-Required secrets used by the workflow:
-
-- `CSC_LINK`
-- `CSC_KEY_PASSWORD`
-- `APPLE_API_KEY`
-- `APPLE_API_KEY_ID`
-- `APPLE_API_ISSUER`
-
-Checklist:
-
-1. Apple Developer account access:
-   - Team has rights to create Developer ID certificates.
-2. Create `Developer ID Application` certificate.
-3. Export certificate + private key as `.p12` from Keychain.
-4. Base64-encode the `.p12` and store as `CSC_LINK`.
-5. Store the `.p12` export password as `CSC_KEY_PASSWORD`.
-6. In App Store Connect, create an API key (Team key).
-7. Add API key values:
-   - `APPLE_API_KEY`: contents of the downloaded `.p8`
-   - `APPLE_API_KEY_ID`: Key ID
-   - `APPLE_API_ISSUER`: Issuer ID
-8. Re-run a tag release and confirm macOS artifacts are signed/notarized.
-
-Notes:
-
-- `APPLE_API_KEY` is stored as raw key text in secrets.
-- The workflow writes it to a temporary `AuthKey_<id>.p8` file at runtime.
-
-## 3) Azure Trusted Signing setup (Windows)
+## 2) Azure Trusted Signing setup (Windows)
 
 Required secrets used by the workflow:
 
@@ -122,7 +89,7 @@ Checklist:
 6. Add Azure secrets listed above in GitHub Actions secrets.
 7. Re-run a tag release and confirm Windows installer is signed.
 
-## 4) Ongoing release checklist
+## 3) Ongoing release checklist
 
 1. Ensure `main` is green in CI.
 2. Bump app version as needed.
@@ -130,16 +97,14 @@ Checklist:
 4. Push tag.
 5. Verify workflow steps:
    - preflight passes
-   - all matrix builds pass
+   - Windows build passes
    - release job uploads expected files
 6. Smoke test downloaded artifacts.
 
-## 5) Troubleshooting
+## 4) Troubleshooting
 
-- macOS build unsigned when expected signed:
-  - Check all Apple secrets are populated and non-empty.
 - Windows build unsigned when expected signed:
   - Check all Azure ATS and auth secrets are populated and non-empty.
 - Build fails with signing error:
-  - Retry with secrets removed to confirm unsigned path still works.
+  - Retry with signing secrets removed to confirm unsigned path still works.
   - Re-check certificate/profile names and tenant/client credentials.

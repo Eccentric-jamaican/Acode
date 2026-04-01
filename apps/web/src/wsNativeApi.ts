@@ -294,6 +294,24 @@ export function createWsNativeApi(): NativeApi {
         }
         return window.desktopBridge.browser.closePane();
       },
+      newTab: async (input) => {
+        if (!window.desktopBridge?.browser) {
+          return desktopBrowserUnavailable();
+        }
+        return window.desktopBridge.browser.newTab(input);
+      },
+      activateTab: async (input) => {
+        if (!window.desktopBridge?.browser) {
+          return desktopBrowserUnavailable();
+        }
+        return window.desktopBridge.browser.activateTab(input);
+      },
+      closeTab: async (input) => {
+        if (!window.desktopBridge?.browser) {
+          return desktopBrowserUnavailable();
+        }
+        return window.desktopBridge.browser.closeTab(input);
+      },
       navigate: async (input) => {
         if (!window.desktopBridge?.browser) {
           return desktopBrowserUnavailable();

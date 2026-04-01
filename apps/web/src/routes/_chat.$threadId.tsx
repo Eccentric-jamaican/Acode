@@ -1,13 +1,15 @@
 import { ThreadId, type ProjectId, type RuntimeMode } from "@t3tools/contracts";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { Suspense, lazy, type ReactNode, useCallback, useEffect } from "react";
+import { Suspense, lazy, type ReactNode, useCallback, useEffect, useRef } from "react";
 
 import AppPageShell from "../components/AppPageShell";
 import ChatView from "../components/ChatView";
 import IntegratedBrowserPane from "../components/IntegratedBrowserPane";
+import { useBrowserPaneStore } from "../browserPaneStore";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { parseDiffRouteSearch } from "../diffRouteSearch";
 import { useMediaQuery } from "../hooks/useMediaQuery";
+import { readNativeApi } from "../nativeApi";
 import { useStore } from "../store";
 import { Sheet, SheetPopup } from "../components/ui/sheet";
 import { Sidebar, SidebarProvider, SidebarRail } from "~/components/ui/sidebar";
@@ -163,6 +165,8 @@ function ChatThreadRouteView() {
   );
   const threads = useStore((store) => store.threads);
   const draftThreadsByThreadId = useComposerDraftStore((store) => store.draftThreadsByThreadId);
+  const setBrowserPaneOpen = useBrowserPaneStore((state) => state.setOpen);
+  const previousProjectIdRef = useRef<ProjectId | null>(null);
   const threadBrowserContext = resolveThreadBrowserContext({
     threadId,
     threads,
@@ -196,6 +200,20 @@ function ChatThreadRouteView() {
       return;
     }
   }, [navigate, routeThreadExists, threadsHydrated, threadId]);
+
+  useEffect(() => {
+    const previousProjectId = previousProjectIdRef.current;
+    const nextProjectId = threadBrowserContext.projectId;
+    previousProjectIdRef.current = nextProjectId;
+
+    if (!previousProjectId || !nextProjectId || previousProjectId === nextProjectId) {
+      return;
+    }
+
+    setBrowserPaneOpen(false);
+    const api = readNativeApi();
+    void api?.browser?.closePane().catch(() => undefined);
+  }, [setBrowserPaneOpen, threadBrowserContext.projectId]);
 
   if (!threadsHydrated || !routeThreadExists) {
     return null;

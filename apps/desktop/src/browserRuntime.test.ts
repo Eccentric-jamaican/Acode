@@ -92,9 +92,11 @@ vi.mock("electron", () => {
     readonly webContents = new MockWebContents();
     readonly setBoundsCalls: Array<{ x: number; y: number; width: number; height: number }> = [];
     readonly setVisibleCalls: boolean[] = [];
+    readonly partition: string | null;
     private bounds = { x: 0, y: 0, width: 0, height: 0 };
 
-    constructor() {
+    constructor(options?: { webPreferences?: { partition?: string } }) {
+      this.partition = options?.webPreferences?.partition ?? null;
       this.webContents.ownerView = this;
     }
 
@@ -175,6 +177,20 @@ describe("BrowserRuntimeRegistry", () => {
     };
 
     await expect(registry.navigate(projectId, "https://example.com")).rejects.toThrow("ERR_ABORTED");
+  });
+
+  it("uses a persistent partition per project runtime", async () => {
+    const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
+    const projectId = ProjectId.makeUnsafe("project-persistent-1");
+
+    await registry.ensure(projectId);
+    const runtime = ((registry as any).runtimes as Map<
+      ProjectId,
+      { view: { partition: string | null } }
+    >).get(projectId);
+
+    expect(runtime).toBeDefined();
+    expect(runtime!.view.partition).toBe(`persist:t3-browser-${String(projectId)}`);
   });
 
   it("attaches the native view before applying pane bounds", async () => {
@@ -491,5 +507,50 @@ describe("BrowserRuntimeRegistry", () => {
     expect((registry as any).paneOpen).toBe(false);
     expect((registry as any).paneBounds).toBeNull();
     expect((registry as any).attachedProjectId).toBeNull();
+  });
+
+  it("creates, activates, and closes tabs while tracking the active tab", async () => {
+    const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
+    const projectId = ProjectId.makeUnsafe("project-tabs-1");
+
+    const initial = await registry.ensure(projectId);
+    expect(initial.tabs).toHaveLength(1);
+    expect(initial.activeTabId).toBe(initial.tabs?.[0]?.tabId ?? null);
+
+    const withSecondTab = await registry.newTab(projectId, "https://example.com");
+    expect(withSecondTab.tabs).toHaveLength(2);
+    const firstTabId = initial.tabs?.[0]?.tabId;
+    const secondTabId = withSecondTab.activeTabId;
+    expect(secondTabId).not.toBe(firstTabId);
+
+    expect(firstTabId).toBeTruthy();
+    if (!firstTabId) {
+      throw new Error("Expected first tab id");
+    }
+
+    const reactivated = await registry.activateTab(projectId, firstTabId);
+    expect(reactivated.activeTabId).toBe(firstTabId);
+
+    const closed = await registry.closeTab(projectId, firstTabId);
+    expect(closed.tabs).toHaveLength(1);
+    expect(closed.activeTabId).not.toBe(firstTabId);
+  });
+
+  it("recreates a blank replacement tab when closing the last tab", async () => {
+    const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
+    const projectId = ProjectId.makeUnsafe("project-tabs-2");
+
+    const initial = await registry.ensure(projectId);
+    const initialTabId = initial.activeTabId;
+    expect(initialTabId).toBeTruthy();
+    if (!initialTabId) {
+      throw new Error("Expected initial tab id");
+    }
+
+    const afterClose = await registry.closeTab(projectId, initialTabId);
+    expect(afterClose.tabs).toHaveLength(1);
+    expect(afterClose.activeTabId).toBeTruthy();
+    expect(afterClose.activeTabId).not.toBe(initialTabId);
+    expect(afterClose.session?.navigation.url).toBe("about:blank");
   });
 });

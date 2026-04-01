@@ -634,6 +634,9 @@ describe("wsNativeApi", () => {
       getState: vi.fn().mockResolvedValue({ session: null }),
       open: vi.fn().mockResolvedValue({ session: null }),
       closePane: vi.fn().mockResolvedValue(undefined),
+      newTab: vi.fn().mockResolvedValue({ session: null }),
+      activateTab: vi.fn().mockResolvedValue({ session: null }),
+      closeTab: vi.fn().mockResolvedValue({ session: null }),
       navigate: vi.fn().mockResolvedValue({ session: null }),
       back: vi.fn().mockResolvedValue({ session: null }),
       forward: vi.fn().mockResolvedValue({ session: null }),
@@ -659,6 +662,17 @@ describe("wsNativeApi", () => {
       projectId: ProjectId.makeUnsafe("project-1"),
       bounds: { x: 10, y: 20, width: 300, height: 200 },
     });
+    await api.browser.newTab({
+      projectId: ProjectId.makeUnsafe("project-1"),
+    });
+    await api.browser.activateTab({
+      projectId: ProjectId.makeUnsafe("project-1"),
+      tabId: "tab-1",
+    });
+    await api.browser.closeTab({
+      projectId: ProjectId.makeUnsafe("project-1"),
+      tabId: "tab-1",
+    });
     await api.browser.navigate({
       projectId: ProjectId.makeUnsafe("project-1"),
       url: "http://localhost:3000",
@@ -674,6 +688,17 @@ describe("wsNativeApi", () => {
     expect(browserBridge.open).toHaveBeenCalledWith({
       projectId: "project-1",
       bounds: { x: 10, y: 20, width: 300, height: 200 },
+    });
+    expect(browserBridge.newTab).toHaveBeenCalledWith({
+      projectId: "project-1",
+    });
+    expect(browserBridge.activateTab).toHaveBeenCalledWith({
+      projectId: "project-1",
+      tabId: "tab-1",
+    });
+    expect(browserBridge.closeTab).toHaveBeenCalledWith({
+      projectId: "project-1",
+      tabId: "tab-1",
     });
     expect(browserBridge.navigate).toHaveBeenCalledWith({
       projectId: "project-1",

@@ -530,6 +530,40 @@ function SettingsRouteView() {
                   </Button>
                 </div>
               ) : null}
+
+              <div className="flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
+                <div>
+                  <p className="text-sm font-medium text-foreground">Keep inspect mode after capture</p>
+                  <p className="text-xs text-muted-foreground">
+                    Keep inspect mode enabled so you can capture multiple elements in one prompt.
+                  </p>
+                </div>
+                <Switch
+                  checked={settings.keepInspectModeAfterCapture}
+                  onCheckedChange={(checked) =>
+                    updateSettings({
+                      keepInspectModeAfterCapture: Boolean(checked),
+                    })
+                  }
+                  aria-label="Keep inspect mode after capture"
+                />
+              </div>
+
+              {settings.keepInspectModeAfterCapture !== defaults.keepInspectModeAfterCapture ? (
+                <div className="mt-3 flex justify-end">
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={() =>
+                      updateSettings({
+                        keepInspectModeAfterCapture: defaults.keepInspectModeAfterCapture,
+                      })
+                    }
+                  >
+                    Restore inspect default
+                  </Button>
+                </div>
+              ) : null}
             </section>
 
             <section className="rounded-2xl border border-border bg-card p-5">

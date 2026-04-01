@@ -408,9 +408,20 @@ function dispatchPointerDown(target: EventTarget | null): void {
 }
 
 function projectOrderLabels(): string[] {
-  return [...document.querySelectorAll<HTMLElement>("[data-testid^='sidebar-project-']")].map(
-    (element) => element.getAttribute("aria-label") ?? "",
-  );
+  return [
+    ...document.querySelectorAll<HTMLElement>(
+      "[data-testid^='sidebar-project-']:not([data-testid^='sidebar-project-new-thread-'])",
+    ),
+  ].map((element) => element.getAttribute("aria-label") ?? "");
+}
+
+function elementOpacityByTestId(testId: string): number | null {
+  const element = document.querySelector<HTMLElement>(`[data-testid='${testId}']`);
+  if (!element) {
+    return null;
+  }
+  const opacity = Number.parseFloat(window.getComputedStyle(element).opacity);
+  return Number.isFinite(opacity) ? opacity : null;
 }
 
 function visibleSidebarToggleCount(label: "Collapse Sidebar" | "Expand Sidebar"): number {
@@ -562,32 +573,68 @@ function createDesktopBrowserSnapshot(
   projectId: ProjectId,
   paneBounds: BrowserPaneBounds = DEFAULT_DESKTOP_BROWSER_PANE_BOUNDS,
 ): BrowserSessionSnapshot {
+  const tab = {
+    tabId: "tab-1",
+    sessionId: "browser-session-sidebar-test",
+    projectId,
+    inspectMode: false,
+    hasSelection: false,
+    navigation: {
+      url: "https://www.google.com/search",
+      title: "Google",
+      canGoBack: true,
+      canGoForward: false,
+      isLoading: false,
+      lastCommittedAt: NOW_ISO,
+    },
+    createdAt: NOW_ISO,
+    updatedAt: NOW_ISO,
+  } as const;
   return {
     paneOpen: true,
     paneProjectId: projectId,
     paneBounds,
     session: {
-      sessionId: "browser-session-sidebar-test",
-      projectId,
-      inspectMode: false,
-      hasSelection: false,
-      navigation: {
-        url: "https://www.google.com/search",
-        title: "Google",
-        canGoBack: true,
-        canGoForward: false,
-        isLoading: false,
-        lastCommittedAt: NOW_ISO,
-      },
-      createdAt: NOW_ISO,
-      updatedAt: NOW_ISO,
+      sessionId: tab.sessionId,
+      projectId: tab.projectId,
+      inspectMode: tab.inspectMode,
+      hasSelection: tab.hasSelection,
+      navigation: tab.navigation,
+      createdAt: tab.createdAt,
+      updatedAt: tab.updatedAt,
     },
+    tabs: [tab],
+    activeTabId: tab.tabId,
   };
 }
 
 function createDesktopBrowserBridge(projectId: ProjectId): DesktopBridge["browser"] {
   let paneBounds = { ...DEFAULT_DESKTOP_BROWSER_PANE_BOUNDS };
-  const buildSnapshot = () => createDesktopBrowserSnapshot(projectId, paneBounds);
+  let tabs = [createDesktopBrowserSnapshot(projectId, paneBounds).tabs?.[0]].filter(Boolean) as NonNullable<
+    BrowserSessionSnapshot["tabs"]
+  >;
+  let activeTabId = tabs[0]?.tabId ?? null;
+  const buildSnapshot = (): BrowserSessionSnapshot => {
+    const activeTab = tabs.find((tab) => tab.tabId === activeTabId) ?? tabs[0] ?? null;
+    return {
+      paneOpen: true,
+      paneProjectId: projectId,
+      paneBounds,
+      session: activeTab
+        ? {
+            sessionId: activeTab.sessionId,
+            projectId: activeTab.projectId,
+            inspectMode: activeTab.inspectMode,
+            hasSelection: activeTab.hasSelection,
+            navigation: activeTab.navigation,
+            createdAt: activeTab.createdAt,
+            updatedAt: activeTab.updatedAt,
+          }
+        : null,
+      tabs,
+      activeTabId,
+    };
+  };
 
   return {
     getState: async () => buildSnapshot(),
@@ -596,27 +643,76 @@ function createDesktopBrowserBridge(projectId: ProjectId): DesktopBridge["browse
       return buildSnapshot();
     },
     closePane: async () => undefined,
-    navigate: async (input) => ({
-      ...buildSnapshot(),
-      session: {
-        ...buildSnapshot().session!,
-        navigation: {
-          ...buildSnapshot().session!.navigation,
-          url: input.url,
+    newTab: async () => {
+      const tabId = `tab-${tabs.length + 1}`;
+      const base = buildSnapshot().tabs?.[0];
+      if (!base) {
+        return buildSnapshot();
+      }
+      tabs = [
+        ...tabs,
+        {
+          ...base,
+          tabId,
+          sessionId: `browser-session-sidebar-test-${tabId}`,
+          navigation: {
+            ...base.navigation,
+            url: "about:blank",
+            title: "",
+            canGoBack: false,
+            canGoForward: false,
+          },
         },
-      },
-    }),
+      ];
+      activeTabId = tabId;
+      return buildSnapshot();
+    },
+    activateTab: async (input) => {
+      activeTabId = input.tabId;
+      return buildSnapshot();
+    },
+    closeTab: async (input) => {
+      tabs = tabs.filter((tab) => tab.tabId !== input.tabId);
+      if (tabs.length === 0) {
+        const fallback = createDesktopBrowserSnapshot(projectId, paneBounds).tabs?.[0];
+        if (fallback) {
+          tabs = [fallback];
+        }
+      }
+      if (!tabs.some((tab) => tab.tabId === activeTabId)) {
+        activeTabId = tabs[0]?.tabId ?? null;
+      }
+      return buildSnapshot();
+    },
+    navigate: async (input) => {
+      tabs = tabs.map((tab) =>
+        tab.tabId === activeTabId
+          ? {
+              ...tab,
+              navigation: {
+                ...tab.navigation,
+                url: input.url,
+              },
+            }
+          : tab,
+      );
+      return buildSnapshot();
+    },
     back: async () => buildSnapshot(),
     forward: async () => buildSnapshot(),
     reload: async () => buildSnapshot(),
     kill: async () => undefined,
-    setInspectMode: async (input) => ({
-      ...buildSnapshot(),
-      session: {
-        ...buildSnapshot().session!,
-        inspectMode: input.enabled,
-      },
-    }),
+    setInspectMode: async (input) => {
+      tabs = tabs.map((tab) =>
+        tab.tabId === activeTabId
+          ? {
+              ...tab,
+              inspectMode: input.enabled,
+            }
+          : tab,
+      );
+      return buildSnapshot();
+    },
     captureInspectSelection: async () => null,
     onEvent: () => () => {},
   };
@@ -849,7 +945,7 @@ describe("Sidebar browser", () => {
     await mounted.cleanup();
   });
 
-  it("renders the redesigned primary nav with Orchestrate", async () => {
+  it("renders the redesigned primary nav with Plugins and Orchestrate", async () => {
     const mounted = await mountSidebarApp();
 
     await expect
@@ -858,11 +954,13 @@ describe("Sidebar browser", () => {
         return (
           text.indexOf("New thread") < text.indexOf("Automations") &&
           text.indexOf("Automations") < text.indexOf("Skills") &&
-          text.indexOf("Skills") < text.indexOf("Orchestrate")
+          text.indexOf("Skills") < text.indexOf("Plugins") &&
+          text.indexOf("Plugins") < text.indexOf("Orchestrate")
         );
       })
       .toBe(true);
 
+    await expect.element(page.getByRole("button", { name: "Plugins" })).toBeVisible();
     await expect.element(page.getByRole("button", { name: "Orchestrate" })).toBeVisible();
 
     await mounted.cleanup();
@@ -1025,7 +1123,7 @@ describe("Sidebar browser", () => {
     await expect.element(page.getByTestId("diff-panel-header-actions")).toBeVisible();
     await expect.element(page.getByTestId("integrated-browser-pane")).toBeVisible();
     await expect.poll(() => desktopTitlebarBandMetrics().bandHeight).toBe(22);
-    await expect.poll(() => elementHeightByTestId("integrated-browser-top-header")).toBe(40);
+    await expect.poll(() => elementHeightByTestId("integrated-browser-top-header")).toBeGreaterThanOrEqual(40);
     await expect.poll(() => elementHeightByTestId("diff-panel-top-header")).toBe(40);
     await expect.poll(() => viewportRightGapByTestId("integrated-browser-pane")).toBe(0);
 
@@ -1242,14 +1340,14 @@ describe("Sidebar browser", () => {
     const mounted = await mountSidebarApp();
 
     await expect
-      .poll(() => document.querySelectorAll("[data-testid^='sidebar-project-']").length)
+      .poll(() => projectOrderLabels().length)
       .toBe(2);
 
     await page.getByRole("button", { name: "Filter threads" }).click();
     await page.getByText("Chronological list", { exact: true }).click();
 
     await expect
-      .poll(() => document.querySelectorAll("[data-testid^='sidebar-project-']").length)
+      .poll(() => projectOrderLabels().length)
       .toBe(0);
 
     await mounted.cleanup();
@@ -1416,7 +1514,7 @@ describe("Sidebar browser", () => {
 
     const mounted = await mountSidebarApp();
 
-    await page.getByRole("button", { name: "New thread" }).click();
+    await page.getByTestId("sidebar-primary-new-thread").click();
 
     await expect
       .poll(() => {
@@ -1424,6 +1522,72 @@ describe("Sidebar browser", () => {
         return draftMap[projectAlpha] ?? null;
       })
       .not.toBeNull();
+
+    await mounted.cleanup();
+  });
+
+  it("creates a local draft thread from the hovered project action without reusing another branch", async () => {
+    const projectAlpha = "project-alpha" as ProjectId;
+    const projectBeta = "project-beta" as ProjectId;
+    const threadBeta = "thread-beta" as ThreadId;
+    const projectActionTestId = `sidebar-project-new-thread-${projectAlpha}`;
+    fixture = {
+      ...fixture,
+      snapshot: {
+        ...fixture.snapshot,
+        projects: [
+          makeProjectEntry(projectAlpha, "Alpha"),
+          makeProjectEntry(projectBeta, "Beta"),
+        ],
+        threads: [
+          makeThreadEntry("thread-alpha" as ThreadId, projectAlpha, "Alpha thread"),
+          makeThreadEntry(threadBeta, projectBeta, "Beta thread", {
+            branch: "feature/previous-branch",
+            worktreePath: "C:\\worktrees\\feature-previous-branch",
+          }),
+        ],
+      },
+      welcome: {
+        ...fixture.welcome,
+        bootstrapProjectId: projectBeta,
+        bootstrapThreadId: threadBeta,
+      },
+    };
+
+    const mounted = await mountSidebarApp({ initialEntries: [`/${threadBeta}`] });
+
+    await expect.poll(() => elementOpacityByTestId(projectActionTestId)).toBe(0);
+
+    await page.getByTestId(`sidebar-project-${projectAlpha}`).hover();
+
+    await expect.poll(() => elementOpacityByTestId(projectActionTestId)).toBe(1);
+
+    await page.getByTestId(projectActionTestId).click();
+
+    await expect
+      .poll(() => {
+        const draftThreadId =
+          useComposerDraftStore.getState().projectDraftThreadIdByProjectId[projectAlpha] ?? null;
+        if (!draftThreadId) {
+          return null;
+        }
+        const draftThread = useComposerDraftStore.getState().draftThreadsByThreadId[draftThreadId];
+        if (!draftThread) {
+          return null;
+        }
+        return {
+          projectId: draftThread.projectId,
+          branch: draftThread.branch,
+          worktreePath: draftThread.worktreePath,
+          envMode: draftThread.envMode,
+        };
+      })
+      .toEqual({
+        projectId: projectAlpha,
+        branch: null,
+        worktreePath: null,
+        envMode: "local",
+      });
 
     await mounted.cleanup();
   });

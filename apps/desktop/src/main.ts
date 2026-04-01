@@ -63,6 +63,9 @@ const UPDATE_INSTALL_CHANNEL = "desktop:update-install";
 const BROWSER_GET_STATE_CHANNEL = "desktop:browser-get-state";
 const BROWSER_OPEN_CHANNEL = "desktop:browser-open";
 const BROWSER_CLOSE_PANE_CHANNEL = "desktop:browser-close-pane";
+const BROWSER_NEW_TAB_CHANNEL = "desktop:browser-new-tab";
+const BROWSER_ACTIVATE_TAB_CHANNEL = "desktop:browser-activate-tab";
+const BROWSER_CLOSE_TAB_CHANNEL = "desktop:browser-close-tab";
 const BROWSER_NAVIGATE_CHANNEL = "desktop:browser-navigate";
 const BROWSER_BACK_CHANNEL = "desktop:browser-back";
 const BROWSER_FORWARD_CHANNEL = "desktop:browser-forward";
@@ -199,6 +202,28 @@ async function handleBrowserBridgeRequest(body: unknown): Promise<unknown> {
     case "browser.kill":
       await browserRuntimeRegistry.kill(asProjectId(input.projectId));
       return {};
+    case "browser.new_tab":
+      return browserRuntimeRegistry.newTab(
+        asProjectId(input.projectId),
+        typeof input.url === "string" && input.url.trim().length > 0 ? input.url : undefined,
+      );
+    case "browser.activate_tab":
+      if (typeof input.tabId !== "string" || input.tabId.trim().length === 0) {
+        throw new Error("tabId must be a non-empty string.");
+      }
+      return browserRuntimeRegistry.activateTab(asProjectId(input.projectId), input.tabId);
+    case "browser.close_tab":
+      if (typeof input.tabId !== "string" || input.tabId.trim().length === 0) {
+        throw new Error("tabId must be a non-empty string.");
+      }
+      return browserRuntimeRegistry.closeTab(asProjectId(input.projectId), input.tabId);
+    case "browser.list_tabs": {
+      const state = await browserRuntimeRegistry.getState(asProjectId(input.projectId));
+      return {
+        tabs: state.tabs ?? [],
+        activeTabId: state.activeTabId ?? null,
+      };
+    }
     case "browser.navigate":
       if (typeof input.url !== "string" || input.url.trim().length === 0) {
         throw new Error("url must be a non-empty string.");
@@ -1356,6 +1381,33 @@ function registerIpcHandlers(): void {
     await browserRuntimeRegistry.closePane();
   });
 
+  ipcMain.removeHandler(BROWSER_NEW_TAB_CHANNEL);
+  ipcMain.handle(BROWSER_NEW_TAB_CHANNEL, async (_event, rawInput: unknown) => {
+    const input = asRecord(rawInput);
+    return browserRuntimeRegistry.newTab(
+      asProjectId(input.projectId),
+      typeof input.url === "string" && input.url.trim().length > 0 ? input.url : undefined,
+    );
+  });
+
+  ipcMain.removeHandler(BROWSER_ACTIVATE_TAB_CHANNEL);
+  ipcMain.handle(BROWSER_ACTIVATE_TAB_CHANNEL, async (_event, rawInput: unknown) => {
+    const input = asRecord(rawInput);
+    if (typeof input.tabId !== "string" || input.tabId.trim().length === 0) {
+      throw new Error("tabId must be a non-empty string.");
+    }
+    return browserRuntimeRegistry.activateTab(asProjectId(input.projectId), input.tabId);
+  });
+
+  ipcMain.removeHandler(BROWSER_CLOSE_TAB_CHANNEL);
+  ipcMain.handle(BROWSER_CLOSE_TAB_CHANNEL, async (_event, rawInput: unknown) => {
+    const input = asRecord(rawInput);
+    if (typeof input.tabId !== "string" || input.tabId.trim().length === 0) {
+      throw new Error("tabId must be a non-empty string.");
+    }
+    return browserRuntimeRegistry.closeTab(asProjectId(input.projectId), input.tabId);
+  });
+
   ipcMain.removeHandler(BROWSER_NAVIGATE_CHANNEL);
   ipcMain.handle(BROWSER_NAVIGATE_CHANNEL, async (_event, rawInput: unknown) => {
     const input = asRecord(rawInput);
@@ -1403,14 +1455,13 @@ function registerIpcHandlers(): void {
 
   ipcMain.removeAllListeners(BROWSER_PAGE_EVENT_CHANNEL);
   ipcMain.on(BROWSER_PAGE_EVENT_CHANNEL, (event, rawPayload: unknown) => {
-    const projectId = browserRuntimeRegistry.findProjectIdByWebContentsId(event.sender.id);
-    if (!projectId) {
-      return;
-    }
     if (!rawPayload || typeof rawPayload !== "object") {
       return;
     }
-    browserRuntimeRegistry.handlePageEvent(projectId, rawPayload as { type: string; hasSelection?: unknown });
+    browserRuntimeRegistry.handlePageEventByWebContentsId(
+      event.sender.id,
+      rawPayload as { type: string; hasSelection?: unknown },
+    );
   });
 }
 
@@ -1423,6 +1474,42 @@ function getIconOption(): { icon: Electron.NativeImage } | Record<string, never>
 
   const icon = nativeImage.createFromPath(iconPath);
   return icon.isEmpty() ? {} : { icon };
+}
+
+function buildRendererContextMenuTemplate(
+  params: Electron.ContextMenuParams,
+): MenuItemConstructorOptions[] {
+  const selectionText = params.selectionText.trim();
+  const hasSelection = selectionText.length > 0;
+  const canCopy = params.editFlags.canCopy || hasSelection;
+
+  const template: MenuItemConstructorOptions[] = [];
+  if (params.isEditable) {
+    if (params.editFlags.canCut) {
+      template.push({ role: "cut" });
+    }
+    if (canCopy) {
+      template.push({ role: "copy" });
+    }
+    if (params.editFlags.canPaste) {
+      template.push({ role: "paste" });
+    }
+    if (params.editFlags.canDelete) {
+      template.push({ role: "delete" });
+    }
+    if (params.editFlags.canSelectAll) {
+      template.push({ role: "selectAll" });
+    }
+    return template;
+  }
+
+  if (canCopy) {
+    template.push({ role: "copy" });
+  }
+  if (params.editFlags.canSelectAll) {
+    template.push({ role: "selectAll" });
+  }
+  return template;
 }
 
 function createWindow(): BrowserWindow {
@@ -1463,6 +1550,14 @@ function createWindow(): BrowserWindow {
   window.webContents.on("did-finish-load", () => {
     window.setTitle(APP_DISPLAY_NAME);
     emitUpdateState();
+  });
+  window.webContents.on("context-menu", (event, params) => {
+    const template = buildRendererContextMenuTemplate(params);
+    if (template.length === 0) {
+      return;
+    }
+    event.preventDefault();
+    Menu.buildFromTemplate(template).popup({ window });
   });
   window.once("ready-to-show", () => {
     window.show();
