@@ -183,11 +183,15 @@ function inferProviderForThreadModel(input: {
 
 function resolveWsHttpOrigin(): string {
   if (typeof window === "undefined") return "";
-  const bridgeWsUrl = window.desktopBridge?.getWsUrl?.();
+  const desktopBridge = window.desktopBridge;
+  const hasDesktopBridge = typeof desktopBridge?.getWsUrl === "function";
+  const bridgeWsUrl = hasDesktopBridge ? desktopBridge.getWsUrl() : null;
   const envWsUrl = import.meta.env.VITE_WS_URL as string | undefined;
   const wsCandidate =
-    typeof bridgeWsUrl === "string" && bridgeWsUrl.length > 0
-      ? bridgeWsUrl
+    hasDesktopBridge
+      ? typeof bridgeWsUrl === "string" && bridgeWsUrl.length > 0
+        ? bridgeWsUrl
+        : null
       : typeof envWsUrl === "string" && envWsUrl.length > 0
         ? envWsUrl
         : null;

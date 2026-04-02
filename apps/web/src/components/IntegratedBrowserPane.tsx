@@ -10,7 +10,6 @@ import type {
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
-  GlobeIcon,
   RefreshCwIcon,
   SearchIcon,
   XIcon,
@@ -129,14 +128,15 @@ interface BrowserPaneProps {
   activeProjectId: ProjectId | null;
   activeThreadId: ThreadId | null;
   activeRuntimeMode: RuntimeMode | null;
+  open: boolean;
+  onRequestOpen: () => void;
+  onRequestClose: () => void;
 }
 
 export default function IntegratedBrowserPane(props: BrowserPaneProps) {
-  const { activeProjectId, activeThreadId } = props;
+  const { activeProjectId, activeThreadId, open, onRequestOpen, onRequestClose } = props;
   const { settings } = useAppSettings();
-  const open = useBrowserPaneStore((state) => state.open);
   const width = useBrowserPaneStore((state) => state.width);
-  const setOpen = useBrowserPaneStore((state) => state.setOpen);
   const setWidth = useBrowserPaneStore((state) => state.setWidth);
   const setPrompt = useComposerDraftStore((state) => state.setPrompt);
   const addImage = useComposerDraftStore((state) => state.addImage);
@@ -144,7 +144,6 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [snapshot, setSnapshot] = useState<BrowserSessionSnapshot | null>(null);
   const [urlInput, setUrlInput] = useState("");
-  const [isSyncingBounds, setIsSyncingBounds] = useState(false);
   const [containerWidth, setContainerWidth] = useState(() =>
     typeof window === "undefined" ? 0 : window.innerWidth,
   );
@@ -152,9 +151,9 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
   const activeThreadIdRef = useRef<ThreadId | null>(activeThreadId);
   const captureInFlightRef = useRef(false);
   const pendingCapturesRef = useRef(0);
-  const lastSyncedBoundsRef = useRef<BrowserPaneBounds | null>(null);
-  const pendingBoundsRef = useRef<BrowserPaneBounds | null>(null);
-  const syncInFlightRef = useRef(false);
+  const lastDispatchedBoundsRef = useRef<BrowserPaneBounds | null>(null);
+  const latestBoundsRequestSeqRef = useRef(0);
+  const latestBoundsResponseSeqRef = useRef(0);
   const api = readNativeApi();
   const isDesktopBrowserAvailable =
     api && typeof window !== "undefined" && Boolean(window.desktopBridge?.browser);
@@ -267,7 +266,7 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
     }
     const unsubscribe = api.browser.onEvent((event) => {
       if (event.type === "pane.requested") {
-        setOpen(true);
+        onRequestOpen();
       }
       if (!activeProjectId || event.projectId !== activeProjectId) {
         return;
@@ -287,7 +286,7 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
     activeThreadId,
     api,
     drainCaptureQueue,
-    setOpen,
+    onRequestOpen,
   ]);
 
   useEffect(() => {
@@ -311,9 +310,9 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
 
   useEffect(() => {
     if (!open || !activeProjectId) {
-      lastSyncedBoundsRef.current = null;
-      pendingBoundsRef.current = null;
-      syncInFlightRef.current = false;
+      lastDispatchedBoundsRef.current = null;
+      latestBoundsRequestSeqRef.current = 0;
+      latestBoundsResponseSeqRef.current = 0;
     }
   }, [activeProjectId, open]);
 
@@ -361,6 +360,7 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
     }
 
     let cancelled = false;
+    let animationFrameId: number | null = null;
     const readBounds = (): BrowserPaneBounds | null => {
       if (!viewportRef.current) {
         return null;
@@ -377,82 +377,68 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
       };
     };
 
-    const flushBounds = async (): Promise<void> => {
-      if (syncInFlightRef.current) {
-        return;
-      }
-      const nextBounds = pendingBoundsRef.current;
-      if (!nextBounds || arePaneBoundsEqual(lastSyncedBoundsRef.current, nextBounds)) {
-        pendingBoundsRef.current = null;
-        return;
-      }
-
-      syncInFlightRef.current = true;
-      setIsSyncingBounds(true);
-      try {
-        const nextSnapshot = await runBrowserAction("open browser pane", () =>
-          api.browser.open({
-            projectId: activeProjectId,
-            bounds: nextBounds,
-          }),
-        );
-        if (nextSnapshot !== undefined) {
-          lastSyncedBoundsRef.current = nextBounds;
-          if (arePaneBoundsEqual(pendingBoundsRef.current, nextBounds)) {
-            pendingBoundsRef.current = null;
-          }
-          if (!cancelled) {
-            setSnapshot(nextSnapshot);
-          }
-        } else if (arePaneBoundsEqual(pendingBoundsRef.current, nextBounds)) {
-          pendingBoundsRef.current = null;
-        }
-      } finally {
-        syncInFlightRef.current = false;
-        if (!cancelled) {
-          setIsSyncingBounds(false);
-        }
-        if (
-          pendingBoundsRef.current &&
-          !arePaneBoundsEqual(lastSyncedBoundsRef.current, pendingBoundsRef.current)
-        ) {
-          void flushBounds();
-        }
-      }
-    };
-
     const requestBoundsSync = () => {
       const nextBounds = readBounds();
       if (!nextBounds) {
         return;
       }
-      pendingBoundsRef.current = nextBounds;
-      void flushBounds();
+      if (arePaneBoundsEqual(lastDispatchedBoundsRef.current, nextBounds)) {
+        return;
+      }
+      lastDispatchedBoundsRef.current = nextBounds;
+      const requestSeq = ++latestBoundsRequestSeqRef.current;
+      void runBrowserAction("open browser pane", () =>
+        api.browser.open({
+          projectId: activeProjectId,
+          bounds: nextBounds,
+        }),
+      ).then((nextSnapshot) => {
+        if (nextSnapshot === undefined) {
+          return;
+        }
+        if (requestSeq < latestBoundsResponseSeqRef.current) {
+          return;
+        }
+        latestBoundsResponseSeqRef.current = requestSeq;
+        if (!cancelled) {
+          setSnapshot(nextSnapshot);
+        }
+      });
+    };
+
+    const requestBoundsSyncOnNextFrame = () => {
+      if (animationFrameId !== null) {
+        return;
+      }
+      animationFrameId = window.requestAnimationFrame(() => {
+        animationFrameId = null;
+        requestBoundsSync();
+      });
     };
 
     const observer = new ResizeObserver(() => {
-      requestBoundsSync();
+      requestBoundsSyncOnNextFrame();
     });
     observer.observe(viewportRef.current);
-    const frameId = window.requestAnimationFrame(() => {
-      requestBoundsSync();
-    });
+    requestBoundsSyncOnNextFrame();
     const settleTimeoutIds = BOUNDS_SETTLE_DELAYS_MS.map((delayMs) =>
       window.setTimeout(() => {
         requestBoundsSync();
       }, delayMs),
     );
-    window.addEventListener("resize", requestBoundsSync);
-    window.addEventListener("scroll", requestBoundsSync, true);
+    window.addEventListener("resize", requestBoundsSyncOnNextFrame);
+    window.addEventListener("scroll", requestBoundsSyncOnNextFrame, true);
     return () => {
       cancelled = true;
-      window.cancelAnimationFrame(frameId);
+      if (animationFrameId !== null) {
+        window.cancelAnimationFrame(animationFrameId);
+      }
       for (const timeoutId of settleTimeoutIds) {
         window.clearTimeout(timeoutId);
       }
       observer.disconnect();
-      window.removeEventListener("resize", requestBoundsSync);
-      window.removeEventListener("scroll", requestBoundsSync, true);
+      window.removeEventListener("resize", requestBoundsSyncOnNextFrame);
+      window.removeEventListener("scroll", requestBoundsSyncOnNextFrame, true);
     };
   }, [activeProjectId, api, effectivePaneWidth, open, runBrowserAction]);
 
@@ -460,6 +446,7 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
     if (!paneRef.current) {
       return;
     }
+    event.preventDefault();
     const startX = event.clientX;
     const startWidth = width;
     const onMove = (moveEvent: PointerEvent) => {
@@ -717,27 +704,8 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
                 type="button"
                 variant="ghost"
                 size="icon-xs"
-                aria-label="Kill browser"
-                disabled={controlsDisabled}
-                onClick={() => {
-                  if (!activeProjectId) {
-                    return;
-                  }
-                  void runBrowserAction("kill browser", () =>
-                    api.browser.kill({ projectId: activeProjectId }),
-                  ).then(() => {
-                    setSnapshot(null);
-                  });
-                }}
-              >
-                <GlobeIcon />
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
                 aria-label="Collapse browser"
-                onClick={() => setOpen(false)}
+                onClick={onRequestClose}
               >
                 <XIcon />
               </Button>
@@ -750,7 +718,7 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
             className="absolute inset-0"
             data-integrated-browser-native-viewport="true"
           />
-          {(isSyncingBounds || !activeTab) && (
+          {!activeTab && (
             <div className="absolute inset-0 flex items-center justify-center bg-background/80 text-xs text-muted-foreground">
               Loading browser...
             </div>

@@ -479,13 +479,24 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     this.paneOpen = true;
     this.paneProjectId = projectId;
     this.paneBounds = normalizeBounds(bounds);
-    await this.ensureRuntime(projectId);
+    const projectRuntime = await this.ensureRuntime(projectId);
     if (
       requestVersion !== this.paneRequestVersion ||
       !this.paneOpen ||
       this.paneProjectId !== projectId ||
       !this.paneBounds
     ) {
+      return this.snapshotForProject(projectId);
+    }
+    const activeTab = this.getActiveTab(projectRuntime);
+    const isSameAttachedTab =
+      Boolean(this.window) &&
+      Boolean(activeTab) &&
+      this.attachedProjectId === projectId &&
+      this.attachedTabId === activeTab?.tabId;
+    if (isSameAttachedTab && this.window) {
+      this.attachActiveTab(this.window, projectId, this.paneBounds);
+      this.emitStateUpdated(projectId);
       return this.snapshotForProject(projectId);
     }
     const measuredBounds = await readIntegratedBrowserViewportBounds(this.window);
@@ -1094,10 +1105,12 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
       contentView.addChildView(activeTab.view);
     }
 
-    this.applyBounds(activeTab, bounds, { forceViewportRefresh: true });
+    this.applyBounds(activeTab, bounds, { forceViewportRefresh: !sameAttachment });
     this.attachedProjectId = projectId;
     this.attachedTabId = activeTab.tabId;
-    this.scheduleAttachedBoundsReapply(projectId, activeTab.tabId);
+    if (!sameAttachment) {
+      this.scheduleAttachedBoundsReapply(projectId, activeTab.tabId);
+    }
   }
 
   private scheduleAttachedBoundsReapply(projectId: ProjectId, tabId: BrowserTabId): void {

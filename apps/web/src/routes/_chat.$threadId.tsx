@@ -1,14 +1,19 @@
 import { ThreadId, type ProjectId, type RuntimeMode } from "@t3tools/contracts";
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { Suspense, lazy, type ReactNode, useCallback, useEffect, useRef } from "react";
+import { createFileRoute, useNavigate, useRouterState } from "@tanstack/react-router";
+import { Suspense, lazy, type ReactNode, useCallback, useEffect, useMemo, useRef } from "react";
 
 import AppPageShell from "../components/AppPageShell";
 import ChatView from "../components/ChatView";
 import IntegratedBrowserPane from "../components/IntegratedBrowserPane";
-import { useBrowserPaneStore } from "../browserPaneStore";
 import { useComposerDraftStore } from "../composerDraftStore";
-import { parseDiffRouteSearch } from "../diffRouteSearch";
+import {
+  parseDiffRouteSearch,
+  resolveRightPanelMode,
+  type ResolvedRightPanelMode,
+  withRightPanelMode,
+} from "../diffRouteSearch";
 import { useMediaQuery } from "../hooks/useMediaQuery";
+import { cn } from "../lib/utils";
 import { readNativeApi } from "../nativeApi";
 import { useStore } from "../store";
 import { Sheet, SheetPopup } from "../components/ui/sheet";
@@ -82,8 +87,9 @@ const DiffPanelInlineSidebar = (props: {
   diffOpen: boolean;
   onCloseDiff: () => void;
   onOpenDiff: () => void;
+  railDisabled?: boolean;
 }) => {
-  const { diffOpen, onCloseDiff, onOpenDiff } = props;
+  const { diffOpen, onCloseDiff, onOpenDiff, railDisabled = false } = props;
   const onOpenChange = useCallback(
     (open: boolean) => {
       if (open) {
@@ -146,7 +152,11 @@ const DiffPanelInlineSidebar = (props: {
         <Suspense fallback={<DiffLoadingFallback inline />}>
           <DiffPanel mode="sidebar" />
         </Suspense>
-        <SidebarRail />
+        <SidebarRail
+          aria-hidden={railDisabled}
+          className={railDisabled ? "pointer-events-none opacity-0" : undefined}
+          tabIndex={railDisabled ? -1 : undefined}
+        />
       </Sidebar>
     </SidebarProvider>
   );
@@ -163,30 +173,68 @@ function ChatThreadRouteView() {
   const draftThreadExists = useComposerDraftStore(
     (store) => Object.hasOwn(store.draftThreadsByThreadId, threadId),
   );
+  const locationSearch = useRouterState({
+    select: (state) => state.location.search,
+  });
   const threads = useStore((store) => store.threads);
   const draftThreadsByThreadId = useComposerDraftStore((store) => store.draftThreadsByThreadId);
-  const setBrowserPaneOpen = useBrowserPaneStore((state) => state.setOpen);
   const previousProjectIdRef = useRef<ProjectId | null>(null);
+  const previousThreadIdRef = useRef<ThreadId | null>(null);
+  const previousPanelModeRef = useRef<ResolvedRightPanelMode>("none");
+  const suppressBrowserReopenRef = useRef(false);
   const threadBrowserContext = resolveThreadBrowserContext({
     threadId,
     threads,
     draftThreadsByThreadId,
   });
   const routeThreadExists = threadExists || draftThreadExists;
-  const diffOpen = search.diff === "1";
+  const panelMode = resolveRightPanelMode(search);
+  const diffOpen = panelMode === "diff";
+  const browserOpen = panelMode === "browser";
+  const pageShellClassName = cn(
+    "min-w-0 text-foreground isolate",
+    browserOpen && "md:mr-0 md:rounded-r-none",
+  );
+  const threadShellClassName = cn(
+    "flex min-h-0 min-w-0 flex-1 overflow-hidden bg-[var(--app-thread-surface)]",
+    browserOpen ? "md:rounded-l-[12px] md:rounded-r-none" : "md:rounded-[12px]",
+  );
+  const hasExplicitPanelSearchIntent = useMemo(() => {
+    const params = new URLSearchParams(locationSearch);
+    return params.has("panel") || params.has("diff");
+  }, [locationSearch]);
   const shouldUseDiffSheet = useMediaQuery(DIFF_INLINE_LAYOUT_MEDIA_QUERY);
   const closeDiff = useCallback(() => {
     void navigate({
       to: "/$threadId",
       params: { threadId },
-      search: {},
+      replace: true,
+      search: (previous) => withRightPanelMode(previous as Record<string, unknown>, "none"),
     });
   }, [navigate, threadId]);
   const openDiff = useCallback(() => {
     void navigate({
       to: "/$threadId",
       params: { threadId },
-      search: { diff: "1" },
+      replace: true,
+      search: (previous) => withRightPanelMode(previous as Record<string, unknown>, "diff"),
+    });
+  }, [navigate, threadId]);
+  const closeBrowser = useCallback(() => {
+    suppressBrowserReopenRef.current = true;
+    void navigate({
+      to: "/$threadId",
+      params: { threadId },
+      replace: true,
+      search: (previous) => withRightPanelMode(previous as Record<string, unknown>, "none"),
+    });
+  }, [navigate, threadId]);
+  const openBrowser = useCallback(() => {
+    void navigate({
+      to: "/$threadId",
+      params: { threadId },
+      replace: true,
+      search: (previous) => withRightPanelMode(previous as Record<string, unknown>, "browser"),
     });
   }, [navigate, threadId]);
 
@@ -202,18 +250,70 @@ function ChatThreadRouteView() {
   }, [navigate, routeThreadExists, threadsHydrated, threadId]);
 
   useEffect(() => {
+    const previousThreadId = previousThreadIdRef.current;
+    previousThreadIdRef.current = threadId;
     const previousProjectId = previousProjectIdRef.current;
+    const previousPanelMode = previousPanelModeRef.current;
     const nextProjectId = threadBrowserContext.projectId;
     previousProjectIdRef.current = nextProjectId;
+    previousPanelModeRef.current = panelMode;
 
-    if (!previousProjectId || !nextProjectId || previousProjectId === nextProjectId) {
+    if (!previousProjectId || !nextProjectId) {
       return;
     }
 
-    setBrowserPaneOpen(false);
+    if (previousProjectId !== nextProjectId) {
+      const api = readNativeApi();
+      void api?.browser?.closePane().catch(() => undefined);
+      if (panelMode === "browser") {
+        void navigate({
+          to: "/$threadId",
+          params: { threadId },
+          replace: true,
+          search: (previous) =>
+            withRightPanelMode(previous as Record<string, unknown>, "none"),
+        });
+      }
+      return;
+    }
+
+    if (
+      previousPanelMode === "browser" &&
+      panelMode === "none" &&
+      !hasExplicitPanelSearchIntent
+    ) {
+      // Preserve browser panel across same-project thread switches only.
+      if (!previousThreadId || previousThreadId === threadId) {
+        return;
+      }
+      if (suppressBrowserReopenRef.current) {
+        suppressBrowserReopenRef.current = false;
+        return;
+      }
+      void navigate({
+        to: "/$threadId",
+        params: { threadId },
+        replace: true,
+        search: (previous) =>
+          withRightPanelMode(previous as Record<string, unknown>, "browser"),
+      });
+    }
+  }, [
+    hasExplicitPanelSearchIntent,
+    navigate,
+    panelMode,
+    threadBrowserContext.projectId,
+    threadId,
+  ]);
+
+  useEffect(() => {
+    if (panelMode === "browser") {
+      return;
+    }
+
     const api = readNativeApi();
     void api?.browser?.closePane().catch(() => undefined);
-  }, [setBrowserPaneOpen, threadBrowserContext.projectId]);
+  }, [panelMode]);
 
   if (!threadsHydrated || !routeThreadExists) {
     return null;
@@ -221,11 +321,8 @@ function ChatThreadRouteView() {
 
   if (!shouldUseDiffSheet) {
     return (
-      <AppPageShell className="min-w-0 text-foreground isolate">
-        <div
-          className="flex min-h-0 min-w-0 flex-1 overflow-hidden bg-[var(--app-thread-surface)] md:rounded-[12px]"
-          data-testid="chat-thread-shell"
-        >
+      <AppPageShell className={pageShellClassName}>
+        <div className={threadShellClassName} data-testid="chat-thread-shell">
           <div className="flex min-h-0 min-w-0 flex-1 flex-col text-foreground">
             <ChatView key={threadId} threadId={threadId} />
           </div>
@@ -233,11 +330,15 @@ function ChatThreadRouteView() {
             diffOpen={diffOpen}
             onCloseDiff={closeDiff}
             onOpenDiff={openDiff}
+            railDisabled={browserOpen}
           />
           <IntegratedBrowserPane
             activeProjectId={threadBrowserContext.projectId}
             activeThreadId={threadId}
             activeRuntimeMode={threadBrowserContext.runtimeMode}
+            open={browserOpen}
+            onRequestOpen={openBrowser}
+            onRequestClose={closeBrowser}
           />
         </div>
       </AppPageShell>
@@ -246,11 +347,8 @@ function ChatThreadRouteView() {
 
   return (
     <>
-      <AppPageShell className="min-w-0 text-foreground isolate">
-        <div
-          className="flex min-h-0 min-w-0 flex-1 overflow-hidden bg-[var(--app-thread-surface)] text-foreground md:rounded-[12px]"
-          data-testid="chat-thread-shell"
-        >
+      <AppPageShell className={pageShellClassName}>
+        <div className={cn(threadShellClassName, "text-foreground")} data-testid="chat-thread-shell">
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
             <ChatView key={threadId} threadId={threadId} />
           </div>
@@ -258,6 +356,9 @@ function ChatThreadRouteView() {
             activeProjectId={threadBrowserContext.projectId}
             activeThreadId={threadId}
             activeRuntimeMode={threadBrowserContext.runtimeMode}
+            open={browserOpen}
+            onRequestOpen={openBrowser}
+            onRequestClose={closeBrowser}
           />
         </div>
       </AppPageShell>

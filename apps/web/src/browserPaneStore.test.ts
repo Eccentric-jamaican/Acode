@@ -44,29 +44,25 @@ afterEach(() => {
 });
 
 describe("browserPaneStore", () => {
-  it("hydrates persisted state and clamps the initial width", async () => {
+  it("hydrates persisted width and clamps the initial width", async () => {
     getTestWindow().localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
-        open: true,
         width: 9_999,
       }),
     );
 
     const { useBrowserPaneStore } = await import("./browserPaneStore");
 
-    expect(useBrowserPaneStore.getState().open).toBe(true);
     expect(useBrowserPaneStore.getState().width).toBe(900);
   });
 
-  it("persists open state and clamps width updates", async () => {
+  it("persists clamped width updates", async () => {
     const { useBrowserPaneStore } = await import("./browserPaneStore");
 
-    useBrowserPaneStore.getState().setOpen(true);
     useBrowserPaneStore.getState().setWidth(10);
 
     expect(JSON.parse(getTestWindow().localStorage.getItem(STORAGE_KEY) ?? "{}")).toEqual({
-      open: true,
       width: 480,
     });
   });
@@ -74,7 +70,6 @@ describe("browserPaneStore", () => {
   it("defaults to the widened pane width", async () => {
     const { useBrowserPaneStore } = await import("./browserPaneStore");
 
-    expect(useBrowserPaneStore.getState().open).toBe(false);
     expect(useBrowserPaneStore.getState().width).toBe(480);
   });
 });

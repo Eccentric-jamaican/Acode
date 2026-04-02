@@ -32,6 +32,28 @@ const runCommand = Effect.fn("runCommand")(function* (command: ChildProcess.Comm
   }
 });
 
+const runBunCommand = Effect.fn("runBunCommand")(function* (input: {
+  readonly args: ReadonlyArray<string>;
+  readonly cwd: string;
+  readonly verbose: boolean;
+}) {
+  const processOptions = {
+    cwd: input.cwd,
+    stdout: input.verbose ? "inherit" : "ignore",
+    stderr: "inherit",
+  } as const;
+
+  if (process.platform === "win32") {
+    // Bun is frequently installed as bun.cmd on Windows; cmd.exe resolves that reliably.
+    yield* runCommand(
+      ChildProcess.make("cmd.exe", ["/d", "/s", "/c", ["bun", ...input.args].join(" ")], processOptions),
+    );
+    return;
+  }
+
+  yield* runCommand(ChildProcess.make("bun", [...input.args], processOptions));
+});
+
 interface PublishIconBackup {
   readonly targetPath: string;
   readonly backupPath: string;
@@ -127,13 +149,11 @@ const buildCmd = Command.make(
       const serverDir = path.join(repoRoot, "apps/server");
 
       yield* Effect.log("[cli] Running tsdown...");
-      yield* runCommand(
-        ChildProcess.make({
-          cwd: serverDir,
-          stdout: config.verbose ? "inherit" : "ignore",
-          stderr: "inherit",
-        })`bun tsdown`,
-      );
+      yield* runBunCommand({
+        args: ["tsdown"],
+        cwd: serverDir,
+        verbose: config.verbose,
+      });
 
       const webDist = path.join(repoRoot, "apps/web/dist");
       const clientTarget = path.join(serverDir, "dist/client");

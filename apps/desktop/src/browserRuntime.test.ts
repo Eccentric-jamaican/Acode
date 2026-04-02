@@ -362,6 +362,27 @@ describe("BrowserRuntimeRegistry", () => {
     });
   });
 
+  it("avoids viewport remeasurement when resizing the already attached tab", async () => {
+    const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
+    const measureViewport = vi.fn(async () => null);
+    const window = {
+      contentView: {
+        addChildView: vi.fn(),
+        removeChildView: vi.fn(),
+      },
+      webContents: {
+        executeJavaScript: measureViewport,
+      },
+    };
+    const projectId = ProjectId.makeUnsafe("project-6-resize");
+
+    registry.setWindow(window as never);
+    await registry.open(projectId, { x: 500, y: 35, width: 200, height: 360 });
+    await registry.open(projectId, { x: 560, y: 35, width: 240, height: 360 });
+
+    expect(measureViewport).toHaveBeenCalledTimes(1);
+  });
+
   it("scales renderer pane bounds by the host zoom factor before applying native bounds", async () => {
     const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
     const window = {

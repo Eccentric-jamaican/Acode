@@ -6,14 +6,11 @@ const MIN_WIDTH = 480;
 const MAX_WIDTH = 900;
 
 interface BrowserPanePersistedState {
-  open?: boolean;
   width?: number;
 }
 
 export interface BrowserPaneState {
-  open: boolean;
   width: number;
-  setOpen: (open: boolean) => void;
   setWidth: (width: number) => void;
 }
 
@@ -40,7 +37,7 @@ function readPersistedState(): BrowserPanePersistedState {
   }
 }
 
-function persistState(state: { open: boolean; width: number }): void {
+function persistState(state: { width: number }): void {
   if (typeof window === "undefined") {
     return;
   }
@@ -48,7 +45,6 @@ function persistState(state: { open: boolean; width: number }): void {
     window.localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
-        open: state.open,
         width: state.width,
       }),
     );
@@ -60,17 +56,11 @@ function persistState(state: { open: boolean; width: number }): void {
 const persisted = readPersistedState();
 
 export const useBrowserPaneStore = create<BrowserPaneState>((set, get) => ({
-  open: persisted.open === true,
   width: clampWidth(typeof persisted.width === "number" ? persisted.width : DEFAULT_WIDTH),
-  setOpen: (open) => {
-    set({ open });
-    const next = get();
-    persistState({ open: next.open, width: next.width });
-  },
   setWidth: (width) => {
     set({ width: clampWidth(width) });
     const next = get();
-    persistState({ open: next.open, width: next.width });
+    persistState({ width: next.width });
   },
 }));
 

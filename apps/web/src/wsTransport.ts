@@ -34,17 +34,26 @@ export class WsTransport {
   private readonly url: string;
 
   constructor(url?: string) {
-    const bridgeUrl = window.desktopBridge?.getWsUrl();
+    const desktopBridge = window.desktopBridge;
+    const hasDesktopBridge = typeof desktopBridge?.getWsUrl === "function";
+    const bridgeUrl = hasDesktopBridge ? desktopBridge.getWsUrl() : null;
     // In dev mode, VITE_WS_URL points to the server's WebSocket endpoint.
     // In production, the page is served by the WS server on the same host:port.
     const envUrl = import.meta.env.VITE_WS_URL as string | undefined;
-    this.url =
-      url ??
-      (bridgeUrl && bridgeUrl.length > 0
-        ? bridgeUrl
-        : envUrl && envUrl.length > 0
-          ? envUrl
-          : `ws://${window.location.hostname}:${window.location.port}`);
+    if (url && url.length > 0) {
+      this.url = url;
+    } else if (hasDesktopBridge) {
+      if (typeof bridgeUrl !== "string" || bridgeUrl.length === 0) {
+        throw new Error(
+          "Desktop bridge is available but did not provide a WebSocket URL. Refusing to fall back to VITE_WS_URL.",
+        );
+      }
+      this.url = bridgeUrl;
+    } else if (envUrl && envUrl.length > 0) {
+      this.url = envUrl;
+    } else {
+      this.url = `ws://${window.location.hostname}:${window.location.port}`;
+    }
     this.connect();
   }
 

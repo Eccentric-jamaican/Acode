@@ -1219,7 +1219,6 @@ describe("ChatView timeline estimator parity (full app)", () => {
       projectDraftThreadIdByProjectId: {},
     });
     useBrowserPaneStore.setState({
-      open: false,
       width: 480,
     });
     useStore.setState({
@@ -1428,7 +1427,6 @@ describe("ChatView timeline estimator parity (full app)", () => {
       browser: createDesktopBrowserBridge(PROJECT_ID),
     } as DesktopBridge;
     useBrowserPaneStore.setState({
-      open: true,
       width: 480,
     });
 
@@ -1443,6 +1441,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
         targetMessageId: "msg-user-top-chrome-check" as MessageId,
         targetText: "check top chrome",
       }),
+      initialEntries: [`/${THREAD_ID}?panel=browser`],
     });
 
     try {
@@ -1460,7 +1459,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
             document.querySelector<HTMLElement>("[data-testid='integrated-browser-header-actions']") ??
             null,
         )
-        .not.toBeNull();
+        .toBeNull();
       await expect
         .poll(
           () =>
@@ -1469,7 +1468,6 @@ describe("ChatView timeline estimator parity (full app)", () => {
         .not.toBeNull();
       expect(desktopTitlebarBandMetrics().bandHeight).toBe(22);
       expect(elementHeightByTestId("chat-top-header")).toBe(40);
-      expect(elementHeightByTestId("integrated-browser-top-header")).toBeGreaterThanOrEqual(40);
       expect(elementHeightByTestId("diff-panel-top-header")).toBe(40);
 
       expect(
@@ -1480,19 +1478,41 @@ describe("ChatView timeline estimator parity (full app)", () => {
         desktopCaptionButtonLaneMetrics("chat-header-actions").targetRight,
       );
       expect(
-        desktopTitlebarBandClearance("integrated-browser-header-actions").targetTop -
-          desktopTitlebarBandClearance("integrated-browser-header-actions").bandBottom,
-      ).toBeGreaterThanOrEqual(0);
-      expect(
-        window.innerWidth - desktopCaptionButtonLaneMetrics("integrated-browser-header-actions").laneWidth,
-      ).toBeGreaterThanOrEqual(desktopCaptionButtonLaneMetrics("integrated-browser-header-actions").targetRight);
-      expect(
         desktopTitlebarBandClearance("diff-panel-header-actions").targetTop -
           desktopTitlebarBandClearance("diff-panel-header-actions").bandBottom,
       ).toBeGreaterThanOrEqual(0);
       expect(window.innerWidth - desktopCaptionButtonLaneMetrics("diff-panel-header-actions").laneWidth).toBeGreaterThanOrEqual(
         desktopCaptionButtonLaneMetrics("diff-panel-header-actions").targetRight,
       );
+
+      const browserToggle = await waitForElement(
+        () => document.querySelector<HTMLElement>("button[aria-label='Toggle browser pane']"),
+        "Unable to find the browser toggle.",
+      );
+      browserToggle.click();
+      await waitForLayout();
+
+      await expect
+        .poll(
+          () =>
+            document.querySelector<HTMLElement>("[data-testid='integrated-browser-header-actions']") ??
+            null,
+        )
+        .not.toBeNull();
+      await expect
+        .poll(
+          () =>
+            document.querySelector<HTMLElement>("[data-testid='diff-panel-header-actions']") ?? null,
+        )
+        .toBeNull();
+      expect(elementHeightByTestId("integrated-browser-top-header")).toBeGreaterThanOrEqual(40);
+      expect(
+        desktopTitlebarBandClearance("integrated-browser-header-actions").targetTop -
+          desktopTitlebarBandClearance("integrated-browser-header-actions").bandBottom,
+      ).toBeGreaterThanOrEqual(0);
+      expect(
+        window.innerWidth - desktopCaptionButtonLaneMetrics("integrated-browser-header-actions").laneWidth,
+      ).toBeGreaterThanOrEqual(desktopCaptionButtonLaneMetrics("integrated-browser-header-actions").targetRight);
       expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
     } finally {
       await mounted.cleanup();
@@ -1506,7 +1526,6 @@ describe("ChatView timeline estimator parity (full app)", () => {
       browser: createDesktopBrowserBridge(PROJECT_ID, { closePane }),
     } as DesktopBridge;
     useBrowserPaneStore.setState({
-      open: true,
       width: 480,
     });
 
@@ -1516,6 +1535,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
         targetMessageId: "msg-user-browser-route-scope" as MessageId,
         targetText: "route scope",
       }),
+      initialEntries: [`/${THREAD_ID}?panel=browser`],
     });
 
     try {
@@ -1538,7 +1558,65 @@ describe("ChatView timeline estimator parity (full app)", () => {
         expect(closePane).toHaveBeenCalled();
       });
 
-      await mounted.navigate(`/${THREAD_ID}`);
+      await mounted.navigate(`/${THREAD_ID}?panel=browser`);
+
+      await expect
+        .poll(
+          () =>
+            document.querySelector<HTMLElement>("[data-testid='integrated-browser-pane']") ?? null,
+        )
+        .not.toBeNull();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps the browser panel open when switching to a same-project thread", async () => {
+    window.desktopBridge = {
+      ...window.desktopBridge,
+      browser: createDesktopBrowserBridge(PROJECT_ID),
+    } as DesktopBridge;
+    useBrowserPaneStore.setState({
+      width: 480,
+    });
+
+    const secondThreadId = "thread-browser-test-secondary" as ThreadId;
+    const snapshot = createSnapshotForTargetUser({
+      targetMessageId: "msg-user-browser-same-project-switch" as MessageId,
+      targetText: "same project switch",
+    });
+    const baseThread = snapshot.threads.find((thread) => thread.id === THREAD_ID);
+    if (!baseThread) {
+      throw new Error("Unable to build same-project browser switch snapshot.");
+    }
+    const snapshotWithSecondaryThread: OrchestrationReadModel = {
+      ...snapshot,
+      threads: [
+        ...snapshot.threads,
+        {
+      ...baseThread,
+      id: secondThreadId,
+      title: "Browser secondary thread",
+      ...(baseThread.session ? { session: { ...baseThread.session, threadId: secondThreadId } } : {}),
+        },
+      ],
+    };
+
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: snapshotWithSecondaryThread,
+      initialEntries: [`/${THREAD_ID}?panel=browser`],
+    });
+
+    try {
+      await expect
+        .poll(
+          () =>
+            document.querySelector<HTMLElement>("[data-testid='integrated-browser-pane']") ?? null,
+        )
+        .not.toBeNull();
+
+      await mounted.navigate(`/${secondThreadId}`);
 
       await expect
         .poll(
@@ -1557,7 +1635,6 @@ describe("ChatView timeline estimator parity (full app)", () => {
       browser: createDesktopBrowserBridge(PROJECT_ID),
     } as DesktopBridge;
     useBrowserPaneStore.setState({
-      open: true,
       width: 480,
     });
 
@@ -1572,6 +1649,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
         targetMessageId: "msg-user-browser-toolbar-min-width" as MessageId,
         targetText: "toolbar width",
       }),
+      initialEntries: [`/${THREAD_ID}?panel=browser`],
     });
 
     try {
@@ -1631,7 +1709,6 @@ describe("ChatView timeline estimator parity (full app)", () => {
       }),
     } as DesktopBridge;
     useBrowserPaneStore.setState({
-      open: true,
       width: 480,
     });
 
@@ -1646,13 +1723,13 @@ describe("ChatView timeline estimator parity (full app)", () => {
         targetMessageId: "msg-user-browser-open-race" as MessageId,
         targetText: "browser open race",
       }),
+      initialEntries: [`/${THREAD_ID}?panel=browser`],
     });
 
     try {
       await expect.poll(() => openCalls.length).toBeGreaterThanOrEqual(1);
 
       useBrowserPaneStore.setState({
-        open: true,
         width: 620,
       });
       await waitForLayout();

@@ -1,0 +1,4 @@
+interface:
+  display_name: "T3 Dev Desktop Start"
+  short_description: "Start the T3 desktop dev app reliably with blocker recovery."
+  default_prompt: "Use this skill to launch the T3 desktop app in dev mode and auto-recover if dist-electron outputs are missing."

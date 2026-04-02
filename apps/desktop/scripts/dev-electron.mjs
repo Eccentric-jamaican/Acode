@@ -8,6 +8,8 @@ import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
 const port = Number(process.env.ELECTRON_RENDERER_PORT ?? 5733);
 const devServerUrl = `http://localhost:${port}`;
 const appEntryPath = join(desktopDir, "dist-electron", "bootstrap.js");
+const electronPath = resolveElectronPath();
+const devRootArg = `--t3code-dev-root=${desktopDir}`;
 const requiredFiles = [
   "dist-electron/bootstrap.js",
   "dist-electron/main.js",
@@ -21,10 +23,21 @@ const watchedDirectories = [
 const forcedShutdownTimeoutMs = 1_500;
 const restartDebounceMs = 120;
 const childTreeGracePeriodMs = 1_200;
+const restartDependencyWaitTimeoutMs = 60_000;
+const dependencyResources = [`tcp:${port}`, ...requiredFiles.map((filePath) => `file:${filePath}`)];
 
-await waitOn({
-  resources: [`tcp:${port}`, ...requiredFiles.map((filePath) => `file:${filePath}`)],
-});
+async function waitForDependencies() {
+  await waitOn({
+    resources: dependencyResources,
+    timeout: restartDependencyWaitTimeoutMs,
+  });
+}
+
+console.info(
+  `[dev-electron] waiting for renderer and build outputs (url=${devServerUrl}, entry=${appEntryPath})`,
+);
+await waitForDependencies();
+console.info(`[dev-electron] dependencies ready; launching Electron from ${electronPath}`);
 
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
@@ -36,43 +49,80 @@ let restartQueue = Promise.resolve();
 const expectedExits = new WeakSet();
 const watchers = [];
 
-function killChildTreeByPid(pid, signal) {
-  if (process.platform === "win32" || typeof pid !== "number") {
+function killChildTreeByPid(pid) {
+  if (typeof pid !== "number") {
     return;
   }
 
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore" });
+    return;
+  }
+
+  const signal = "TERM";
   spawnSync("pkill", [`-${signal}`, "-P", String(pid)], { stdio: "ignore" });
 }
 
 function cleanupStaleDevApps() {
   if (process.platform === "win32") {
+    // Remove orphaned dev Electron instances from previous runs.
+    const escapedDesktopDir = desktopDir.replaceAll("'", "''");
+    const script = [
+      `$target = '--t3code-dev-root=${escapedDesktopDir}'`,
+      "Get-CimInstance Win32_Process |",
+      "  Where-Object { $_.Name -ieq 'electron.exe' -and $_.CommandLine -like \"*$target*\" } |",
+      "  ForEach-Object {",
+      "    try {",
+      "      Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop",
+      "    } catch {",
+      "      # best effort cleanup only",
+      "    }",
+      "  }",
+    ].join("\n");
+    spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      stdio: "ignore",
+    });
     return;
   }
 
-  spawnSync("pkill", ["-f", "--", `--t3code-dev-root=${desktopDir}`], { stdio: "ignore" });
+  spawnSync("pkill", ["-f", "--", devRootArg], { stdio: "ignore" });
 }
 
-function startApp() {
+async function startApp() {
   if (shuttingDown || currentApp !== null) {
     return;
   }
 
-  const app = spawn(
-    resolveElectronPath(),
-    [`--t3code-dev-root=${desktopDir}`, appEntryPath],
-    {
-      cwd: desktopDir,
-      env: {
-        ...childEnv,
-        VITE_DEV_SERVER_URL: devServerUrl,
-      },
-      stdio: "inherit",
+  try {
+    await waitForDependencies();
+  } catch (error) {
+    console.error(
+      `[dev-electron] dependencies not ready before spawn: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    if (!shuttingDown) {
+      scheduleRestart();
+    }
+    return;
+  }
+
+  if (shuttingDown || currentApp !== null) {
+    return;
+  }
+
+  const app = spawn(electronPath, [devRootArg, appEntryPath], {
+    cwd: desktopDir,
+    env: {
+      ...childEnv,
+      VITE_DEV_SERVER_URL: devServerUrl,
     },
-  );
+    stdio: "inherit",
+  });
 
   currentApp = app;
+  console.info(`[dev-electron] spawned electron pid=${app.pid ?? "unknown"}`);
 
-  app.once("error", () => {
+  app.once("error", (error) => {
+    console.error(`[dev-electron] spawn error: ${error instanceof Error ? error.message : String(error)}`);
     if (currentApp === app) {
       currentApp = null;
     }
@@ -82,7 +132,10 @@ function startApp() {
     }
   });
 
-  app.once("exit", () => {
+  app.once("exit", (code, signal) => {
+    console.info(
+      `[dev-electron] electron exited pid=${app.pid ?? "unknown"} code=${code ?? "null"} signal=${signal ?? "null"}`,
+    );
     if (currentApp === app) {
       currentApp = null;
     }
@@ -115,8 +168,12 @@ async function stopApp() {
     };
 
     app.once("exit", finish);
-    app.kill("SIGTERM");
-    killChildTreeByPid(app.pid, "TERM");
+    if (process.platform === "win32") {
+      killChildTreeByPid(app.pid);
+    } else {
+      app.kill("SIGTERM");
+      killChildTreeByPid(app.pid);
+    }
 
     setTimeout(() => {
       if (settled) {
@@ -124,7 +181,7 @@ async function stopApp() {
       }
 
       app.kill("SIGKILL");
-      killChildTreeByPid(app.pid, "KILL");
+      killChildTreeByPid(app.pid);
       finish();
     }, forcedShutdownTimeoutMs).unref();
   });
@@ -146,7 +203,7 @@ function scheduleRestart() {
       .then(async () => {
         await stopApp();
         if (!shuttingDown) {
-          startApp();
+          await startApp();
         }
       });
   }, restartDebounceMs);
@@ -200,7 +257,7 @@ async function shutdown(exitCode) {
 
 startWatchers();
 cleanupStaleDevApps();
-startApp();
+void startApp();
 
 process.once("SIGINT", () => {
   void shutdown(130);

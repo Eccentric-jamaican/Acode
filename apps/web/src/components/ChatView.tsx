@@ -46,7 +46,12 @@ import { projectSearchEntriesQueryOptions } from "~/lib/projectReactQuery";
 import { serverConfigQueryOptions, serverQueryKeys } from "~/lib/serverReactQuery";
 
 import { isElectron, isElectronRuntime } from "../env";
-import { parseDiffRouteSearch, stripDiffSearchParams } from "../diffRouteSearch";
+import {
+  parseDiffRouteSearch,
+  resolveRightPanelMode,
+  withDiffSelection,
+  withRightPanelMode,
+} from "../diffRouteSearch";
 import {
   type ComposerSlashCommand,
   type ComposerTrigger,
@@ -170,7 +175,6 @@ import { Toggle } from "./ui/toggle";
 import { SidebarInsetTrigger } from "./ui/sidebar";
 import { newCommandId, newMessageId, newThreadId } from "~/lib/utils";
 import { readNativeApi } from "~/nativeApi";
-import { useBrowserPaneStore } from "~/browserPaneStore";
 import {
   getAppModelOptions,
   resolveAppModelSelection,
@@ -508,8 +512,6 @@ export default function ChatView({ threadId }: ChatViewProps) {
   const queryClient = useQueryClient();
   const createWorktreeMutation = useMutation(gitCreateWorktreeMutationOptions({ queryClient }));
   const composerDraft = useComposerThreadDraft(threadId);
-  const browserPaneOpen = useBrowserPaneStore((state) => state.open);
-  const setBrowserPaneOpen = useBrowserPaneStore((state) => state.setOpen);
   const prompt = composerDraft.prompt;
   const composerImages = composerDraft.images;
   const composerPinnedSelections = composerDraft.pinnedSelections;
@@ -676,7 +678,9 @@ export default function ChatView({ threadId }: ChatViewProps) {
     () => parseDiffRouteSearch(rawSearch as Record<string, unknown>),
     [rawSearch],
   );
-  const diffOpen = diffSearch.diff === "1";
+  const rightPanelMode = useMemo(() => resolveRightPanelMode(diffSearch), [diffSearch]);
+  const diffOpen = rightPanelMode === "diff";
+  const browserPaneOpen = rightPanelMode === "browser";
   const activeThreadId = activeThread?.id ?? null;
   const activeLatestTurn = activeThread?.latestTurn ?? null;
   const latestTurnSettled = isLatestTurnSettled(activeLatestTurn, activeThread?.session ?? null);
@@ -1254,9 +1258,25 @@ export default function ChatView({ threadId }: ChatViewProps) {
       to: "/$threadId",
       params: { threadId },
       replace: true,
-      search: diffOpen ? {} : { diff: "1" },
+      search: (previous) =>
+        withRightPanelMode(
+          previous as Record<string, unknown>,
+          diffOpen ? "none" : "diff",
+        ),
     });
   }, [diffOpen, navigate, threadId]);
+  const onToggleBrowser = useCallback(() => {
+    void navigate({
+      to: "/$threadId",
+      params: { threadId },
+      replace: true,
+      search: (previous) =>
+        withRightPanelMode(
+          previous as Record<string, unknown>,
+          browserPaneOpen ? "none" : "browser",
+        ),
+    });
+  }, [browserPaneOpen, navigate, threadId]);
 
   const envLocked = Boolean(
     activeThread &&
@@ -3276,12 +3296,11 @@ export default function ChatView({ threadId }: ChatViewProps) {
       void navigate({
         to: "/$threadId",
         params: { threadId },
-        search: (previous) => {
-          const rest = stripDiffSearchParams(previous);
-          return filePath
-            ? { ...rest, diff: "1", diffTurnId: turnId, diffFilePath: filePath }
-            : { ...rest, diff: "1", diffTurnId: turnId };
-        },
+        search: (previous) =>
+          withDiffSelection(previous as Record<string, unknown>, {
+            turnId,
+            ...(filePath ? { filePath } : {}),
+          }),
       });
     },
     [navigate, threadId],
@@ -3371,7 +3390,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
               : null
           }
           onToggleDiff={onToggleDiff}
-          onToggleBrowser={() => setBrowserPaneOpen(!browserPaneOpen)}
+          onToggleBrowser={onToggleBrowser}
         />
       </header>
 

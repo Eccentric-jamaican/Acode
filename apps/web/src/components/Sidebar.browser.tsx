@@ -887,7 +887,6 @@ beforeEach(() => {
     projectDraftThreadIdByProjectId: {},
   });
   useBrowserPaneStore.setState({
-    open: false,
     width: 480,
   });
 });
@@ -1107,12 +1106,11 @@ describe("Sidebar browser", () => {
       browser: createDesktopBrowserBridge(PROJECT_ID),
     } as DesktopBridge;
     useBrowserPaneStore.setState({
-      open: true,
       width: 480,
     });
 
     const mounted = await mountSidebarApp({
-      initialEntries: [`/${THREAD_ID}?diff=1`],
+      initialEntries: [`/${THREAD_ID}?panel=browser`],
       viewport: {
         width: 1680,
         height: 960,
@@ -1120,11 +1118,9 @@ describe("Sidebar browser", () => {
     });
 
     await expect.element(page.getByTestId("integrated-browser-header-actions")).toBeVisible();
-    await expect.element(page.getByTestId("diff-panel-header-actions")).toBeVisible();
     await expect.element(page.getByTestId("integrated-browser-pane")).toBeVisible();
     await expect.poll(() => desktopTitlebarBandMetrics().bandHeight).toBe(22);
     await expect.poll(() => elementHeightByTestId("integrated-browser-top-header")).toBeGreaterThanOrEqual(40);
-    await expect.poll(() => elementHeightByTestId("diff-panel-top-header")).toBe(40);
     await expect.poll(() => viewportRightGapByTestId("integrated-browser-pane")).toBe(0);
 
     await expect
@@ -1146,6 +1142,18 @@ describe("Sidebar browser", () => {
         return window.innerWidth - metrics.targetRight;
       })
       .toBeLessThanOrEqual(16);
+
+    await expect.element(page.getByLabelText("Toggle diff panel")).toBeVisible();
+    await page.getByLabelText("Toggle diff panel").click();
+    await expect.element(page.getByTestId("diff-panel-header-actions")).toBeVisible();
+    await expect
+      .poll(
+        () =>
+          document.querySelector<HTMLElement>("[data-testid='integrated-browser-pane']") ?? null,
+      )
+      .toBeNull();
+    await expect.poll(() => elementHeightByTestId("diff-panel-top-header")).toBe(40);
+
     await expect
       .poll(
         () =>

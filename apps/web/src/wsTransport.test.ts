@@ -84,6 +84,23 @@ afterEach(() => {
 });
 
 describe("WsTransport", () => {
+  it("refuses to fall back to env url when desktop bridge does not provide ws url", () => {
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        location: { hostname: "localhost", port: "3020" },
+        desktopBridge: {
+          getWsUrl: () => null,
+        },
+      },
+    });
+
+    expect(() => new WsTransport()).toThrow(
+      "Desktop bridge is available but did not provide a WebSocket URL.",
+    );
+    expect(sockets).toHaveLength(0);
+  });
+
   it("routes valid push envelopes to channel listeners", () => {
     const transport = new WsTransport("ws://localhost:3020");
     const socket = getSocket();
