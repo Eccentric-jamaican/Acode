@@ -12,6 +12,13 @@ This document covers how to run desktop releases from one tag, first without sig
 - Includes Electron auto-update metadata (for example `latest*.yml` and `*.blockmap`) in release assets.
 - Publishes the CLI package (`apps/server`, npm package `t3`) with OIDC trusted publishing.
 - Windows signing is optional and auto-detected from Azure Trusted Signing secrets.
+- Uses GitHub auto-generated release notes with `.github/release.yml` formatting.
+
+## Release notes formatting
+
+- The screenshot-style bullets (`<title> by @author in #123`) come from merged pull requests.
+- Direct commits to `main` do not have PR numbers, so they cannot render as `in #123`.
+- For that release page style, use branch -> PR -> merge before tagging.
 
 ## Desktop auto-update notes
 
