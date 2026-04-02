@@ -123,6 +123,44 @@ vi.mock("electron", () => {
 
 import { BrowserRuntimeRegistry } from "./browserRuntime";
 
+interface TestWebContents {
+  currentUrl: string;
+  loadURL: (url: string) => Promise<void>;
+  setZoomFactorCalls: number[];
+}
+
+interface TestView {
+  webContents: TestWebContents;
+  partition: string | null;
+  setBoundsCalls: Array<{ x: number; y: number; width: number; height: number }>;
+  setVisibleCalls: boolean[];
+}
+
+interface TestTabRuntime {
+  view: TestView;
+}
+
+interface TestProjectRuntime {
+  tabs: Map<string, TestTabRuntime>;
+  activeTabId: string | null;
+}
+
+function getProjectRuntime(registry: BrowserRuntimeRegistry, projectId: ProjectId): TestProjectRuntime {
+  const runtime = ((registry as any).runtimes as Map<ProjectId, TestProjectRuntime>).get(projectId);
+  expect(runtime).toBeDefined();
+  return runtime!;
+}
+
+function getActiveTabRuntime(registry: BrowserRuntimeRegistry, projectId: ProjectId): TestTabRuntime {
+  const projectRuntime = getProjectRuntime(registry, projectId);
+  expect(projectRuntime.activeTabId).toBeTruthy();
+  const tab = projectRuntime.activeTabId
+    ? projectRuntime.tabs.get(projectRuntime.activeTabId)
+    : undefined;
+  expect(tab).toBeDefined();
+  return tab!;
+}
+
 describe("BrowserRuntimeRegistry", () => {
   beforeEach(() => {
     globalThis.__browserRuntimeTestLog = [];
@@ -140,14 +178,9 @@ describe("BrowserRuntimeRegistry", () => {
     const projectId = ProjectId.makeUnsafe("project-1");
 
     await registry.ensure(projectId);
-    const runtime = ((registry as any).runtimes as Map<
-      ProjectId,
-      { view: { webContents: { currentUrl: string; loadURL: (url: string) => Promise<void> } } }
-    >).get(projectId);
-
-    expect(runtime).toBeDefined();
-    runtime!.view.webContents.loadURL = async () => {
-      runtime!.view.webContents.currentUrl = "https://www.google.com/";
+    const tab = getActiveTabRuntime(registry, projectId);
+    tab.view.webContents.loadURL = async () => {
+      tab.view.webContents.currentUrl = "https://www.google.com/";
       throw new Error("ERR_ABORTED");
     };
 
@@ -165,14 +198,9 @@ describe("BrowserRuntimeRegistry", () => {
     const projectId = ProjectId.makeUnsafe("project-2");
 
     await registry.ensure(projectId);
-    const runtime = ((registry as any).runtimes as Map<
-      ProjectId,
-      { view: { webContents: { currentUrl: string; loadURL: (url: string) => Promise<void> } } }
-    >).get(projectId);
-
-    expect(runtime).toBeDefined();
-    runtime!.view.webContents.loadURL = async () => {
-      runtime!.view.webContents.currentUrl = "about:blank";
+    const tab = getActiveTabRuntime(registry, projectId);
+    tab.view.webContents.loadURL = async () => {
+      tab.view.webContents.currentUrl = "about:blank";
       throw new Error("ERR_ABORTED");
     };
 
@@ -184,13 +212,8 @@ describe("BrowserRuntimeRegistry", () => {
     const projectId = ProjectId.makeUnsafe("project-persistent-1");
 
     await registry.ensure(projectId);
-    const runtime = ((registry as any).runtimes as Map<
-      ProjectId,
-      { view: { partition: string | null } }
-    >).get(projectId);
-
-    expect(runtime).toBeDefined();
-    expect(runtime!.view.partition).toBe(`persist:t3-browser-${String(projectId)}`);
+    const tab = getActiveTabRuntime(registry, projectId);
+    expect(tab.view.partition).toBe(`persist:t3-browser-${String(projectId)}`);
   });
 
   it("attaches the native view before applying pane bounds", async () => {
@@ -211,28 +234,18 @@ describe("BrowserRuntimeRegistry", () => {
     await registry.open(projectId, { x: 10, y: 20, width: 320, height: 240 });
     vi.runAllTimers();
 
-    const runtime = ((registry as any).runtimes as Map<
-      ProjectId,
-      {
-        view: {
-          setBoundsCalls: Array<{ x: number; y: number; width: number; height: number }>;
-          setVisibleCalls: boolean[];
-        };
-      }
-    >).get(projectId);
-
-    expect(runtime).toBeDefined();
-    expect(addChildView).toHaveBeenCalledWith(runtime!.view);
+    const tab = getActiveTabRuntime(registry, projectId);
+    expect(addChildView).toHaveBeenCalledWith(tab.view);
     expect(globalThis.__browserRuntimeTestLog?.indexOf("addChildView")).toBeLessThan(
       globalThis.__browserRuntimeTestLog?.indexOf("setBounds") ?? Number.POSITIVE_INFINITY,
     );
-    expect(runtime!.view.setBoundsCalls.at(-1)).toEqual({
+    expect(tab.view.setBoundsCalls.at(-1)).toEqual({
       x: 10,
       y: 20,
       width: 320,
       height: 240,
     });
-    expect(runtime!.view.setVisibleCalls.at(-1)).toBe(true);
+    expect(tab.view.setVisibleCalls.at(-1)).toBe(true);
   });
 
   it("updates pane state when reopening with new bounds", async () => {
@@ -249,20 +262,12 @@ describe("BrowserRuntimeRegistry", () => {
     await registry.open(projectId, { x: 10, y: 20, width: 320, height: 240 });
     const snapshot = await registry.open(projectId, { x: 25, y: 35, width: 480, height: 360 });
     vi.runAllTimers();
-
-    const runtime = ((registry as any).runtimes as Map<
-      ProjectId,
-      {
-        view: {
-          setBoundsCalls: Array<{ x: number; y: number; width: number; height: number }>;
-        };
-      }
-    >).get(projectId);
+    const tab = getActiveTabRuntime(registry, projectId);
 
     expect(snapshot.paneOpen).toBe(true);
     expect(snapshot.paneProjectId).toBe(projectId);
     expect(snapshot.paneBounds).toEqual({ x: 25, y: 35, width: 480, height: 360 });
-    expect(runtime!.view.setBoundsCalls.at(-1)).toEqual({
+    expect(tab.view.setBoundsCalls.at(-1)).toEqual({
       x: 25,
       y: 35,
       width: 480,
@@ -285,20 +290,9 @@ describe("BrowserRuntimeRegistry", () => {
     registry.setWindow(window as never);
     await registry.open(projectId, { x: 10, y: 20, width: 420, height: 320 });
     vi.runAllTimers();
-
-    const runtime = ((registry as any).runtimes as Map<
-      ProjectId,
-      {
-        view: {
-          setBoundsCalls: Array<{ x: number; y: number; width: number; height: number }>;
-          webContents: { setZoomFactorCalls: number[] };
-        };
-      }
-    >).get(projectId);
-
-    expect(runtime).toBeDefined();
+    const tab = getActiveTabRuntime(registry, projectId);
     await registry.closePane();
-    expect(removeChildView).toHaveBeenCalledWith(runtime!.view);
+    expect(removeChildView).toHaveBeenCalledWith(tab.view);
     expect((registry as any).attachedProjectId).toBeNull();
     expect((registry as any).paneOpen).toBe(false);
     expect((registry as any).paneBounds).toBeNull();
@@ -311,13 +305,13 @@ describe("BrowserRuntimeRegistry", () => {
     expect(reopened.paneProjectId).toBe(projectId);
     expect(reopened.paneBounds).toEqual({ x: 25, y: 35, width: 480, height: 360 });
     expect(addChildView).toHaveBeenCalledTimes(2);
-    expect(runtime!.view.setBoundsCalls.at(-1)).toEqual({
+    expect(tab.view.setBoundsCalls.at(-1)).toEqual({
       x: 25,
       y: 35,
       width: 480,
       height: 360,
     });
-    expect(runtime!.view.webContents.setZoomFactorCalls).toHaveLength(0);
+    expect(tab.view.webContents.setZoomFactorCalls).toHaveLength(0);
   });
 
   it("applies requested pane bounds directly to the native view", async () => {
@@ -333,18 +327,10 @@ describe("BrowserRuntimeRegistry", () => {
     registry.setWindow(window as never);
     const snapshot = await registry.open(projectId, { x: 500, y: 35, width: 200, height: 360 });
     vi.runAllTimers();
-
-    const runtime = ((registry as any).runtimes as Map<
-      ProjectId,
-      {
-        view: {
-          setBoundsCalls: Array<{ x: number; y: number; width: number; height: number }>;
-        };
-      }
-    >).get(projectId);
+    const tab = getActiveTabRuntime(registry, projectId);
 
     expect(snapshot.paneBounds).toEqual({ x: 500, y: 35, width: 200, height: 360 });
-    expect(runtime!.view.setBoundsCalls.at(-1)).toEqual({
+    expect(tab.view.setBoundsCalls.at(-1)).toEqual({
       x: 500,
       y: 35,
       width: 200,
@@ -354,7 +340,7 @@ describe("BrowserRuntimeRegistry", () => {
     await registry.open(projectId, { x: 580, y: 35, width: 200, height: 360 });
     vi.runAllTimers();
 
-    expect(runtime!.view.setBoundsCalls.at(-1)).toEqual({
+    expect(tab.view.setBoundsCalls.at(-1)).toEqual({
       x: 580,
       y: 35,
       width: 200,
@@ -400,18 +386,8 @@ describe("BrowserRuntimeRegistry", () => {
     registry.setWindow(window as never);
     await registry.open(projectId, { x: 500, y: 35, width: 200, height: 360 });
     vi.runAllTimers();
-
-    const runtime = ((registry as any).runtimes as Map<
-      ProjectId,
-      {
-        view: {
-          setBoundsCalls: Array<{ x: number; y: number; width: number; height: number }>;
-        };
-      }
-    >).get(projectId);
-
-    expect(runtime).toBeDefined();
-    expect(runtime!.view.setBoundsCalls.at(-1)).toEqual({
+    const tab = getActiveTabRuntime(registry, projectId);
+    expect(tab.view.setBoundsCalls.at(-1)).toEqual({
       x: 400,
       y: 28,
       width: 160,
@@ -431,17 +407,6 @@ describe("BrowserRuntimeRegistry", () => {
 
     registry.setWindow(window as never);
     await registry.ensure(projectId);
-
-    const runtime = ((registry as any).runtimes as Map<
-      ProjectId,
-      {
-        view: {
-          setBoundsCalls: Array<{ x: number; y: number; width: number; height: number }>;
-        };
-      }
-    >).get(projectId);
-
-    expect(runtime).toBeDefined();
 
     let resolveFirstOpen: () => void = () => undefined;
     const firstOpenGate = new Promise<void>((resolve) => {
@@ -468,7 +433,8 @@ describe("BrowserRuntimeRegistry", () => {
     vi.runAllTimers();
 
     expect(latestSnapshot.paneBounds).toEqual({ x: 420, y: 35, width: 260, height: 360 });
-    expect(runtime!.view.setBoundsCalls.at(-1)).toEqual({
+    const tab = getActiveTabRuntime(registry, projectId);
+    expect(tab.view.setBoundsCalls.at(-1)).toEqual({
       x: 420,
       y: 35,
       width: 260,
@@ -513,18 +479,8 @@ describe("BrowserRuntimeRegistry", () => {
     await openPromise;
     vi.runAllTimers();
     await Promise.resolve();
-
-    const runtime = ((registry as any).runtimes as Map<
-      ProjectId,
-      {
-        view: {
-          setBoundsCalls: Array<{ x: number; y: number; width: number; height: number }>;
-        };
-      }
-    >).get(projectId);
-
-    expect(runtime).toBeDefined();
-    expect(runtime!.view.setBoundsCalls).toHaveLength(0);
+    const tab = getActiveTabRuntime(registry, projectId);
+    expect(tab.view.setBoundsCalls).toHaveLength(0);
     expect((registry as any).paneOpen).toBe(false);
     expect((registry as any).paneBounds).toBeNull();
     expect((registry as any).attachedProjectId).toBeNull();
