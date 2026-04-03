@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.23] - 2026-04-03
+
+### Added
+- New OpenCode provider support across server + web layers, including adapter plumbing and turn mapping coverage.
+- Pretext-powered timeline text layout support in web chat, with a dedicated shared layout adapter and focused unit tests.
+
+### Changed
+- Thread timeline height estimation now routes through a reusable text layout module with caching and graceful fallback behavior.
+- Provider and model handling updates in chat/session flows to support OpenCode defaults and custom model selection.
+
+### Fixed
+- Fixed constrained chat header action spacing when browser/diff panes reduce thread width.
+- Fixed missing `@chenglou/pretext` dependency resolution in the main app environment by adding package wiring to web dependencies.
+
 ## [0.2.21] - 2026-04-02
 
 ### Added
