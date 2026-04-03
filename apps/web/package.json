@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.2.0",
+    "@chenglou/pretext": "^0.0.4",
     "@lexical/react": "^0.41.0",
     "@pierre/diffs": "^1.1.0-beta.16",
     "@t3tools/contracts": "workspace:*",
