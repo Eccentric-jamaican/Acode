@@ -21,3 +21,7 @@
 
 8. Session Presets
    Save named browser states (tabs + auth + viewport) and restore them in one click.
+
+9. Chat Import + Grounded Citations (Planned)
+   Import a ChatGPT transcript into a new desktop thread and continue from a structured handoff.
+   Preserve and render grounded-search citations so sources remain visible, auditable, and reusable in follow-up turns.

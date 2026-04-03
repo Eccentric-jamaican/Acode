@@ -19,7 +19,9 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { ProviderHealth, type ProviderHealthShape } from "../Services/ProviderHealth";
 
 const DEFAULT_TIMEOUT_MS = 4_000;
+const OPENCODE_TIMEOUT_MS = 12_000;
 const CODEX_PROVIDER = "codex" as const;
+const OPENCODE_PROVIDER = "opencode" as const;
 
 // ── Pure helpers ────────────────────────────────────────────────────
 
@@ -35,12 +37,12 @@ function nonEmptyTrimmed(value: string | undefined): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function isCommandMissingCause(error: unknown): boolean {
+function isCommandMissingCause(error: unknown, command: string): boolean {
   if (!(error instanceof Error)) return false;
   const lower = error.message.toLowerCase();
   return (
-    lower.includes("command not found: codex") ||
-    lower.includes("spawn codex enoent") ||
+    lower.includes(`command not found: ${command}`) ||
+    lower.includes(`spawn ${command} enoent`) ||
     lower.includes("enoent") ||
     lower.includes("notfound")
   );
@@ -171,11 +173,37 @@ const collectStreamAsString = <E>(stream: Stream.Stream<Uint8Array, E>): Effect.
     (acc, chunk) => acc + new TextDecoder().decode(chunk),
   );
 
-const runCodexCommand = (args: ReadonlyArray<string>) =>
+function quoteForCmd(argument: string): string {
+  if (argument.length === 0) {
+    return '""';
+  }
+  if (!/[ \t"&|<>^]/.test(argument)) {
+    return argument;
+  }
+  return `"${argument.replace(/"/g, '\\"')}"`;
+}
+
+function resolveCommandInvocation(
+  commandName: string,
+  args: ReadonlyArray<string>,
+): { command: string; args: ReadonlyArray<string>; shell: boolean } {
+  if (process.platform !== "win32") {
+    return { command: commandName, args, shell: false };
+  }
+  const commandLine = [commandName, ...args].map(quoteForCmd).join(" ");
+  return {
+    command: "cmd.exe",
+    args: ["/d", "/s", "/c", commandLine],
+    shell: false,
+  };
+}
+
+const runCommand = (commandName: string, args: ReadonlyArray<string>) =>
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const command = ChildProcess.make("codex", [...args], {
-      shell: process.platform === "win32",
+    const invocation = resolveCommandInvocation(commandName, args);
+    const command = ChildProcess.make(invocation.command, [...invocation.args], {
+      shell: invocation.shell,
     });
 
     const child = yield* spawner.spawn(command);
@@ -202,7 +230,7 @@ export const checkCodexProviderStatus: Effect.Effect<
   const checkedAt = new Date().toISOString();
 
   // Probe 1: `codex --version` — is the CLI reachable?
-  const versionProbe = yield* runCodexCommand(["--version"]).pipe(
+  const versionProbe = yield* runCommand("codex", ["--version"]).pipe(
     Effect.timeoutOption(DEFAULT_TIMEOUT_MS),
     Effect.result,
   );
@@ -215,7 +243,7 @@ export const checkCodexProviderStatus: Effect.Effect<
       available: false,
       authStatus: "unknown" as const,
       checkedAt,
-      message: isCommandMissingCause(error)
+      message: isCommandMissingCause(error, "codex")
         ? "Codex CLI (`codex`) is not installed or not on PATH."
         : `Failed to execute Codex CLI health check: ${error instanceof Error ? error.message : String(error)}.`,
     };
@@ -248,7 +276,7 @@ export const checkCodexProviderStatus: Effect.Effect<
   }
 
   // Probe 2: `codex login status` — is the user authenticated?
-  const authProbe = yield* runCodexCommand(["login", "status"]).pipe(
+  const authProbe = yield* runCommand("codex", ["login", "status"]).pipe(
     Effect.timeoutOption(DEFAULT_TIMEOUT_MS),
     Effect.result,
   );
@@ -290,14 +318,77 @@ export const checkCodexProviderStatus: Effect.Effect<
   } satisfies ServerProviderStatus;
 });
 
+export const checkOpencodeProviderStatus: Effect.Effect<
+  ServerProviderStatus,
+  never,
+  ChildProcessSpawner.ChildProcessSpawner
+> = Effect.gen(function* () {
+  const checkedAt = new Date().toISOString();
+
+  const versionProbe = yield* runCommand("opencode", ["--version"]).pipe(
+    Effect.timeoutOption(OPENCODE_TIMEOUT_MS),
+    Effect.result,
+  );
+
+  if (Result.isFailure(versionProbe)) {
+    const error = versionProbe.failure;
+    return {
+      provider: OPENCODE_PROVIDER,
+      status: "error" as const,
+      available: false,
+      authStatus: "unknown" as const,
+      checkedAt,
+      message: isCommandMissingCause(error, "opencode")
+        ? "OpenCode CLI (`opencode`) is not installed or not on PATH."
+        : `Failed to execute OpenCode CLI health check: ${error instanceof Error ? error.message : String(error)}.`,
+    };
+  }
+
+  if (Option.isNone(versionProbe.success)) {
+    return {
+      provider: OPENCODE_PROVIDER,
+      status: "error" as const,
+      available: false,
+      authStatus: "unknown" as const,
+      checkedAt,
+      message: "OpenCode CLI is installed but failed to run. Timed out while running command.",
+    };
+  }
+
+  const version = versionProbe.success.value;
+  if (version.code !== 0) {
+    const detail = detailFromResult(version);
+    return {
+      provider: OPENCODE_PROVIDER,
+      status: "error" as const,
+      available: false,
+      authStatus: "unknown" as const,
+      checkedAt,
+      message: detail
+        ? `OpenCode CLI is installed but failed to run. ${detail}`
+        : "OpenCode CLI is installed but failed to run.",
+    };
+  }
+
+  return {
+    provider: OPENCODE_PROVIDER,
+    status: "ready",
+    available: true,
+    authStatus: "unknown",
+    checkedAt,
+    message: "OpenCode authentication status is managed externally in v1.",
+  } satisfies ServerProviderStatus;
+});
+
 // ── Layer ───────────────────────────────────────────────────────────
 
 export const ProviderHealthLive = Layer.effect(
   ProviderHealth,
   Effect.gen(function* () {
     const codexStatus = yield* checkCodexProviderStatus;
+    const opencodeStatus = yield* checkOpencodeProviderStatus;
     return {
-      getStatuses: Effect.succeed([codexStatus]),
+      getStatuses: Effect.succeed([codexStatus, opencodeStatus]),
     } satisfies ProviderHealthShape;
   }),
 );

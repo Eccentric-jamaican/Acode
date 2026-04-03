@@ -698,11 +698,18 @@ describe("PROVIDER_OPTIONS", () => {
   it("keeps Claude Code and Cursor visible as unavailable placeholders in the stack base", () => {
     const claude = PROVIDER_OPTIONS.find((option) => option.value === "claudeCode");
     const cursor = PROVIDER_OPTIONS.find((option) => option.value === "cursor");
+    const opencode = PROVIDER_OPTIONS.find((option) => option.value === "opencode");
     expect(PROVIDER_OPTIONS).toEqual([
       { value: "codex", label: "Codex", available: true },
+      { value: "opencode", label: "OpenCode", available: true },
       { value: "claudeCode", label: "Claude Code", available: false },
       { value: "cursor", label: "Cursor", available: false },
     ]);
+    expect(opencode).toEqual({
+      value: "opencode",
+      label: "OpenCode",
+      available: true,
+    });
     expect(claude).toEqual({
       value: "claudeCode",
       label: "Claude Code",

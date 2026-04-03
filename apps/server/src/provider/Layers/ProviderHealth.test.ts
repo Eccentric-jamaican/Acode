@@ -4,11 +4,36 @@ import { Effect, Layer, Sink, Stream } from "effect";
 import * as PlatformError from "effect/PlatformError";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
-import { checkCodexProviderStatus, parseAuthStatusFromOutput } from "./ProviderHealth";
+import {
+  checkCodexProviderStatus,
+  checkOpencodeProviderStatus,
+  parseAuthStatusFromOutput,
+} from "./ProviderHealth";
 
 // ── Test helpers ────────────────────────────────────────────────────
 
 const encoder = new TextEncoder();
+
+function unwrapWindowsCmdArgs(args: ReadonlyArray<string>): ReadonlyArray<string> {
+  if (
+    args.length >= 4 &&
+    args[0] === "/d" &&
+    args[1] === "/s" &&
+    args[2] === "/c" &&
+    typeof args[3] === "string"
+  ) {
+    const commandLine = args.slice(3).join(" ").trim();
+    if (commandLine.length === 0) {
+      return [];
+    }
+    const parsed = commandLine.split(/\s+/g);
+    if (parsed[0] === "codex" || parsed[0] === "opencode") {
+      return parsed.slice(1);
+    }
+    return parsed;
+  }
+  return args;
+}
 
 function mockHandle(result: { stdout: string; stderr: string; code: number }) {
   return ChildProcessSpawner.makeHandle({
@@ -32,7 +57,7 @@ function mockSpawnerLayer(
     ChildProcessSpawner.ChildProcessSpawner,
     ChildProcessSpawner.make((command) => {
       const cmd = command as unknown as { args: ReadonlyArray<string> };
-      return Effect.succeed(mockHandle(handler(cmd.args)));
+      return Effect.succeed(mockHandle(handler(unwrapWindowsCmdArgs(cmd.args))));
     }),
   );
 }
@@ -83,6 +108,35 @@ it.effect("returns unavailable when codex is missing", () =>
     assert.strictEqual(status.authStatus, "unknown");
     assert.strictEqual(status.message, "Codex CLI (`codex`) is not installed or not on PATH.");
   }).pipe(Effect.provide(failingSpawnerLayer("spawn codex ENOENT"))),
+);
+
+it.effect("returns ready when opencode is installed", () =>
+  Effect.gen(function* () {
+    const status = yield* checkOpencodeProviderStatus;
+    assert.strictEqual(status.provider, "opencode");
+    assert.strictEqual(status.status, "ready");
+    assert.strictEqual(status.available, true);
+    assert.strictEqual(status.authStatus, "unknown");
+  }).pipe(
+    Effect.provide(
+      mockSpawnerLayer((args) => {
+        const joined = args.join(" ");
+        if (joined === "--version") return { stdout: "opencode 0.1.0\n", stderr: "", code: 0 };
+        throw new Error(`Unexpected args: ${joined}`);
+      }),
+    ),
+  ),
+);
+
+it.effect("returns unavailable when opencode is missing", () =>
+  Effect.gen(function* () {
+    const status = yield* checkOpencodeProviderStatus;
+    assert.strictEqual(status.provider, "opencode");
+    assert.strictEqual(status.status, "error");
+    assert.strictEqual(status.available, false);
+    assert.strictEqual(status.authStatus, "unknown");
+    assert.strictEqual(status.message, "OpenCode CLI (`opencode`) is not installed or not on PATH.");
+  }).pipe(Effect.provide(failingSpawnerLayer("spawn opencode ENOENT"))),
 );
 
 it.effect("returns unauthenticated when auth probe reports login required", () =>

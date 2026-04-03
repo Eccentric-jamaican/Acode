@@ -56,6 +56,14 @@ const MODEL_PROVIDER_SETTINGS: Array<{
     placeholder: "your-codex-model-slug",
     example: "gpt-6.7-codex-ultra-preview",
   },
+  {
+    provider: "opencode",
+    title: "OpenCode",
+    description:
+      "Save OpenCode model slugs in `<providerID>/<modelID>` format for the picker and `/model` command.",
+    placeholder: "provider/model",
+    example: "openai/gpt-4.1",
+  },
 ] as const;
 
 function getCustomModelsForProvider(
@@ -64,8 +72,11 @@ function getCustomModelsForProvider(
 ) {
   switch (provider) {
     case "codex":
-    default:
       return settings.customCodexModels;
+    case "opencode":
+      return settings.customOpencodeModels;
+    default:
+      return [];
   }
 }
 
@@ -75,16 +86,22 @@ function getDefaultCustomModelsForProvider(
 ) {
   switch (provider) {
     case "codex":
-    default:
       return defaults.customCodexModels;
+    case "opencode":
+      return defaults.customOpencodeModels;
+    default:
+      return [];
   }
 }
 
 function patchCustomModels(provider: ProviderKind, models: string[]) {
   switch (provider) {
     case "codex":
-    default:
       return { customCodexModels: models };
+    case "opencode":
+      return { customOpencodeModels: models };
+    default:
+      return {};
   }
 }
 
@@ -99,6 +116,7 @@ function SettingsRouteView() {
     Record<ProviderKind, string>
   >({
     codex: "",
+    opencode: "",
   });
   const [customModelErrorByProvider, setCustomModelErrorByProvider] = useState<
     Partial<Record<ProviderKind, string | null>>

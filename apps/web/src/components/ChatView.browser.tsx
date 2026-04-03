@@ -777,6 +777,17 @@ function desktopCaptionButtonLaneMetrics(targetTestId: string): {
   };
 }
 
+function chatHeaderTrailingInsetPx(): number {
+  const chatSurface = document.querySelector<HTMLElement>("[data-testid='chat-view-root']");
+  const trailingControl = document.querySelector<HTMLElement>("button[aria-label='Toggle diff panel']");
+  if (!chatSurface || !trailingControl) {
+    return Number.POSITIVE_INFINITY;
+  }
+  return Math.round(
+    chatSurface.getBoundingClientRect().right - trailingControl.getBoundingClientRect().right,
+  );
+}
+
 function computedBackgroundColorByTestId(testId: string): string {
   const element = document.querySelector<HTMLElement>(`[data-testid='${testId}']`);
   expect(element).not.toBeNull();
@@ -1484,6 +1495,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
       expect(window.innerWidth - desktopCaptionButtonLaneMetrics("diff-panel-header-actions").laneWidth).toBeGreaterThanOrEqual(
         desktopCaptionButtonLaneMetrics("diff-panel-header-actions").targetRight,
       );
+      expect(chatHeaderTrailingInsetPx()).toBeLessThanOrEqual(24);
 
       const browserToggle = await waitForElement(
         () => document.querySelector<HTMLElement>("button[aria-label='Toggle browser pane']"),
@@ -1513,6 +1525,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
       expect(
         window.innerWidth - desktopCaptionButtonLaneMetrics("integrated-browser-header-actions").laneWidth,
       ).toBeGreaterThanOrEqual(desktopCaptionButtonLaneMetrics("integrated-browser-header-actions").targetRight);
+      expect(chatHeaderTrailingInsetPx()).toBeLessThanOrEqual(24);
       expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
     } finally {
       await mounted.cleanup();

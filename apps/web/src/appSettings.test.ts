@@ -22,6 +22,16 @@ describe("normalizeCustomModelSlugs", () => {
       ]),
     ).toEqual(["custom/internal-model"]);
   });
+
+  it("keeps valid opencode provider/model custom slugs", () => {
+    expect(normalizeCustomModelSlugs(["openai/gpt-4.1", "default"], "opencode")).toEqual([
+      "openai/gpt-4.1",
+    ]);
+  });
+
+  it("drops malformed opencode model strings", () => {
+    expect(normalizeCustomModelSlugs(["gpt-4.1", "openai/"], "opencode")).toEqual([]);
+  });
 });
 
 describe("getAppModelOptions", () => {
@@ -59,6 +69,10 @@ describe("resolveAppModelSelection", () => {
 
   it("falls back to the provider default when no model is selected", () => {
     expect(resolveAppModelSelection("codex", [], "")).toBe("gpt-5.4");
+  });
+
+  it("preserves valid opencode provider/model selections", () => {
+    expect(resolveAppModelSelection("opencode", [], "openai/gpt-4.1")).toBe("openai/gpt-4.1");
   });
 });
 

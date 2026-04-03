@@ -722,11 +722,16 @@ export default function ChatView({ threadId }: ChatViewProps) {
     ? (sessionProvider ?? selectedProviderByThreadId ?? null)
     : null;
   const selectedProvider: ProviderKind = lockedProvider ?? selectedProviderByThreadId ?? "codex";
+  const assistantDeliveryMode =
+    selectedProvider === "opencode" || settings.enableAssistantStreaming
+      ? "streaming"
+      : "buffered";
   const baseThreadModel = resolveModelSlugForProvider(
     selectedProvider,
     activeThread?.model ?? activeProject?.model ?? getDefaultModel(selectedProvider),
   );
-  const customModelsForSelectedProvider = settings.customCodexModels;
+  const customModelsForSelectedProvider =
+    selectedProvider === "opencode" ? settings.customOpencodeModels : settings.customCodexModels;
   const selectedModel = useMemo(() => {
     const draftModel = composerDraft.model;
     if (!draftModel) {
@@ -2539,7 +2544,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
           ? { modelOptions: selectedModelOptionsForDispatch }
           : {}),
         provider: selectedProvider,
-        assistantDeliveryMode: settings.enableAssistantStreaming ? "streaming" : "buffered",
+        assistantDeliveryMode,
         runtimeMode,
         interactionMode,
         createdAt: messageCreatedAt,
@@ -2813,7 +2818,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
           ...(selectedModelOptionsForDispatch
             ? { modelOptions: selectedModelOptionsForDispatch }
             : {}),
-          assistantDeliveryMode: settings.enableAssistantStreaming ? "streaming" : "buffered",
+          assistantDeliveryMode,
           runtimeMode,
           interactionMode: nextInteractionMode,
           createdAt: messageCreatedAt,
@@ -2845,7 +2850,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       selectedProvider,
       setComposerDraftInteractionMode,
       setThreadError,
-      settings.enableAssistantStreaming,
+      assistantDeliveryMode,
     ],
   );
 
@@ -2912,7 +2917,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
           ...(selectedModelOptionsForDispatch
             ? { modelOptions: selectedModelOptionsForDispatch }
             : {}),
-          assistantDeliveryMode: settings.enableAssistantStreaming ? "streaming" : "buffered",
+          assistantDeliveryMode,
           runtimeMode,
           interactionMode: "default",
           createdAt,
@@ -2960,7 +2965,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
     selectedModel,
     selectedModelOptionsForDispatch,
     selectedProvider,
-    settings.enableAssistantStreaming,
+    assistantDeliveryMode,
     syncServerReadModel,
   ]);
 
@@ -2974,7 +2979,11 @@ export default function ChatView({ threadId }: ChatViewProps) {
       setComposerDraftProvider(activeThread.id, provider);
       setComposerDraftModel(
         activeThread.id,
-        resolveAppModelSelection(provider, settings.customCodexModels, model),
+        resolveAppModelSelection(
+          provider,
+          provider === "opencode" ? settings.customOpencodeModels : settings.customCodexModels,
+          model,
+        ),
       );
       scheduleComposerFocus();
     },
@@ -2985,6 +2994,7 @@ export default function ChatView({ threadId }: ChatViewProps) {
       setComposerDraftModel,
       setComposerDraftProvider,
       settings.customCodexModels,
+      settings.customOpencodeModels,
     ],
   );
   const onEffortSelect = useCallback(
@@ -4023,6 +4033,9 @@ const ChatHeader = memo(function ChatHeader({
     : hasSecondaryBadges
       ? "max-w-[6.5ch] min-[420px]:max-w-[8ch] min-[480px]:max-w-[10ch] sm:max-w-[14ch]"
       : "max-w-[8ch] min-[480px]:max-w-[11ch] sm:max-w-28";
+  const headerActionsKeepoutClass = hasConstrainedHeaderWidth
+    ? ""
+    : "desktop-top-edge-actions-safe";
 
   return (
     <div className="grid min-w-0 flex-1 grid-cols-[minmax(0,1fr)_auto] items-center gap-1.5 sm:gap-2">
@@ -4059,7 +4072,10 @@ const ChatHeader = memo(function ChatHeader({
         ) : null}
       </div>
       <div
-        className="@container/header-actions desktop-top-edge-actions-safe flex min-w-0 items-center justify-end justify-self-end gap-1.5 @lg/header-actions:gap-2"
+        className={cn(
+          "@container/header-actions flex min-w-0 items-center justify-end justify-self-end gap-1.5 @lg/header-actions:gap-2",
+          headerActionsKeepoutClass,
+        )}
         data-testid="chat-header-actions"
       >
         {activeProjectScripts && (
@@ -4433,20 +4449,22 @@ function isAvailableProviderOption(option: (typeof PROVIDER_OPTIONS)[number]): o
 const AVAILABLE_PROVIDER_OPTIONS = PROVIDER_OPTIONS.filter(isAvailableProviderOption);
 const UNAVAILABLE_PROVIDER_OPTIONS = PROVIDER_OPTIONS.filter((option) => !option.available);
 const COMING_SOON_PROVIDER_OPTIONS = [
-  { id: "opencode", label: "OpenCode", icon: OpenCodeIcon },
   { id: "gemini", label: "Gemini", icon: Gemini },
 ] as const;
 
 function getCustomModelOptionsByProvider(settings: {
   customCodexModels: readonly string[];
+  customOpencodeModels: readonly string[];
 }): Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>> {
   return {
     codex: getAppModelOptions("codex", settings.customCodexModels),
+    opencode: getAppModelOptions("opencode", settings.customOpencodeModels),
   };
 }
 
 const PROVIDER_ICON_BY_PROVIDER: Record<ProviderPickerKind, Icon> = {
   codex: OpenAI,
+  opencode: OpenCodeIcon,
   claudeCode: ClaudeAI,
   cursor: CursorIcon,
 };

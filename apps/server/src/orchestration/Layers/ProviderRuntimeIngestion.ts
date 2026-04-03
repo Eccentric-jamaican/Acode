@@ -618,6 +618,7 @@ const make = Effect.gen(function* () {
     finalDeltaCommandTag: string;
     fallbackText?: string;
     emitFinalDelta?: boolean;
+    hasExistingMessage?: boolean;
   }) =>
     Effect.gen(function* () {
       const bufferedText = yield* takeBufferedAssistantText(input.messageId);
@@ -627,6 +628,12 @@ const make = Effect.gen(function* () {
           : (input.fallbackText?.trim().length ?? 0) > 0
             ? input.fallbackText!
             : "";
+      const shouldDispatchComplete = text.length > 0 || (input.hasExistingMessage ?? false);
+
+      if (!shouldDispatchComplete) {
+        yield* clearAssistantMessageState(input.messageId);
+        return;
+      }
 
       if ((input.emitFinalDelta ?? true) && text.length > 0) {
         yield* orchestrationEngine.dispatch({
@@ -943,6 +950,7 @@ const make = Effect.gen(function* () {
           finalDeltaCommandTag: "assistant-delta-finalize",
           emitFinalDelta:
             assistantDeliveryMode !== "streaming" || existingAssistantMessage === undefined,
+          hasExistingMessage: existingAssistantMessage !== undefined,
           ...(assistantCompletion.fallbackText !== undefined
             ? { fallbackText: assistantCompletion.fallbackText }
             : {}),
@@ -980,6 +988,9 @@ const make = Effect.gen(function* () {
                 createdAt: now,
                 commandTag: "assistant-complete-finalize",
                 finalDeltaCommandTag: "assistant-delta-finalize-fallback",
+                hasExistingMessage: thread.messages.some(
+                  (message) => message.id === assistantMessageId,
+                ),
               }),
             { concurrency: 1 },
           ).pipe(Effect.asVoid);

@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_MODEL_BY_PROVIDER, MODEL_OPTIONS_BY_PROVIDER } from "@t3tools/contracts";
+import {
+  DEFAULT_MODEL_BY_PROVIDER,
+  MODEL_OPTIONS_BY_PROVIDER,
+  OPENCODE_DEFAULT_MODEL_SLUG,
+} from "@t3tools/contracts";
 
 import {
   getDefaultModel,
   getDefaultReasoningEffort,
   getModelOptions,
   getReasoningEffortOptions,
+  isValidOpencodeModelSlug,
   normalizeModelSlug,
+  parseOpencodeModelSlug,
   resolveModelSlug,
 } from "./model";
 
@@ -33,6 +39,20 @@ describe("normalizeModelSlug", () => {
     expect(normalizeModelSlug("toString")).toBe("toString");
     expect(normalizeModelSlug("constructor")).toBe("constructor");
   });
+
+  it("normalizes opencode default alias", () => {
+    expect(normalizeModelSlug("default", "opencode")).toBe(OPENCODE_DEFAULT_MODEL_SLUG);
+  });
+
+  it("accepts provider/model OpenCode slugs", () => {
+    expect(normalizeModelSlug("openai/gpt-4.1", "opencode")).toBe("openai/gpt-4.1");
+  });
+
+  it("rejects malformed OpenCode slugs", () => {
+    expect(normalizeModelSlug("gpt-4.1", "opencode")).toBeNull();
+    expect(normalizeModelSlug("openai/", "opencode")).toBeNull();
+    expect(normalizeModelSlug("/gpt-4.1", "opencode")).toBeNull();
+  });
 });
 
 describe("resolveModelSlug", () => {
@@ -51,6 +71,20 @@ describe("resolveModelSlug", () => {
       expect(resolveModelSlug(model.slug)).toBe(model.slug);
     }
   });
+
+  it("accepts custom OpenCode provider/model slugs", () => {
+    expect(resolveModelSlug("openai/gpt-4.1", "opencode")).toBe("openai/gpt-4.1");
+  });
+
+  it("accepts built-in OpenCode Go model slugs", () => {
+    expect(resolveModelSlug("opencode-go/glm-5", "opencode")).toBe("opencode-go/glm-5");
+    expect(resolveModelSlug("opencode-go/kimi-k2.5", "opencode")).toBe("opencode-go/kimi-k2.5");
+  });
+
+  it("falls back to OpenCode default for malformed OpenCode slugs", () => {
+    expect(resolveModelSlug("gpt-4.1", "opencode")).toBe(DEFAULT_MODEL_BY_PROVIDER.opencode);
+  });
+
   it("keeps codex defaults for backward compatibility", () => {
     expect(getDefaultModel()).toBe(DEFAULT_MODEL_BY_PROVIDER.codex);
     expect(getModelOptions()).toEqual(MODEL_OPTIONS_BY_PROVIDER.codex);
@@ -66,5 +100,28 @@ describe("getReasoningEffortOptions", () => {
 describe("getDefaultReasoningEffort", () => {
   it("returns provider-scoped defaults", () => {
     expect(getDefaultReasoningEffort("codex")).toBe("high");
+    expect(getDefaultReasoningEffort("opencode")).toBeNull();
+  });
+});
+
+describe("parseOpencodeModelSlug", () => {
+  it("parses provider/model for OpenCode custom models", () => {
+    expect(parseOpencodeModelSlug("openai/gpt-4.1")).toEqual({
+      providerID: "openai",
+      modelID: "gpt-4.1",
+    });
+  });
+
+  it("returns null for default or malformed values", () => {
+    expect(parseOpencodeModelSlug(OPENCODE_DEFAULT_MODEL_SLUG)).toBeNull();
+    expect(parseOpencodeModelSlug("gpt-4.1")).toBeNull();
+  });
+});
+
+describe("isValidOpencodeModelSlug", () => {
+  it("validates default and provider/model formats", () => {
+    expect(isValidOpencodeModelSlug(OPENCODE_DEFAULT_MODEL_SLUG)).toBe(true);
+    expect(isValidOpencodeModelSlug("openai/gpt-4.1")).toBe(true);
+    expect(isValidOpencodeModelSlug("gpt-4.1")).toBe(false);
   });
 });

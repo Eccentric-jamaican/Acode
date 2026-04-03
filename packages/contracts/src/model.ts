@@ -3,6 +3,7 @@ import { ProviderKind } from "./orchestration";
 
 export const CODEX_REASONING_EFFORT_OPTIONS = ["xhigh", "high", "medium", "low"] as const;
 export type CodexReasoningEffort = (typeof CODEX_REASONING_EFFORT_OPTIONS)[number];
+export const OPENCODE_DEFAULT_MODEL_SLUG = "opencode/default" as const;
 
 export const CodexModelOptions = Schema.Struct({
   reasoningEffort: Schema.optional(Schema.Literals(CODEX_REASONING_EFFORT_OPTIONS)),
@@ -29,6 +30,15 @@ export const MODEL_OPTIONS_BY_PROVIDER = {
     { slug: "gpt-5.2-codex", name: "GPT-5.2 Codex" },
     { slug: "gpt-5.2", name: "GPT-5.2" },
   ],
+  opencode: [
+    { slug: OPENCODE_DEFAULT_MODEL_SLUG, name: "OpenCode Default" },
+    { slug: "opencode-go/glm-5", name: "OpenCode Go GLM-5" },
+    { slug: "opencode-go/kimi-k2.5", name: "OpenCode Go Kimi K2.5" },
+    { slug: "opencode-go/mimo-v2-pro", name: "OpenCode Go MiMo-V2-Pro" },
+    { slug: "opencode-go/mimo-v2-omni", name: "OpenCode Go MiMo-V2-Omni" },
+    { slug: "opencode-go/minimax-m2.7", name: "OpenCode Go MiniMax M2.7" },
+    { slug: "opencode-go/minimax-m2.5", name: "OpenCode Go MiniMax M2.5" },
+  ],
 } as const satisfies Record<ProviderKind, readonly ModelOption[]>;
 export type ModelOptionsByProvider = typeof MODEL_OPTIONS_BY_PROVIDER;
 
@@ -37,6 +47,7 @@ export type ModelSlug = BuiltInModelSlug | (string & {});
 
 export const DEFAULT_MODEL_BY_PROVIDER = {
   codex: "gpt-5.4",
+  opencode: OPENCODE_DEFAULT_MODEL_SLUG,
 } as const satisfies Record<ProviderKind, ModelSlug>;
 
 export const MODEL_SLUG_ALIASES_BY_PROVIDER = {
@@ -49,12 +60,17 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER = {
     "5.3-spark": "gpt-5.3-codex-spark",
     "gpt-5.3-spark": "gpt-5.3-codex-spark",
   },
+  opencode: {
+    default: OPENCODE_DEFAULT_MODEL_SLUG,
+  },
 } as const satisfies Record<ProviderKind, Record<string, ModelSlug>>;
 
 export const REASONING_EFFORT_OPTIONS_BY_PROVIDER = {
   codex: CODEX_REASONING_EFFORT_OPTIONS,
+  opencode: [],
 } as const satisfies Record<ProviderKind, readonly CodexReasoningEffort[]>;
 
 export const DEFAULT_REASONING_EFFORT_BY_PROVIDER = {
   codex: "high",
+  opencode: null,
 } as const satisfies Record<ProviderKind, CodexReasoningEffort | null>;

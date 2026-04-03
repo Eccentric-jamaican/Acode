@@ -11,7 +11,7 @@
  */
 import { randomUUID } from "node:crypto";
 
-import { Effect, Layer, FileSystem, Path } from "effect";
+import { Effect, Layer, FileSystem, Path, Schema } from "effect";
 
 import { CheckpointInvariantError } from "../Errors.ts";
 import { GitCommandError } from "../../git/Errors.ts";
@@ -52,6 +52,21 @@ const makeCheckpointStore = Effect.gen(function* () {
         allowNonZeroExit: true,
       })
       .pipe(Effect.map((result) => result.code === 0));
+
+  const isWindowsNulIndexFailure = (error: unknown): error is GitCommandError => {
+    if (process.platform !== "win32") {
+      return false;
+    }
+    if (!Schema.is(GitCommandError)(error)) {
+      return false;
+    }
+    const detail = error.detail.toLowerCase();
+    return (
+      detail.includes("unable to index file 'nul'") ||
+      detail.includes("short read while indexing nul") ||
+      detail.includes("nul: failed to insert into database")
+    );
+  };
 
   const resolveCheckpointCommit = (
     cwd: string,
@@ -115,12 +130,25 @@ const makeCheckpointStore = Effect.gen(function* () {
               });
             }
 
-            yield* git.execute({
-              operation,
-              cwd: input.cwd,
-              args: ["add", "-A", "--", "."],
-              env: commitEnv,
-            });
+            yield* git
+              .execute({
+                operation,
+                cwd: input.cwd,
+                args: ["add", "-A", "--", "."],
+                env: commitEnv,
+              })
+              .pipe(
+                Effect.catchIf(isWindowsNulIndexFailure, () =>
+                  // Some Windows worktrees can surface a virtual "nul" path that Git cannot index.
+                  // Fall back to tracked changes so checkpoint capture stays available for the turn.
+                  git.execute({
+                    operation,
+                    cwd: input.cwd,
+                    args: ["add", "-u", "--", "."],
+                    env: commitEnv,
+                  }),
+                ),
+              );
 
             const writeTreeResult = yield* git.execute({
               operation,
