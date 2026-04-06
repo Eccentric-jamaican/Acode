@@ -30,46 +30,61 @@ function resolveBunPath(): string {
   if (process.versions.bun) {
     return process.execPath;
   }
-  
+
+  const npmExecPath = process.env.npm_execpath;
+  if (npmExecPath && existsSync(npmExecPath)) {
+    return npmExecPath;
+  }
+
   // Try to find bun in PATH using platform-specific commands
   const isWin = platform() === "win32";
-  const bunName = isWin ? "bun.exe" : "bun";
-  
-  try {
-    // Try where/which to find bun
-    const cmd = isWin ? "where" : "which";
-    const result = execSync(`${cmd} ${bunName}`, { encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] });
-    const paths = result.trim().split(/\r?\n/).filter(Boolean);
-    const firstPath = paths[0];
-    if (typeof firstPath === "string" && firstPath.length > 0 && existsSync(firstPath)) {
-      return firstPath;
+  const bunNames = isWin ? ["bun.exe", "bun.cmd", "bun"] : ["bun"];
+
+  for (const bunName of bunNames) {
+    try {
+      // Try where/which to find bun
+      const cmd = isWin ? "where" : "which";
+      const result = execSync(`${cmd} ${bunName}`, {
+        encoding: "utf8",
+        stdio: ["pipe", "pipe", "ignore"],
+      });
+      const firstPath = result
+        .trim()
+        .split(/\r?\n/)
+        .find((candidate) => candidate.length > 0);
+      if (typeof firstPath === "string" && existsSync(firstPath)) {
+        return firstPath;
+      }
+    } catch {
+      // where/which failed, try the next candidate
     }
-  } catch {
-    // where/which failed, try common locations
   }
-  
+
   // Try common installation locations
   const userProfile = process.env.USERPROFILE || process.env.HOME || "";
   const commonPaths = isWin
     ? [
         join(userProfile, ".bun", "bin", "bun.exe"),
+        join(userProfile, ".bun", "bin", "bun.cmd"),
         join(process.env.PROGRAMFILES || "", "bun", "bin", "bun.exe"),
+        join(process.env.PROGRAMFILES || "", "bun", "bin", "bun.cmd"),
         join(process.env.LOCALAPPDATA || "", "bun", "bin", "bun.exe"),
+        join(process.env.LOCALAPPDATA || "", "bun", "bin", "bun.cmd"),
       ]
     : [
         join(userProfile, ".bun", "bin", "bun"),
         "/usr/local/bin/bun",
         "/usr/bin/bun",
       ];
-  
+
   for (const bunPath of commonPaths) {
     if (existsSync(bunPath)) {
       return bunPath;
     }
   }
-  
+
   // Fallback to bun and hope it's in PATH
-  return bunName;
+  return bunNames[0] ?? "bun";
 }
 
 const BUN_PATH = resolveBunPath();
@@ -751,7 +766,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       cwd: stageAppDir,
       env: buildEnv,
       ...commandOutputOptions(options.verbose),
-    })`bunx electron-builder ${platformConfig.cliFlag} --${options.arch} --publish never`,
+    })`${BUN_PATH} x electron-builder ${platformConfig.cliFlag} --${options.arch} --publish never`,
   );
 
   const stageDistDir = path.join(stageAppDir, "dist");

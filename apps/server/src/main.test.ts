@@ -10,7 +10,13 @@ import { FetchHttpClient } from "effect/unstable/http";
 import { beforeEach } from "vitest";
 import { NetService } from "@t3tools/shared/Net";
 
-import { CliConfig, recordStartupHeartbeat, t3Cli, type CliConfigShape } from "./main";
+import {
+  CliConfig,
+  createT3Cli,
+  makeServerConfigLayer,
+  recordStartupHeartbeat,
+  type CliConfigShape,
+} from "./main";
 import { ServerConfig, type ServerConfigShape } from "./config";
 import { Open, type OpenShape } from "./open";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery";
@@ -67,6 +73,18 @@ const testLayer = Layer.mergeAll(
     markHttpListening: Effect.void,
     enqueueCommand: (effect) => effect,
   } satisfies ServerRuntimeStartupShape),
+  Layer.succeed(ProjectionSnapshotQuery, {
+    getSnapshot: () =>
+      Effect.succeed({
+        snapshotSequence: 0,
+        projects: [],
+        tasks: [],
+        taskRuntimes: [],
+        projectRules: [],
+        threads: [],
+        updatedAt: new Date(0).toISOString(),
+      } satisfies OrchestrationReadModel),
+  }),
   AnalyticsService.layerTest,
   FetchHttpClient.layer,
   NodeServices.layer,
@@ -77,7 +95,8 @@ const runCli = (
   env: Record<string, string> = { T3CODE_NO_BROWSER: "true" },
 ) => {
   const uniqueStateDir = `/tmp/t3-cli-state-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  return Command.runWith(t3Cli, { version: "0.0.0-test" })(args).pipe(
+  const testCli = createT3Cli((input) => makeServerConfigLayer(input).pipe(Layer.provideMerge(testLayer)));
+  return Command.runWith(testCli, { version: "0.0.0-test" })(args).pipe(
     Effect.provide(
       ConfigProvider.layer(
         ConfigProvider.fromEnv({

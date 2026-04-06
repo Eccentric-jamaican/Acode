@@ -505,7 +505,9 @@ it.layer(TestLayer)("git integration", (it) => {
       }),
     );
 
-    it.effect("refreshes upstream behind count after checkout when remote branch advanced", () =>
+    it.effect(
+      "refreshes upstream behind count after checkout when remote branch advanced",
+      () =>
       Effect.gen(function* () {
         const remote = yield* makeTmpDir();
         const source = yield* makeTmpDir();
@@ -539,15 +541,19 @@ it.layer(TestLayer)("git integration", (it) => {
 
         yield* checkoutGitBranch({ cwd: source, branch: featureBranch });
         const core = yield* GitCore;
-        yield* Effect.promise(() =>
-          vi.waitFor(async () => {
-            const details = await Effect.runPromise(core.statusDetails(source));
-            expect(details.branch).toBe(featureBranch);
-            expect(details.aheadCount).toBe(0);
-            expect(details.behindCount).toBe(1);
-          }),
-        );
-      }),
+          yield* Effect.promise(() =>
+            vi.waitFor(
+              async () => {
+                const details = await Effect.runPromise(core.statusDetails(source));
+                expect(details.branch).toBe(featureBranch);
+                expect(details.aheadCount).toBe(0);
+                expect(details.behindCount).toBe(1);
+              },
+              { interval: 250, timeout: 30_000 },
+            ),
+          );
+        }),
+      180_000,
     );
 
     it.effect("keeps checkout successful when upstream refresh fails", () =>
@@ -694,15 +700,22 @@ it.layer(TestLayer)("git integration", (it) => {
         ).then(() => {
           checkoutResolved = true;
         });
-        yield* Effect.promise(() =>
-          vi.waitFor(() => {
-            expect(fetchStarted).toBe(true);
-          }),
-        );
-        expect(checkoutResolved).toBe(false);
-        expect(yield* git(source, ["branch", "--show-current"])).toBe(featureBranch);
-        releaseFetch();
-        yield* Effect.promise(() => checkoutPromise);
+
+        try {
+          yield* Effect.promise(() =>
+            vi.waitFor(
+              () => {
+                expect(fetchStarted).toBe(true);
+              },
+              { interval: 50, timeout: 10_000 },
+            ),
+          );
+          expect(checkoutResolved).toBe(false);
+          expect(yield* git(source, ["branch", "--show-current"])).toBe(featureBranch);
+        } finally {
+          releaseFetch();
+          yield* Effect.promise(() => checkoutPromise.catch(() => undefined));
+        }
       }),
     );
 

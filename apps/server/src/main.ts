@@ -6,7 +6,18 @@
  *
  * @module CliConfig
  */
-import { Config, Data, Effect, FileSystem, Layer, Option, Path, Schema, ServiceMap } from "effect";
+import {
+  Config,
+  Data,
+  Effect,
+  FileSystem,
+  Layer,
+  Option,
+  Path,
+  Schema,
+  ServiceMap,
+} from "effect";
+import type { Layer as LayerType } from "effect/Layer";
 import { Command, Flag } from "effect/unstable/cli";
 import { NetService } from "@t3tools/shared/Net";
 import {
@@ -48,6 +59,8 @@ interface CliInput {
   readonly autoBootstrapProjectFromCwd: Option.Option<boolean>;
   readonly logWebSocketEvents: Option.Option<boolean>;
 }
+
+export type { CliInput };
 
 /**
  * CliConfigShape - Startup helpers required while building server layers.
@@ -130,7 +143,7 @@ const CliEnvConfig = Config.all({
 const resolveBooleanFlag = (flag: Option.Option<boolean>, envValue: boolean) =>
   Option.getOrElse(Option.filter(flag, Boolean), () => envValue);
 
-const ServerConfigLive = (input: CliInput) =>
+export const makeServerConfigLayer = (input: CliInput) =>
   Layer.effect(
     ServerConfig,
     Effect.gen(function* () {
@@ -198,7 +211,7 @@ const ServerConfigLive = (input: CliInput) =>
     }),
   );
 
-const LayerLive = (input: CliInput) =>
+export const makeServerProgramLayer = (input: CliInput) =>
   Layer.empty.pipe(
     Layer.provideMerge(makeServerRuntimeServicesLayer()),
     Layer.provideMerge(makeServerProviderLayer()),
@@ -207,7 +220,7 @@ const LayerLive = (input: CliInput) =>
     Layer.provideMerge(SqlitePersistence.layerConfig),
     Layer.provideMerge(ServerLoggerLive),
     Layer.provideMerge(AnalyticsServiceLayerLive),
-    Layer.provideMerge(ServerConfigLive(input)),
+    Layer.provideMerge(makeServerConfigLayer(input)),
     Layer.provideMerge(ServerLive),
   );
 
@@ -242,7 +255,7 @@ export const recordStartupHeartbeat = Effect.gen(function* () {
   });
 });
 
-const makeServerProgram = (input: CliInput) =>
+const makeServerProgram = () =>
   Effect.gen(function* () {
     const cliConfig = yield* CliConfig;
     const { start, stopSignal } = yield* Server;
@@ -289,7 +302,7 @@ const makeServerProgram = (input: CliInput) =>
     }
 
     return yield* stopSignal;
-  }).pipe(Effect.provide(LayerLive(input)));
+  });
 
 /**
  * These flags mirrors the environment variables and the config shape.
@@ -340,17 +353,37 @@ const logWebSocketEventsFlag = Flag.boolean("log-websocket-events").pipe(
   Flag.optional,
 );
 
-export const t3Cli = Command.make("t3", {
-  mode: modeFlag,
-  port: portFlag,
-  host: hostFlag,
-  stateDir: stateDirFlag,
-  devUrl: devUrlFlag,
-  noBrowser: noBrowserFlag,
-  authToken: authTokenFlag,
-  autoBootstrapProjectFromCwd: autoBootstrapProjectFromCwdFlag,
-  logWebSocketEvents: logWebSocketEventsFlag,
-}).pipe(
-  Command.withDescription("Run the T3 Code server."),
-  Command.withHandler((input) => Effect.scoped(makeServerProgram(input))),
-);
+type CliProgramLayer = LayerType<
+  CliConfig | ServerConfig | Server | Open | ServerRuntimeStartup | AnalyticsService | ProjectionSnapshotQuery,
+  Error,
+  never
+>;
+
+export const createT3Cli = (
+  resolveProgramLayer: (input: CliInput) => CliProgramLayer =
+    makeServerProgramLayer as unknown as (input: CliInput) => CliProgramLayer,
+) =>
+  Command.make("t3", {
+    mode: modeFlag,
+    port: portFlag,
+    host: hostFlag,
+    stateDir: stateDirFlag,
+    devUrl: devUrlFlag,
+    noBrowser: noBrowserFlag,
+    authToken: authTokenFlag,
+    autoBootstrapProjectFromCwd: autoBootstrapProjectFromCwdFlag,
+    logWebSocketEvents: logWebSocketEventsFlag,
+  }).pipe(
+    Command.withDescription("Run the T3 Code server."),
+    Command.withHandler((input): Effect.Effect<void, Error, never> =>
+      Effect.scoped(
+        makeServerProgram().pipe(Effect.provide(resolveProgramLayer(input))) as Effect.Effect<
+          void,
+          Error,
+          never
+        >,
+      ),
+    ),
+  );
+
+export const t3Cli = createT3Cli();
