@@ -16,6 +16,8 @@ import { Open, type OpenShape } from "./open";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery";
 import { AnalyticsService } from "./telemetry/Services/AnalyticsService";
 import { Server, type ServerShape } from "./wsServer";
+import { ServerRuntimeStartup, type ServerRuntimeStartupShape } from "./serverRuntimeStartup";
+import { OrchestrationReactor, type OrchestrationReactorShape } from "./orchestration/Services/OrchestrationReactor";
 
 const TEST_TIMEOUT_MS = 60_000;
 
@@ -57,6 +59,14 @@ const testLayer = Layer.mergeAll(
     openBrowser: (_target: string) => Effect.void,
     openInEditor: () => Effect.void,
   } satisfies OpenShape),
+  Layer.succeed(OrchestrationReactor, {
+    start: Effect.void,
+  } satisfies OrchestrationReactorShape),
+  Layer.succeed(ServerRuntimeStartup, {
+    awaitCommandReady: Effect.void,
+    markHttpListening: Effect.void,
+    enqueueCommand: (effect) => effect,
+  } satisfies ServerRuntimeStartupShape),
   AnalyticsService.layerTest,
   FetchHttpClient.layer,
   NodeServices.layer,
