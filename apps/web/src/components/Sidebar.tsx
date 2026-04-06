@@ -99,6 +99,22 @@ import {
 } from "./ui/sidebar";
 import { formatWorktreePathForDisplay, getOrphanedWorktreePathForThread } from "../worktreeCleanup";
 import { isNonEmpty as isNonEmptyString } from "effect/String";
+import { OpenAI, OpenCodeIcon } from "./Icons";
+import type { ProviderKind } from "@t3tools/contracts";
+
+function getProviderFromModel(model: string): ProviderKind {
+  // OpenCode models have the format "provider/model" (e.g., "opencode-go/minimax-m2.5")
+  if (model.includes("/")) {
+    return "opencode";
+  }
+  // Default to codex for models without a slash (e.g., "gpt-5.4", "gpt-5.4-mini")
+  return "codex";
+}
+
+const PROVIDER_ICON_BY_PROVIDER: Record<ProviderKind, React.FC<React.SVGProps<SVGSVGElement>>> = {
+  codex: OpenAI,
+  opencode: OpenCodeIcon,
+};
 
 const EMPTY_KEYBINDINGS: ResolvedKeybindingsConfig = [];
 
@@ -1855,6 +1871,16 @@ export default function Sidebar() {
                 <KanbanSquareIcon className="size-3 shrink-0 text-muted-foreground/60" />
               ) : null}
               {thread.isPinned && <PinIcon className="size-3 shrink-0 text-muted-foreground/60" />}
+              {(() => {
+                const provider = getProviderFromModel(thread.model);
+                const ProviderIcon = PROVIDER_ICON_BY_PROVIDER[provider];
+                return (
+                  <ProviderIcon
+                    className="size-3 shrink-0 text-muted-foreground/70"
+                    aria-label={`${provider} provider`}
+                  />
+                );
+              })()}
               <div className="min-w-0 flex-1">
                 {renamingThreadId === thread.id ? (
                   <input

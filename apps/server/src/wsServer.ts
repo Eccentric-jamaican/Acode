@@ -39,6 +39,7 @@ import {
   Exit,
   FileSystem,
   Layer,
+  Option,
   Path,
   Ref,
   Schema,
@@ -79,6 +80,8 @@ import {
 import { parseBase64DataUrl } from "./imageMime.ts";
 import { AnalyticsService } from "./telemetry/Services/AnalyticsService.ts";
 import { ErrorInboxService } from "./errorInbox/Services/ErrorInbox.ts";
+import { OrchestrationCommandReceiptRepository } from "./persistence/Services/OrchestrationCommandReceipts.ts";
+import { ServerRuntimeStartup } from "./serverRuntimeStartup";
 
 /**
  * ServerShape - Service API for server lifecycle control.
@@ -253,12 +256,14 @@ function overlayProviderStatuses(params: {
 
 export type ServerCoreRuntimeServices =
   | OrchestrationEngineService
+  | OrchestrationCommandReceiptRepository
   | ProjectionSnapshotQuery
   | CheckpointDiffQuery
   | OrchestrationReactor
   | ProviderService
   | ProviderHealth
-  | ErrorInboxService;
+  | ErrorInboxService
+  | ServerRuntimeStartup;
 
 export type ServerRuntimeServices =
   | ServerCoreRuntimeServices
@@ -683,8 +688,10 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const orchestrationEngine = yield* OrchestrationEngineService;
   const projectionReadModelQuery = yield* ProjectionSnapshotQuery;
   const checkpointDiffQuery = yield* CheckpointDiffQuery;
+  const commandReceiptRepository = yield* OrchestrationCommandReceiptRepository;
   const orchestrationReactor = yield* OrchestrationReactor;
   const errorInbox = yield* ErrorInboxService;
+  const startup = yield* ServerRuntimeStartup;
   const { openInEditor } = yield* Open;
 
   const subscriptionsScope = yield* Scope.make("sequential");
@@ -830,7 +837,21 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       case ORCHESTRATION_WS_METHODS.dispatchCommand: {
         const { command } = request.body;
         const normalizedCommand = yield* normalizeDispatchCommand({ command });
-        return yield* orchestrationEngine.dispatch(normalizedCommand);
+        return yield* startup.enqueueCommand(orchestrationEngine.dispatch(normalizedCommand));
+      }
+
+      case ORCHESTRATION_WS_METHODS.getCommandReceipt: {
+        const receipt = yield* commandReceiptRepository.getByCommandId({
+          commandId: request.body.commandId,
+        });
+        if (Option.isNone(receipt)) {
+          return null;
+        }
+        return {
+          status: receipt.value.status,
+          resultSequence: receipt.value.resultSequence,
+          error: receipt.value.error,
+        };
       }
 
       case ORCHESTRATION_WS_METHODS.getTurnDiff: {

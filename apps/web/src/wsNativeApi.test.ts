@@ -1,6 +1,7 @@
 import {
   CommandId,
   type ContextMenuItem,
+  MessageId,
   ORCHESTRATION_WS_CHANNELS,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
@@ -473,6 +474,77 @@ describe("wsNativeApi", () => {
 
     expect(requestMock).toHaveBeenCalledWith(ORCHESTRATION_WS_METHODS.dispatchCommand, {
       command,
+    });
+  });
+
+  it("recovers dispatch commands from persisted receipts after a timeout", async () => {
+    requestMock
+      .mockRejectedValueOnce(
+        new Error(`Request timed out: ${ORCHESTRATION_WS_METHODS.dispatchCommand}`),
+      )
+      .mockResolvedValueOnce({
+        status: "accepted",
+        resultSequence: 77,
+        error: null,
+      });
+    const { createWsNativeApi } = await import("./wsNativeApi");
+
+    const api = createWsNativeApi();
+    const command = {
+      type: "thread.turn.start",
+      commandId: CommandId.makeUnsafe("cmd-timeout-recover-1"),
+      threadId: ThreadId.makeUnsafe("thread-1"),
+      message: {
+        messageId: MessageId.makeUnsafe("message-1"),
+        role: "user",
+        text: "hello",
+        attachments: [],
+      },
+      createdAt: "2026-04-06T13:10:41.727Z",
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      assistantDeliveryMode: "buffered",
+    } as const;
+
+    await expect(api.orchestration.dispatchCommand(command)).resolves.toEqual({
+      sequence: 77,
+    });
+    expect(requestMock).toHaveBeenNthCalledWith(1, ORCHESTRATION_WS_METHODS.dispatchCommand, {
+      command,
+    });
+    expect(requestMock).toHaveBeenNthCalledWith(2, ORCHESTRATION_WS_METHODS.getCommandReceipt, {
+      commandId: command.commandId,
+    });
+  });
+
+  it("surfaces rejected persisted command receipts after a timeout", async () => {
+    requestMock
+      .mockRejectedValueOnce(
+        new Error(`Request timed out: ${ORCHESTRATION_WS_METHODS.dispatchCommand}`),
+      )
+      .mockResolvedValueOnce({
+        status: "rejected",
+        resultSequence: 78,
+        error: "Previously rejected.",
+      });
+    const { createWsNativeApi } = await import("./wsNativeApi");
+
+    const api = createWsNativeApi();
+    const command = {
+      type: "thread.meta.update",
+      commandId: CommandId.makeUnsafe("cmd-timeout-rejected-1"),
+      threadId: ThreadId.makeUnsafe("thread-1"),
+      title: "hello",
+    } as const;
+
+    await expect(api.orchestration.dispatchCommand(command)).rejects.toThrow(
+      "Previously rejected.",
+    );
+    expect(requestMock).toHaveBeenNthCalledWith(1, ORCHESTRATION_WS_METHODS.dispatchCommand, {
+      command,
+    });
+    expect(requestMock).toHaveBeenNthCalledWith(2, ORCHESTRATION_WS_METHODS.getCommandReceipt, {
+      commandId: command.commandId,
     });
   });
 

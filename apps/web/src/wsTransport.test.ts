@@ -201,4 +201,191 @@ describe("WsTransport", () => {
 
     await expect(requestPromise).rejects.toThrow("Connection to the T3 Code server was lost.");
   });
+
+  it("retries dispatch command request once after timeout", async () => {
+    vi.useFakeTimers();
+    const transport = new WsTransport("ws://localhost:3020");
+    const socket = getSocket();
+    socket.open();
+
+    const requestPromise = transport.request("orchestration.dispatchCommand", {
+      command: {
+        type: "thread.create",
+        commandId: "cmd-retry-1",
+      },
+    });
+
+    expect(socket.sent).toHaveLength(1);
+    const firstRequestEnvelope = JSON.parse(socket.sent[0] ?? "{}") as { id: string };
+
+    await vi.advanceTimersByTimeAsync(300_000);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(socket.sent).toHaveLength(2);
+
+    const secondRequestEnvelope = JSON.parse(socket.sent[1] ?? "{}") as { id: string };
+    expect(secondRequestEnvelope.id).not.toBe(firstRequestEnvelope.id);
+
+    socket.serverMessage(
+      JSON.stringify({
+        id: secondRequestEnvelope.id,
+        result: { ok: true },
+      }),
+    );
+
+    await expect(requestPromise).resolves.toEqual({ ok: true });
+    transport.dispose();
+  });
+
+  it("resolves dispatch as success when matching domain event ack is seen", async () => {
+    vi.useFakeTimers();
+    const transport = new WsTransport("ws://localhost:3020");
+    const socket = getSocket();
+    socket.open();
+
+    const requestPromise = transport.request("orchestration.dispatchCommand", {
+      command: {
+        type: "thread.turn.start",
+        commandId: "cmd-ack-1",
+      },
+    });
+
+    expect(socket.sent).toHaveLength(1);
+
+    socket.serverMessage(
+      JSON.stringify({
+        type: "push",
+        channel: "orchestration.domainEvent",
+        data: {
+          sequence: 123,
+          commandId: "cmd-ack-1",
+        },
+      }),
+    );
+
+    await expect(requestPromise).resolves.toEqual({ sequence: 123 });
+    expect(socket.sent).toHaveLength(1);
+    transport.dispose();
+  });
+
+  it("uses cached domain event ack as timeout fallback for dispatch command", async () => {
+    vi.useFakeTimers();
+    const transport = new WsTransport("ws://localhost:3020");
+    const socket = getSocket();
+    socket.open();
+
+    socket.serverMessage(
+      JSON.stringify({
+        type: "push",
+        channel: "orchestration.domainEvent",
+        data: {
+          sequence: 456,
+          commandId: "cmd-ack-cache-1",
+        },
+      }),
+    );
+
+    const requestPromise = transport.request("orchestration.dispatchCommand", {
+      command: {
+        type: "thread.turn.start",
+        commandId: "cmd-ack-cache-1",
+      },
+    });
+
+    expect(socket.sent).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(300_000);
+    await expect(requestPromise).resolves.toEqual({ sequence: 456 });
+    transport.dispose();
+  });
+
+  it("uses persisted command receipt as timeout fallback for dispatch command", async () => {
+    vi.useFakeTimers();
+    const transport = new WsTransport("ws://localhost:3020");
+    const socket = getSocket();
+    socket.open();
+
+    const requestPromise = transport.request("orchestration.dispatchCommand", {
+      command: {
+        type: "thread.turn.start",
+        commandId: "cmd-receipt-1",
+      },
+    });
+
+    expect(socket.sent).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(300_000);
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(socket.sent).toHaveLength(2);
+    const retryEnvelope = JSON.parse(socket.sent[1] ?? "{}") as {
+      id: string;
+      body?: { _tag?: string; commandId?: string };
+    };
+    expect(retryEnvelope.body?._tag).toBe("orchestration.dispatchCommand");
+    expect(retryEnvelope.body?.commandId).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(300_000);
+
+    expect(socket.sent).toHaveLength(3);
+    const receiptEnvelope = JSON.parse(socket.sent[2] ?? "{}") as {
+      id: string;
+      body?: { _tag?: string; commandId?: string };
+    };
+    expect(receiptEnvelope.body?._tag).toBe("orchestration.getCommandReceipt");
+    expect(receiptEnvelope.body?.commandId).toBe("cmd-receipt-1");
+
+    socket.serverMessage(
+      JSON.stringify({
+        id: receiptEnvelope.id,
+        result: {
+          status: "accepted",
+          resultSequence: 789,
+          error: null,
+        },
+      }),
+    );
+
+    await expect(requestPromise).resolves.toEqual({ sequence: 789 });
+    transport.dispose();
+  });
+
+  it("surfaces rejected persisted command receipts after dispatch timeout", async () => {
+    vi.useFakeTimers();
+    const transport = new WsTransport("ws://localhost:3020");
+    const socket = getSocket();
+    socket.open();
+
+    const requestPromise = transport.request("orchestration.dispatchCommand", {
+      command: {
+        type: "thread.turn.start",
+        commandId: "cmd-receipt-rejected-1",
+      },
+    });
+
+    expect(socket.sent).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(300_000);
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(socket.sent).toHaveLength(2);
+    const retryEnvelope = JSON.parse(socket.sent[1] ?? "{}") as {
+      body?: { _tag?: string };
+    };
+    expect(retryEnvelope.body?._tag).toBe("orchestration.dispatchCommand");
+
+    await vi.advanceTimersByTimeAsync(300_000);
+
+    expect(socket.sent).toHaveLength(3);
+    const receiptEnvelope = JSON.parse(socket.sent[2] ?? "{}") as { id: string };
+    socket.serverMessage(
+      JSON.stringify({
+        id: receiptEnvelope.id,
+        result: {
+          status: "rejected",
+          resultSequence: 790,
+          error: "Previously rejected.",
+        },
+      }),
+    );
+
+    await expect(requestPromise).rejects.toThrow("Previously rejected.");
+    transport.dispose();
+  });
 });

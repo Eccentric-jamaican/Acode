@@ -197,6 +197,13 @@ export function createDevRunnerEnv({
       delete output.T3CODE_DESKTOP_WS_URL;
     }
 
+    if (mode === "dev:desktop") {
+      // In dev:desktop mode, the desktop server and web app both use the same port
+      // (T3CODE_PORT) for the WebSocket connection. The desktop app will serve both
+      // the HTTP API and WebSocket on this port.
+      output.VITE_WS_URL = `ws://localhost:${serverPort}`;
+    }
+
     return output;
   });
 }

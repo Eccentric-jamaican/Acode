@@ -26,7 +26,8 @@ import {
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery";
 import { CodexAccountServiceLive } from "./provider/Layers/CodexAccountService";
 import { ProviderHealthLive } from "./provider/Layers/ProviderHealth";
-import { Server } from "./wsServer";
+import { Server, ServerLive } from "./wsServer";
+import { ServerRuntimeStartup } from "./serverRuntimeStartup";
 import { ServerLoggerLive } from "./serverLogger";
 import { AnalyticsServiceLayerLive } from "./telemetry/Layers/AnalyticsService";
 import { AnalyticsService } from "./telemetry/Services/AnalyticsService";
@@ -207,6 +208,7 @@ const LayerLive = (input: CliInput) =>
     Layer.provideMerge(ServerLoggerLive),
     Layer.provideMerge(AnalyticsServiceLayerLive),
     Layer.provideMerge(ServerConfigLive(input)),
+    Layer.provideMerge(ServerLive),
   );
 
 const isWildcardHost = (host: string | undefined): boolean =>
@@ -259,6 +261,8 @@ const makeServerProgram = (input: CliInput) =>
     }
 
     yield* start;
+    const startup = yield* ServerRuntimeStartup;
+    yield* startup.markHttpListening;
     yield* Effect.forkChild(recordStartupHeartbeat);
 
     const localUrl = `http://localhost:${config.port}`;

@@ -28,6 +28,7 @@ import { makeProviderServiceLive } from "./provider/Layers/ProviderService";
 import { ProviderSessionDirectoryLive } from "./provider/Layers/ProviderSessionDirectory";
 import { ProviderService } from "./provider/Services/ProviderService";
 import { makeEventNdjsonLogger } from "./provider/Layers/EventNdjsonLogger";
+import { ServerRuntimeStartupLive } from "./serverRuntimeStartup";
 
 import { TerminalManagerLive } from "./terminal/Layers/Manager";
 import { KeybindingsLive } from "./keybindings";
@@ -76,11 +77,12 @@ export function makeServerProviderLayer(): Layer.Layer<
 export function makeServerRuntimeCoreLayer() {
   const gitCoreLayer = GitCoreLive.pipe(Layer.provideMerge(GitServiceLive));
   const textGenerationLayer = CodexTextGenerationLive;
+  const orchestrationCommandReceiptLayer = OrchestrationCommandReceiptRepositoryLive;
 
   const orchestrationLayer = OrchestrationEngineLive.pipe(
     Layer.provide(OrchestrationProjectionPipelineLive),
     Layer.provide(OrchestrationEventStoreLive),
-    Layer.provide(OrchestrationCommandReceiptRepositoryLive),
+    Layer.provide(orchestrationCommandReceiptLayer),
   );
 
   const checkpointDiffQueryLayer = CheckpointDiffQueryLive.pipe(
@@ -94,6 +96,7 @@ export function makeServerRuntimeCoreLayer() {
 
   const runtimeServicesLayer = Layer.mergeAll(
     orchestrationLayer,
+    orchestrationCommandReceiptLayer,
     OrchestrationProjectionSnapshotQueryLive,
     CheckpointStoreLive,
     checkpointDiffQueryLayer,
@@ -148,8 +151,13 @@ export function makeServerRuntimeServicesLayer(
     Layer.provide(taskLifecycleReactorLayer),
   );
 
-  return Layer.mergeAll(
+  const runtimeServicesLayer = Layer.mergeAll(
     coreLayer,
     orchestrationReactorLayer,
+  );
+
+  // ServerRuntimeStartup must be at the top to manage command queuing during startup
+  return ServerRuntimeStartupLive.pipe(
+    Layer.provideMerge(runtimeServicesLayer),
   );
 }

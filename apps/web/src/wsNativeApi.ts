@@ -1,5 +1,7 @@
 import {
+  type ClientOrchestrationCommand,
   OrchestrationEvent,
+  type OrchestrationCommandReceiptResult,
   ORCHESTRATION_WS_CHANNELS,
   ORCHESTRATION_WS_METHODS,
   type ContextMenuItem,
@@ -58,6 +60,43 @@ const decodeAndWarnOnFailure = <T>(
 
 function desktopBrowserUnavailable(): never {
   throw new Error("Integrated browser is only available in the desktop app.");
+}
+
+function isDispatchCommandTimeout(error: unknown): error is Error {
+  return (
+    error instanceof Error &&
+    error.message === `Request timed out: ${ORCHESTRATION_WS_METHODS.dispatchCommand}`
+  );
+}
+
+async function dispatchCommandWithReceiptRecovery(
+  transport: WsTransport,
+  command: ClientOrchestrationCommand,
+): Promise<{ sequence: number }> {
+  try {
+    return await transport.request(ORCHESTRATION_WS_METHODS.dispatchCommand, { command });
+  } catch (error) {
+    if (!isDispatchCommandTimeout(error)) {
+      throw error;
+    }
+
+    const receipt = await transport
+      .request<OrchestrationCommandReceiptResult>(ORCHESTRATION_WS_METHODS.getCommandReceipt, {
+        commandId: command.commandId,
+      })
+      .catch(() => null);
+
+    if (receipt && receipt.status === "accepted") {
+      return { sequence: receipt.resultSequence };
+    }
+    if (receipt && receipt.status === "rejected") {
+      throw new Error(receipt.error ?? `Dispatch command was rejected: ${command.commandId}`, {
+        cause: error,
+      });
+    }
+
+    throw error;
+  }
 }
 
 /**
@@ -262,8 +301,7 @@ export function createWsNativeApi(): NativeApi {
     },
     orchestration: {
       getSnapshot: () => transport.request(ORCHESTRATION_WS_METHODS.getSnapshot),
-      dispatchCommand: (command) =>
-        transport.request(ORCHESTRATION_WS_METHODS.dispatchCommand, { command }),
+      dispatchCommand: (command) => dispatchCommandWithReceiptRecovery(transport, command),
       getTurnDiff: (input) => transport.request(ORCHESTRATION_WS_METHODS.getTurnDiff, input),
       getFullThreadDiff: (input) =>
         transport.request(ORCHESTRATION_WS_METHODS.getFullThreadDiff, input),

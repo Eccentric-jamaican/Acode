@@ -381,6 +381,89 @@ describe("OrchestrationEngine", () => {
     await runtime.dispose();
   });
 
+  it("keeps processing queued commands after a projector defect", async () => {
+    let shouldDefect = true;
+    const defectProjectionPipeline: OrchestrationProjectionPipelineShape = {
+      bootstrap: Effect.void,
+      projectEvent: (event) => {
+        if (
+          shouldDefect &&
+          event.commandId === CommandId.makeUnsafe("cmd-thread-defect-1") &&
+          event.type === "thread.created"
+        ) {
+          shouldDefect = false;
+          return Effect.die(new Error("projection defect"));
+        }
+        return Effect.void;
+      },
+    };
+
+    const runtime = ManagedRuntime.make(
+      OrchestrationEngineLive.pipe(
+        Layer.provide(Layer.succeed(OrchestrationProjectionPipeline, defectProjectionPipeline)),
+        Layer.provide(OrchestrationEventStoreLive),
+        Layer.provide(OrchestrationCommandReceiptRepositoryLive),
+        Layer.provide(SqlitePersistenceMemory),
+        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+        Layer.provideMerge(NodeServices.layer),
+      ),
+    );
+    const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
+    const createdAt = now();
+
+    await runtime.runPromise(
+      engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.makeUnsafe("cmd-project-defect-create"),
+        projectId: asProjectId("project-defect"),
+        title: "Defect Project",
+        workspaceRoot: "/tmp/project-defect",
+        defaultModel: "gpt-5-codex",
+        createdAt,
+      }),
+    );
+
+    await expect(
+      runtime.runPromise(
+        engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.makeUnsafe("cmd-thread-defect-1"),
+          threadId: ThreadId.makeUnsafe("thread-defect-fail"),
+          projectId: asProjectId("project-defect"),
+          title: "defect-fail",
+          model: "gpt-5-codex",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        }),
+      ),
+    ).rejects.toThrow("Dispatch worker crashed");
+
+    const retryResult = await runtime.runPromise(
+      engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.makeUnsafe("cmd-thread-defect-2"),
+        threadId: ThreadId.makeUnsafe("thread-defect-ok"),
+        projectId: asProjectId("project-defect"),
+        title: "defect-ok",
+        model: "gpt-5-codex",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      }),
+    );
+
+    expect(retryResult.sequence).toBe(2);
+    const readModel = await runtime.runPromise(engine.getReadModel());
+    expect(readModel.snapshotSequence).toBe(2);
+    expect(readModel.threads.some((thread) => thread.id === "thread-defect-ok")).toBe(true);
+    await runtime.dispose();
+  });
+
   it("rolls back all events for a multi-event command when projection fails mid-dispatch", async () => {
     let shouldFailRequestedProjection = true;
     const flakyProjectionPipeline: OrchestrationProjectionPipelineShape = {

@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process";
+import { spawnSync, execSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { platform } from "node:os";
 
 import rootPackageJson from "../package.json" with { type: "json" };
 import desktopPackageJson from "../apps/desktop/package.json" with { type: "json" };
@@ -22,6 +23,56 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Config, Data, Effect, FileSystem, Layer, Logger, Option, Path, Schema } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+
+// Helper to resolve bun executable path cross-platform
+function resolveBunPath(): string {
+  // First check if we're already running under bun
+  if (process.versions.bun) {
+    return process.execPath;
+  }
+  
+  // Try to find bun in PATH using platform-specific commands
+  const isWin = platform() === "win32";
+  const bunName = isWin ? "bun.exe" : "bun";
+  
+  try {
+    // Try where/which to find bun
+    const cmd = isWin ? "where" : "which";
+    const result = execSync(`${cmd} ${bunName}`, { encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] });
+    const paths = result.trim().split(/\r?\n/).filter(Boolean);
+    const firstPath = paths[0];
+    if (typeof firstPath === "string" && firstPath.length > 0 && existsSync(firstPath)) {
+      return firstPath;
+    }
+  } catch {
+    // where/which failed, try common locations
+  }
+  
+  // Try common installation locations
+  const userProfile = process.env.USERPROFILE || process.env.HOME || "";
+  const commonPaths = isWin
+    ? [
+        join(userProfile, ".bun", "bin", "bun.exe"),
+        join(process.env.PROGRAMFILES || "", "bun", "bin", "bun.exe"),
+        join(process.env.LOCALAPPDATA || "", "bun", "bin", "bun.exe"),
+      ]
+    : [
+        join(userProfile, ".bun", "bin", "bun"),
+        "/usr/local/bin/bun",
+        "/usr/bin/bun",
+      ];
+  
+  for (const bunPath of commonPaths) {
+    if (existsSync(bunPath)) {
+      return bunPath;
+    }
+  }
+  
+  // Fallback to bun and hope it's in PATH
+  return bunName;
+}
+
+const BUN_PATH = resolveBunPath();
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
 const BuildArch = Schema.Literals(["arm64", "x64", "universal"]);
@@ -600,7 +651,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       ChildProcess.make({
         cwd: repoRoot,
         ...commandOutputOptions(options.verbose),
-      })`bun run build:desktop`,
+      })`${BUN_PATH} run build:desktop`,
     );
   }
 
@@ -662,7 +713,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     ChildProcess.make({
       cwd: stageAppDir,
       ...commandOutputOptions(options.verbose),
-    })`bun install --production`,
+    })`${BUN_PATH} install --production`,
   );
 
   const buildEnv: NodeJS.ProcessEnv = {

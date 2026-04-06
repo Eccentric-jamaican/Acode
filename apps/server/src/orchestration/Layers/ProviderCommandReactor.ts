@@ -4,7 +4,7 @@ import {
   EventId,
   type OrchestrationEvent,
   type ProviderModelOptions,
-  type ProviderKind,
+  ProviderKind,
   type ProviderServiceTier,
   type OrchestrationSession,
   ThreadId,
@@ -72,6 +72,7 @@ const serverCommandId = (tag: string): CommandId =>
 
 const HANDLED_TURN_START_KEY_MAX = 10_000;
 const HANDLED_TURN_START_KEY_TTL = Duration.minutes(30);
+const PROVIDER_TURN_START_TIMEOUT = Duration.minutes(2);
 const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 const WORKTREE_BRANCH_PREFIX = "t3code";
 const TEMP_WORKTREE_BRANCH_PATTERN = new RegExp(`^${WORKTREE_BRANCH_PREFIX}\\/[0-9a-f]{8}$`);
@@ -217,8 +218,11 @@ const make = Effect.gen(function* () {
     }
 
     const desiredRuntimeMode = thread.runtimeMode;
-    const currentProvider: ProviderKind | undefined =
-      thread.session?.providerName === "codex" ? thread.session.providerName : undefined;
+    const currentProvider: ProviderKind | undefined = Schema.is(ProviderKind)(
+      thread.session?.providerName,
+    )
+      ? thread.session.providerName
+      : undefined;
     const preferredProvider: ProviderKind | undefined = options?.provider ?? currentProvider;
     const desiredModel = options?.model ?? thread.model;
     const effectiveCwd = resolveThreadWorkspaceCwd({
@@ -499,6 +503,54 @@ const make = Effect.gen(function* () {
       ...(event.payload.modelOptions !== undefined ? { modelOptions: event.payload.modelOptions } : {}),
       interactionMode: event.payload.interactionMode,
       createdAt: event.payload.createdAt,
+    }).pipe(
+      Effect.timeoutOrElse({
+        onTimeout: () =>
+          Effect.fail(
+            new Error(
+              "Provider turn start timed out while waiting for the provider adapter response.",
+            ),
+          ),
+        duration: PROVIDER_TURN_START_TIMEOUT,
+      }),
+    );
+  });
+
+  const handleTurnStartRequestedFailure = Effect.fnUntraced(function* (input: {
+    readonly event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>;
+    readonly error: unknown;
+  }) {
+    const thread = yield* resolveThread(input.event.payload.threadId);
+    if (!thread) {
+      return;
+    }
+
+    const detail = toErrorMessage(input.error);
+    const createdAt = input.event.payload.createdAt;
+    const runtimeMode = thread.session?.runtimeMode ?? thread.runtimeMode ?? DEFAULT_RUNTIME_MODE;
+    const providerName = input.event.payload.provider ?? thread.session?.providerName ?? null;
+
+    yield* setThreadSession({
+      threadId: thread.id,
+      session: {
+        threadId: thread.id,
+        status: "error",
+        providerName,
+        runtimeMode,
+        activeTurnId: null,
+        lastError: detail,
+        updatedAt: createdAt,
+      },
+      createdAt,
+    });
+
+    yield* appendProviderFailureActivity({
+      threadId: thread.id,
+      kind: "provider.turn.start.failed",
+      summary: "Provider turn start failed",
+      detail,
+      turnId: null,
+      createdAt,
     });
   });
 
@@ -681,6 +733,12 @@ const make = Effect.gen(function* () {
         }
         const prettyCause = Cause.pretty(cause);
         return Effect.gen(function* () {
+          if (event.type === "thread.turn-start-requested") {
+            yield* handleTurnStartRequestedFailure({
+              event,
+              error: Cause.squash(cause),
+            }).pipe(Effect.catch(() => Effect.void));
+          }
           yield* errorInbox
             .capture({
               source: "server-internal",

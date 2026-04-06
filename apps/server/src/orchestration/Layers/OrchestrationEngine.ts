@@ -62,7 +62,7 @@ function commandToAggregateRef(command: OrchestrationCommand): {
   }
 }
 
-function formatDispatchError(error: OrchestrationDispatchError): string {
+function formatDispatchError(error: unknown): string {
   if (error instanceof Error && error.message.length > 0) {
     return error.message;
   }
@@ -208,7 +208,53 @@ const makeOrchestrationEngine = Effect.gen(function* () {
               })
               .pipe(Effect.catch(() => Effect.void));
           }
-          yield* Deferred.fail(envelope.result, error);
+
+          yield* Deferred.fail(envelope.result, error as OrchestrationDispatchError);
+        }),
+      ),
+      Effect.catchDefect((defect) =>
+        Effect.gen(function* () {
+          const dispatchError = new OrchestrationCommandInvariantError({
+            commandType: envelope.command.type,
+            detail: `Dispatch worker crashed: ${formatDispatchError(defect)}`,
+            ...(defect !== undefined ? { cause: defect } : {}),
+          });
+
+          yield* reconcileReadModelAfterDispatchFailure.pipe(
+            Effect.catch(() =>
+              Effect.logWarning(
+                "failed to reconcile orchestration read model after dispatch failure",
+              ).pipe(
+                Effect.annotateLogs({
+                  commandId: envelope.command.commandId,
+                  snapshotSequence: readModel.snapshotSequence,
+                }),
+              ),
+            ),
+          );
+
+          const aggregateRef = commandToAggregateRef(envelope.command);
+          yield* commandReceiptRepository
+            .upsert({
+              commandId: envelope.command.commandId,
+              aggregateKind: aggregateRef.aggregateKind,
+              aggregateId: aggregateRef.aggregateId,
+              acceptedAt: new Date().toISOString(),
+              resultSequence: readModel.snapshotSequence,
+              status: "rejected",
+              error: formatDispatchError(dispatchError),
+            })
+            .pipe(Effect.catch(() => Effect.void));
+
+          yield* Effect.logError("orchestration dispatch worker recovered from defect").pipe(
+            Effect.annotateLogs({
+              commandId: envelope.command.commandId,
+              commandType: envelope.command.type,
+              cause: formatDispatchError(defect),
+            }),
+          );
+
+          yield* Deferred.fail(envelope.result, dispatchError);
         }),
       ),
     );

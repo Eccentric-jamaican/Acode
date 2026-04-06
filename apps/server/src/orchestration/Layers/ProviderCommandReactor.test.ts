@@ -94,7 +94,7 @@ describe("ProviderCommandReactor", () => {
         typeof input === "object" &&
         input !== null &&
         "provider" in input &&
-        input.provider === "codex"
+        (input.provider === "codex" || input.provider === "opencode")
           ? input.provider
           : "codex";
       const resumeCursor =
@@ -254,6 +254,7 @@ describe("ProviderCommandReactor", () => {
       stopSession,
       renameBranch,
       generateBranchName,
+      runtimeSessions,
       stateDir,
     };
   }
@@ -615,6 +616,109 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.interruptTurn.mock.calls.length === 1);
     expect(harness.interruptTurn.mock.calls[0]?.[0]).toEqual({
       threadId: "thread-1",
+    });
+  });
+
+  it("marks thread session error and appends failure activity when turn start fails", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+    harness.sendTurn.mockImplementationOnce(
+      (_: unknown) => Effect.fail(new Error("simulated sendTurn failure")) as never,
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-turn-start-failure"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-turn-start-failure"),
+          role: "user",
+          text: "trigger provider error",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const readModel = await Effect.runPromise(harness.engine.getReadModel());
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.makeUnsafe("thread-1"));
+      if (!thread) return false;
+      const hasFailureActivity = thread.activities.some(
+        (activity) => activity.kind === "provider.turn.start.failed",
+      );
+      return thread.session?.status === "error" && hasFailureActivity;
+    });
+
+    const readModel = await Effect.runPromise(harness.engine.getReadModel());
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.makeUnsafe("thread-1"));
+    expect(thread?.session?.status).toBe("error");
+    expect(thread?.session?.lastError).toContain("simulated sendTurn failure");
+    expect(thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed")).toBe(
+      true,
+    );
+  });
+
+  it("does not restart an existing opencode session for the next turn in the same thread", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+
+    harness.runtimeSessions.push({
+      provider: "opencode",
+      status: "ready",
+      runtimeMode: "approval-required",
+      model: "openai/gpt-4.1",
+      threadId: ThreadId.makeUnsafe("thread-1"),
+      resumeCursor: { sessionId: "opencode-session-1", directory: process.cwd() },
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.makeUnsafe("cmd-session-set-opencode"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        session: {
+          threadId: ThreadId.makeUnsafe("thread-1"),
+          status: "ready",
+          providerName: "opencode",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-turn-start-opencode-existing-session"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-opencode-existing-session"),
+          role: "user",
+          text: "continue this thread",
+          attachments: [],
+        },
+        provider: "opencode",
+        model: "openai/gpt-4.1",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.startSession.mock.calls.length).toBe(0);
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+      threadId: "thread-1",
+      model: "openai/gpt-4.1",
     });
   });
 

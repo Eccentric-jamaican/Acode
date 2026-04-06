@@ -1070,16 +1070,20 @@ function configureAutoUpdater(): void {
   updatePollTimer.unref();
 }
 function backendEnv(): NodeJS.ProcessEnv {
-  return {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     T3CODE_MODE: "desktop",
     T3CODE_NO_BROWSER: "1",
     T3CODE_PORT: String(backendPort),
     T3CODE_STATE_DIR: STATE_DIR,
-    T3CODE_AUTH_TOKEN: backendAuthToken,
     T3CODE_DESKTOP_BROWSER_BRIDGE_URL: browserBridgeUrl,
     T3CODE_DESKTOP_BROWSER_BRIDGE_TOKEN: browserBridgeAuthToken,
   };
+  // Only set auth token if it's non-empty (skip in dev mode)
+  if (backendAuthToken) {
+    env.T3CODE_AUTH_TOKEN = backendAuthToken;
+  }
+  return env;
 }
 
 function scheduleBackendRestart(reason: string): void {
@@ -1588,14 +1592,25 @@ configureAppIdentity();
 
 async function bootstrap(): Promise<void> {
   writeDesktopLogHeader("bootstrap start");
-  backendPort = await Effect.service(NetService).pipe(
-    Effect.flatMap((net) => net.reserveLoopbackPort()),
-    Effect.provide(NetService.layer),
-    Effect.runPromise,
-  );
-  writeDesktopLogHeader(`reserved backend port via NetService port=${backendPort}`);
-  backendAuthToken = Crypto.randomBytes(24).toString("hex");
-  backendWsUrl = `ws://127.0.0.1:${backendPort}/?token=${encodeURIComponent(backendAuthToken)}`;
+  // Use T3CODE_PORT from environment if set (e.g., by dev-runner), otherwise reserve a random port
+  const envPort = process.env.T3CODE_PORT;
+  writeDesktopLogHeader(`bootstrap env T3CODE_PORT=${envPort ?? "not set"}`);
+  if (envPort && /^\d+$/.test(envPort)) {
+    backendPort = parseInt(envPort, 10);
+    writeDesktopLogHeader(`using backend port from environment port=${backendPort}`);
+  } else {
+    backendPort = await Effect.service(NetService).pipe(
+      Effect.flatMap((net) => net.reserveLoopbackPort()),
+      Effect.provide(NetService.layer),
+      Effect.runPromise,
+    );
+    writeDesktopLogHeader(`reserved backend port via NetService port=${backendPort}`);
+  }
+  // In dev mode (when T3CODE_PORT is set by dev-runner), don't use auth to allow Chrome debugging
+  const isDevMode = envPort !== undefined;
+  backendAuthToken = isDevMode ? "" : Crypto.randomBytes(24).toString("hex");
+  const wsUrlQuery = backendAuthToken ? `?token=${encodeURIComponent(backendAuthToken)}` : "";
+  backendWsUrl = `ws://127.0.0.1:${backendPort}/${wsUrlQuery}`;
   process.env.T3CODE_DESKTOP_WS_URL = backendWsUrl;
   await startBrowserBridgeServer();
   writeDesktopLogHeader(`bootstrap resolved websocket url=${backendWsUrl}`);

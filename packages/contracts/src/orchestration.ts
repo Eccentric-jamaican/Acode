@@ -19,6 +19,7 @@ import {
 export const ORCHESTRATION_WS_METHODS = {
   getSnapshot: "orchestration.getSnapshot",
   dispatchCommand: "orchestration.dispatchCommand",
+  getCommandReceipt: "orchestration.getCommandReceipt",
   getTurnDiff: "orchestration.getTurnDiff",
   getFullThreadDiff: "orchestration.getFullThreadDiff",
   replayEvents: "orchestration.replayEvents",
@@ -1404,6 +1405,20 @@ export type OrchestrationGetSnapshotInput = typeof OrchestrationGetSnapshotInput
 const OrchestrationGetSnapshotResult = OrchestrationReadModel;
 export type OrchestrationGetSnapshotResult = typeof OrchestrationGetSnapshotResult.Type;
 
+export const OrchestrationGetCommandReceiptInput = Schema.Struct({
+  commandId: CommandId,
+});
+export type OrchestrationGetCommandReceiptInput = typeof OrchestrationGetCommandReceiptInput.Type;
+
+export const OrchestrationCommandReceiptResult = Schema.NullOr(
+  Schema.Struct({
+    status: OrchestrationCommandReceiptStatus,
+    resultSequence: NonNegativeInt,
+    error: Schema.NullOr(Schema.String),
+  }),
+);
+export type OrchestrationCommandReceiptResult = typeof OrchestrationCommandReceiptResult.Type;
+
 export const OrchestrationGetTurnDiffInput = TurnCountRange.mapFields(
   Struct.assign({ threadId: ThreadId }),
   { unsafePreserveChecks: true },
@@ -1438,6 +1453,10 @@ export const OrchestrationRpcSchemas = {
   dispatchCommand: {
     input: ClientOrchestrationCommand,
     output: DispatchResult,
+  },
+  getCommandReceipt: {
+    input: OrchestrationGetCommandReceiptInput,
+    output: OrchestrationCommandReceiptResult,
   },
   getTurnDiff: {
     input: OrchestrationGetTurnDiffInput,

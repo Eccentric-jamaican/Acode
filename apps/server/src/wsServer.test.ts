@@ -554,6 +554,43 @@ describe("WebSocket Server", () => {
     });
   });
 
+  it("returns persisted command receipts for dispatched orchestration commands", async () => {
+    server = await createTestServer({ cwd: "/test/project" });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+    expect(port).toBeGreaterThan(0);
+
+    const ws = await connectWs(port);
+    connections.push(ws);
+    await waitForMessage(ws);
+
+    const createdAt = new Date().toISOString();
+    const dispatchResponse = await sendRequest(ws, ORCHESTRATION_WS_METHODS.dispatchCommand, {
+      type: "project.create",
+      commandId: "cmd-ws-command-receipt-1",
+      projectId: "project-ws-command-receipt-1",
+      title: "Receipt Project",
+      workspaceRoot: "/tmp/ws-command-receipt-project",
+      createdAt,
+      updatedAt: createdAt,
+    });
+
+    expect(dispatchResponse.error).toBeUndefined();
+    const dispatchResult = dispatchResponse.result as { sequence: number };
+    expect(dispatchResult.sequence).toEqual(expect.any(Number));
+
+    const receiptResponse = await sendRequest(ws, ORCHESTRATION_WS_METHODS.getCommandReceipt, {
+      commandId: "cmd-ws-command-receipt-1",
+    });
+
+    expect(receiptResponse.error).toBeUndefined();
+    expect(receiptResponse.result).toEqual({
+      status: "accepted",
+      resultSequence: dispatchResult.sequence,
+      error: null,
+    });
+  });
+
   it("serves persisted attachments from stateDir", async () => {
     const stateDir = makeTempDir("t3code-state-attachments-");
     const attachmentPath = path.join(stateDir, "attachments", "thread-a", "message-a", "0.png");
