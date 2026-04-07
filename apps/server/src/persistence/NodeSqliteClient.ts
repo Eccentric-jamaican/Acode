@@ -60,6 +60,25 @@ const normalizeSqliteParam = (value: unknown): unknown => {
 const normalizeSqliteParams = (params: ReadonlyArray<unknown>): ReadonlyArray<unknown> =>
   params.map(normalizeSqliteParam);
 
+const normalizeSqlForTransactionGuard = (sql: string): string =>
+  sql
+    .trim()
+    .replace(/;+$/g, "")
+    .toUpperCase();
+
+const isTransactionCloseStatement = (sql: string): boolean => {
+  const normalized = normalizeSqlForTransactionGuard(sql);
+  return (
+    normalized === "ROLLBACK" ||
+    normalized === "ROLLBACK TRANSACTION" ||
+    normalized.startsWith("ROLLBACK TO SAVEPOINT ") ||
+    normalized === "COMMIT" ||
+    normalized === "COMMIT TRANSACTION" ||
+    normalized === "END" ||
+    normalized === "END TRANSACTION"
+  );
+};
+
 const makeWithDatabase = (
   options: SqliteClientConfig,
   openDatabase: () => DatabaseSync,
@@ -159,6 +178,10 @@ const makeWithDatabase = (
           return runValues(sql, params);
         },
         executeUnprepared(sql, params, rowTransform) {
+          if (isTransactionCloseStatement(sql) && !db.isTransaction) {
+            const emptyRows: ReadonlyArray<object> = [];
+            return rowTransform ? Effect.succeed(rowTransform(emptyRows)) : Effect.succeed([]);
+          }
           const effect = runStatement(db.prepare(sql), params ?? [], false);
           return rowTransform ? Effect.map(effect, rowTransform) : effect;
         },

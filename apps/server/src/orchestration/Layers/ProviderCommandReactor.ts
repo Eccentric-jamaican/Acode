@@ -15,8 +15,6 @@ import {
 import { Cache, Cause, Duration, Effect, Layer, Option, Queue, Schema, Stream } from "effect";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
-import { ServerConfig } from "../../config.ts";
-import { createCodexHomeOverlay } from "../../codexHomeOverlay.ts";
 import { GitCore } from "../../git/Services/GitCore.ts";
 import { ProviderAdapterRequestError } from "../../provider/Errors.ts";
 import { TextGeneration } from "../../git/Services/TextGeneration.ts";
@@ -136,7 +134,6 @@ const make = Effect.gen(function* () {
   const errorInbox = yield* ErrorInboxService;
   const git = yield* GitCore;
   const textGeneration = yield* TextGeneration;
-  const serverConfig = yield* Effect.service(ServerConfig);
   const handledTurnStartKeys = yield* Cache.make<string, true>({
     capacity: HANDLED_TURN_START_KEY_MAX,
     timeToLive: HANDLED_TURN_START_KEY_TTL,
@@ -240,25 +237,6 @@ const make = Effect.gen(function* () {
       readonly provider?: ProviderKind;
     }) => {
       const provider = input?.provider ?? preferredProvider;
-      const providerOptions =
-        provider === "codex"
-          ? {
-              codex: {
-                homePath: createCodexHomeOverlay({
-                  threadId,
-                  projectId: thread.projectId,
-                  runtimeMode: desiredRuntimeMode,
-                  stateDir: serverConfig.stateDir,
-                  ...(process.env.T3CODE_DESKTOP_BROWSER_BRIDGE_URL
-                    ? { bridgeUrl: process.env.T3CODE_DESKTOP_BROWSER_BRIDGE_URL }
-                    : {}),
-                  ...(process.env.T3CODE_DESKTOP_BROWSER_BRIDGE_TOKEN
-                    ? { bridgeToken: process.env.T3CODE_DESKTOP_BROWSER_BRIDGE_TOKEN }
-                    : {}),
-                }),
-              },
-            }
-          : undefined;
       return providerService.startSession(threadId, {
         threadId,
         ...(provider ? { provider } : {}),
@@ -267,7 +245,6 @@ const make = Effect.gen(function* () {
         ...(options?.serviceTier !== undefined ? { serviceTier: options.serviceTier } : {}),
         ...(options?.modelOptions !== undefined ? { modelOptions: options.modelOptions } : {}),
         ...(input?.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
-        ...(providerOptions?.codex?.homePath ? { providerOptions } : {}),
         runtimeMode: desiredRuntimeMode,
       });
     };

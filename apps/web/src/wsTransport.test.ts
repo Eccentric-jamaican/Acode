@@ -202,6 +202,36 @@ describe("WsTransport", () => {
     await expect(requestPromise).rejects.toThrow("Connection to the T3 Code server was lost.");
   });
 
+  it("keeps unsent requests pending across reconnect after initial connection refusal", async () => {
+    vi.useFakeTimers();
+    const transport = new WsTransport("ws://localhost:3020");
+    const firstSocket = getSocket();
+
+    const requestPromise = transport.request("projects.list");
+    expect(firstSocket.sent).toHaveLength(0);
+
+    firstSocket.close();
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(sockets).toHaveLength(2);
+    const secondSocket = getSocket();
+    secondSocket.open();
+
+    await vi.advanceTimersByTimeAsync(50);
+    expect(secondSocket.sent).toHaveLength(1);
+
+    const requestEnvelope = JSON.parse(secondSocket.sent[0] ?? "{}") as { id: string };
+    secondSocket.serverMessage(
+      JSON.stringify({
+        id: requestEnvelope.id,
+        result: { projects: [] },
+      }),
+    );
+
+    await expect(requestPromise).resolves.toEqual({ projects: [] });
+    transport.dispose();
+  });
+
   it("retries dispatch command request once after timeout", async () => {
     vi.useFakeTimers();
     const transport = new WsTransport("ws://localhost:3020");

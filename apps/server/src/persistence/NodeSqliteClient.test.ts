@@ -44,4 +44,22 @@ layer("NodeSqliteClient", (it) => {
       );
     }),
   );
+
+  it.effect("keeps original transaction failure when rollback already happened", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+
+      const failure = yield* Effect.flip(
+        sql.withTransaction(
+          Effect.gen(function* () {
+            // Simulate user code closing the transaction early before failing.
+            yield* sql`ROLLBACK`;
+            return yield* Effect.fail(new Error("expected failure"));
+          }),
+        ),
+      );
+
+      assert.equal(failure.message, "expected failure");
+    }),
+  );
 });

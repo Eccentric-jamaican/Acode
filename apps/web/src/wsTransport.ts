@@ -9,6 +9,7 @@ interface PendingRequest {
   timeout: ReturnType<typeof setTimeout>;
   method: string;
   dispatchCommandId: string | null;
+  sent: boolean;
 }
 
 interface DispatchCommandAck {
@@ -195,6 +196,7 @@ export class WsTransport {
         timeout,
         method,
         dispatchCommandId,
+        sent: false,
       });
       if (dispatchCommandId && method === ORCHESTRATION_WS_METHODS.dispatchCommand) {
         this.pendingDispatchRequestByCommandId.set(dispatchCommandId, id);
@@ -252,7 +254,7 @@ export class WsTransport {
 
     ws.addEventListener("close", () => {
       this.ws = null;
-      this.rejectPendingRequests("Connection to the T3 Code server was lost.");
+      this.rejectPendingRequests("Connection to the T3 Code server was lost.", { onlySent: true });
       this.scheduleReconnect();
     });
 
@@ -317,6 +319,7 @@ export class WsTransport {
   private send(message: WsRequestEnvelope, timeoutMs: number) {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(message));
+      this.markPendingRequestSent(message.id);
       return;
     }
 
@@ -330,6 +333,7 @@ export class WsTransport {
         if (this.ws?.readyState === WebSocket.OPEN) {
           clearInterval(check);
           this.ws.send(JSON.stringify(message));
+          this.markPendingRequestSent(message.id);
         }
       }, 50);
 
@@ -459,8 +463,20 @@ export class WsTransport {
     return null;
   }
 
-  private rejectPendingRequests(message: string) {
+  private markPendingRequestSent(id: string): void {
+    const pending = this.pending.get(id);
+    if (!pending) {
+      return;
+    }
+    pending.sent = true;
+  }
+
+  private rejectPendingRequests(message: string, options?: { onlySent?: boolean }) {
+    const onlySent = options?.onlySent ?? false;
     for (const [id, pending] of this.pending) {
+      if (onlySent && !pending.sent) {
+        continue;
+      }
       clearTimeout(pending.timeout);
       pending.reject(new Error(message));
       this.pending.delete(id);

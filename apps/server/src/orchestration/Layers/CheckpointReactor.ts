@@ -65,6 +65,8 @@ const make = Effect.gen(function* () {
   const errorInbox = yield* ErrorInboxService;
   const checkpointStore = yield* CheckpointStore;
 
+  const isGitWorkspace = (cwd: string) => checkpointStore.isGitRepository(cwd);
+
   const appendRevertFailureActivity = (input: {
     readonly threadId: ThreadId;
     readonly turnCount: number;
@@ -184,6 +186,9 @@ const make = Effect.gen(function* () {
         threadId: thread.id,
         turnId,
       });
+      return;
+    }
+    if (!(yield* isGitWorkspace(checkpointCwd))) {
       return;
     }
 
@@ -321,6 +326,9 @@ const make = Effect.gen(function* () {
       });
       return;
     }
+    if (!(yield* isGitWorkspace(checkpointCwd))) {
+      return;
+    }
 
     const currentTurnCount = thread.checkpoints.reduce(
       (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
@@ -380,6 +388,9 @@ const make = Effect.gen(function* () {
       });
       return;
     }
+    if (!(yield* isGitWorkspace(checkpointCwd))) {
+      return;
+    }
 
     const currentTurnCount = thread.checkpoints.reduce(
       (maxTurnCount, checkpoint) => Math.max(maxTurnCount, checkpoint.checkpointTurnCount),
@@ -423,6 +434,15 @@ const make = Effect.gen(function* () {
         threadId: event.payload.threadId,
         turnCount: event.payload.turnCount,
         detail: "No active provider session with workspace cwd is bound to this thread.",
+        createdAt: now,
+      }).pipe(Effect.catch(() => Effect.void));
+      return;
+    }
+    if (!(yield* isGitWorkspace(sessionRuntime.value.cwd))) {
+      yield* appendRevertFailureActivity({
+        threadId: event.payload.threadId,
+        turnCount: event.payload.turnCount,
+        detail: "Checkpoints are unavailable because this project is not a git repository.",
         createdAt: now,
       }).pipe(Effect.catch(() => Effect.void));
       return;

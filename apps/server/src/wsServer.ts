@@ -57,7 +57,6 @@ import { Keybindings } from "./keybindings";
 import { searchWorkspaceEntries } from "./workspaceEntries";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery";
-import { OrchestrationReactor } from "./orchestration/Services/OrchestrationReactor";
 import { ProviderService } from "./provider/Services/ProviderService";
 import { ProviderHealth } from "./provider/Services/ProviderHealth";
 import { CodexAccountService } from "./provider/Services/CodexAccountService";
@@ -259,7 +258,6 @@ export type ServerCoreRuntimeServices =
   | OrchestrationCommandReceiptRepository
   | ProjectionSnapshotQuery
   | CheckpointDiffQuery
-  | OrchestrationReactor
   | ProviderService
   | ProviderHealth
   | ErrorInboxService
@@ -689,7 +687,6 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const projectionReadModelQuery = yield* ProjectionSnapshotQuery;
   const checkpointDiffQuery = yield* CheckpointDiffQuery;
   const commandReceiptRepository = yield* OrchestrationCommandReceiptRepository;
-  const orchestrationReactor = yield* OrchestrationReactor;
   const errorInbox = yield* ErrorInboxService;
   const startup = yield* ServerRuntimeStartup;
   const { openInEditor } = yield* Open;
@@ -741,8 +738,6 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       data: payload satisfies ServerErrorInboxUpdatedPayload,
     }),
   ).pipe(Effect.forkIn(subscriptionsScope));
-
-  yield* Scope.provide(orchestrationReactor.start, subscriptionsScope);
 
   let welcomeBootstrapProjectId: ProjectId | undefined;
   let welcomeBootstrapThreadId: ThreadId | undefined;
