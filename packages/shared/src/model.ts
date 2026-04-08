@@ -84,7 +84,11 @@ export function normalizeModelSlug(
   const aliased = Object.prototype.hasOwnProperty.call(aliases, trimmed)
     ? aliases[trimmed]
     : undefined;
-  return typeof aliased === "string" ? aliased : (trimmed as ModelSlug);
+  const resolved = typeof aliased === "string" ? aliased : (trimmed as ModelSlug);
+  if (provider === "opencode") {
+    return isValidOpencodeModelSlug(resolved) ? resolved : null;
+  }
+  return resolved;
 }
 
 export function resolveSelectableModel(
@@ -127,6 +131,10 @@ export function resolveModelSlug(
   const normalized = normalizeModelSlug(model, provider);
   if (!normalized) {
     return DEFAULT_MODEL_BY_PROVIDER[provider];
+  }
+
+  if (provider === "opencode") {
+    return normalized;
   }
 
   return MODEL_SLUG_SET_BY_PROVIDER[provider].has(normalized)
