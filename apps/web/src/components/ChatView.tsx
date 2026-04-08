@@ -30,6 +30,7 @@ import {
   normalizeModelSlug,
   resolveModelSlugForProvider,
 } from "@t3tools/shared/model";
+import { sanitizeBranchFragment } from "@t3tools/shared/git";
 import {
   memo,
   useCallback,
@@ -112,6 +113,7 @@ import { useTheme } from "../hooks/useTheme";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import BranchToolbar from "./BranchToolbar";
 import GitActionsControl from "./GitActionsControl";
+import { ThreadWorktreeHandoffDialog } from "./ThreadWorktreeHandoffDialog";
 import {
   isOpenFavoriteEditorShortcut,
   resolveShortcutCommand,
@@ -418,6 +420,23 @@ function buildTemporaryWorktreeBranchName(): string {
   return `${WORKTREE_BRANCH_PREFIX}/${token}`;
 }
 
+function normalizeWorktreeBranchName(value: string): string {
+  const trimmed = value.trim().replace(/^(codex|t3code|dpcode)\//i, "");
+  const normalized = sanitizeBranchFragment(trimmed.length > 0 ? trimmed : "update").toLowerCase();
+  return `${WORKTREE_BRANCH_PREFIX}/${normalized}`;
+}
+
+function buildSuggestedWorktreeName(input: {
+  existingWorktreeBranch?: string | null;
+  title?: string | null;
+}): string {
+  const normalizedExisting = input.existingWorktreeBranch?.trim() ?? "";
+  if (normalizedExisting.length > 0) {
+    return normalizeWorktreeBranchName(normalizedExisting);
+  }
+  return normalizeWorktreeBranchName(input.title ?? "update");
+}
+
 function cloneComposerImageForRetry(image: ComposerImageAttachment): ComposerImageAttachment {
   if (typeof URL === "undefined" || !image.previewUrl.startsWith("blob:")) {
     return image;
@@ -649,6 +668,9 @@ export default function ChatView({
     Record<ThreadId, string | null>
   >({});
   const [sendPhase, setSendPhase] = useState<SendPhase>("idle");
+  const [handoffBusy, setHandoffBusy] = useState(false);
+  const [worktreeHandoffDialogOpen, setWorktreeHandoffDialogOpen] = useState(false);
+  const [worktreeHandoffName, setWorktreeHandoffName] = useState("");
   const [isConnecting, _setIsConnecting] = useState(false);
   const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
   const [respondingRequestIds, setRespondingRequestIds] = useState<ApprovalRequestId[]>([]);
@@ -764,6 +786,10 @@ export default function ChatView({
     [draftThread, fallbackDraftProject?.model, localDraftError, threadId],
   );
   const activeThread = serverThread ?? localDraftThread;
+  useEffect(() => {
+    setWorktreeHandoffDialogOpen(false);
+    setWorktreeHandoffName("");
+  }, [activeThread?.id]);
   const runtimeMode =
     composerDraft.runtimeMode ?? activeThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE;
   const interactionMode =
@@ -1226,6 +1252,21 @@ export default function ChatView({
   );
   const effectivePathQuery = pathTriggerQuery.length > 0 ? debouncedPathQuery : "";
   const branchesQuery = useQuery(gitBranchesQueryOptions(gitCwd));
+  const activeRootBranch = useMemo(() => {
+    const branches = branchesQuery.data?.branches ?? [];
+    if (branches.length === 0) return null;
+    const localCurrentBranch =
+      branches.find((branch) => branch.current && branch.worktreePath === null) ?? null;
+    if (localCurrentBranch) return localCurrentBranch.name;
+    const localDefaultBranch =
+      branches.find((branch) => branch.isDefault && branch.isRemote !== true) ?? null;
+    if (localDefaultBranch) return localDefaultBranch.name;
+    const anyDefaultBranch = branches.find((branch) => branch.isDefault) ?? null;
+    if (anyDefaultBranch) return anyDefaultBranch.name;
+    const localBranch = branches.find((branch) => branch.isRemote !== true) ?? null;
+    if (localBranch) return localBranch.name;
+    return branches[0]?.name ?? null;
+  }, [branchesQuery.data?.branches]);
   const serverConfigQuery = useQuery(serverConfigQueryOptions());
   const workspaceEntriesQuery = useQuery(
     projectSearchEntriesQueryOptions({
@@ -1579,6 +1620,25 @@ export default function ChatView({
       terminalState.terminalIds,
     ],
   );
+  const stopActiveThreadSession = useCallback(async () => {
+    const api = readNativeApi();
+    if (
+      !api ||
+      !isServerThread ||
+      !activeThread ||
+      activeThread.session === null ||
+      activeThread.session.status === "closed"
+    ) {
+      return;
+    }
+
+    await api.orchestration.dispatchCommand({
+      type: "thread.session.stop",
+      commandId: newCommandId(),
+      threadId: activeThread.id,
+      createdAt: new Date().toISOString(),
+    });
+  }, [activeThread, isServerThread]);
   const persistProjectScripts = useCallback(
     async (input: {
       projectId: ProjectId;
@@ -3463,6 +3523,135 @@ export default function ChatView({
     },
     [isLocalDraftThread, scheduleComposerFocus, setDraftThreadContext, threadId],
   );
+  const onHandoffToWorktree = useCallback(() => {
+    if (!activeThread || !isServerThread || handoffBusy) {
+      return;
+    }
+
+    const baseBranch = activeRootBranch ?? activeThread.branch;
+    if (!baseBranch) {
+      setThreadError(activeThread.id, "Select a base branch before handing off to a worktree.");
+      return;
+    }
+
+    setWorktreeHandoffName(
+      buildSuggestedWorktreeName({
+        existingWorktreeBranch: activeThread.branch,
+        title: activeThread.title,
+      }),
+    );
+    setWorktreeHandoffDialogOpen(true);
+  }, [activeRootBranch, activeThread, handoffBusy, isServerThread, setThreadError]);
+
+  const confirmWorktreeHandoff = useCallback(async () => {
+    const api = readNativeApi();
+    if (!api || !activeProject || !activeThread || !isServerThread || handoffBusy) {
+      return;
+    }
+
+    const baseBranch = activeRootBranch ?? activeThread.branch;
+    if (!baseBranch) {
+      setThreadError(activeThread.id, "Select a base branch before handing off to a worktree.");
+      return;
+    }
+
+    const normalizedWorktreeName = normalizeWorktreeBranchName(worktreeHandoffName);
+    setWorktreeHandoffName(normalizedWorktreeName);
+    setHandoffBusy(true);
+    setThreadError(activeThread.id, null);
+    try {
+      await stopActiveThreadSession();
+      const result = await createWorktreeMutation.mutateAsync({
+        cwd: activeProject.cwd,
+        branch: baseBranch,
+        newBranch: normalizedWorktreeName,
+      });
+
+      await api.orchestration.dispatchCommand({
+        type: "thread.meta.update",
+        commandId: newCommandId(),
+        threadId: activeThread.id,
+        branch: result.worktree.branch,
+        worktreePath: result.worktree.path,
+      });
+      setStoreThreadBranch(activeThread.id, result.worktree.branch, result.worktree.path);
+
+      const setupScript = setupProjectScript(activeProject.scripts);
+      if (setupScript) {
+        await runProjectScript(setupScript, {
+          cwd: result.worktree.path,
+          worktreePath: result.worktree.path,
+          rememberAsLastInvoked: false,
+        });
+      }
+      setWorktreeHandoffDialogOpen(false);
+    } catch (error) {
+      setThreadError(
+        activeThread.id,
+        error instanceof Error ? error.message : "Failed to hand off this thread to a worktree.",
+      );
+    } finally {
+      setHandoffBusy(false);
+      scheduleComposerFocus();
+    }
+  }, [
+    activeProject,
+    activeRootBranch,
+    activeThread,
+    createWorktreeMutation,
+    handoffBusy,
+    isServerThread,
+    runProjectScript,
+    scheduleComposerFocus,
+    setStoreThreadBranch,
+    setThreadError,
+    stopActiveThreadSession,
+    worktreeHandoffName,
+  ]);
+  const onHandoffToLocal = useCallback(async () => {
+    const api = readNativeApi();
+    if (
+      !api ||
+      !activeThread ||
+      !isServerThread ||
+      activeThread.worktreePath === null ||
+      handoffBusy
+    ) {
+      return;
+    }
+
+    const nextBranch = activeRootBranch ?? activeThread.branch;
+    setHandoffBusy(true);
+    setThreadError(activeThread.id, null);
+    try {
+      await stopActiveThreadSession();
+      await api.orchestration.dispatchCommand({
+        type: "thread.meta.update",
+        commandId: newCommandId(),
+        threadId: activeThread.id,
+        branch: nextBranch,
+        worktreePath: null,
+      });
+      setStoreThreadBranch(activeThread.id, nextBranch, null);
+    } catch (error) {
+      setThreadError(
+        activeThread.id,
+        error instanceof Error ? error.message : "Failed to hand off this thread to local.",
+      );
+    } finally {
+      setHandoffBusy(false);
+      scheduleComposerFocus();
+    }
+  }, [
+    activeRootBranch,
+    activeThread,
+    handoffBusy,
+    isServerThread,
+    scheduleComposerFocus,
+    setStoreThreadBranch,
+    setThreadError,
+    stopActiveThreadSession,
+  ]);
 
   const applyPromptReplacement = useCallback(
     (
@@ -4475,6 +4664,9 @@ export default function ChatView({
           envLocked={envLocked}
           runtimeMode={runtimeMode}
           onRuntimeModeChange={handleRuntimeModeChange}
+          onHandoffToWorktree={onHandoffToWorktree}
+          onHandoffToLocal={onHandoffToLocal}
+          handoffBusy={handoffBusy}
           onComposerFocusRequest={scheduleComposerFocus}
         />
       )}
@@ -4511,6 +4703,14 @@ export default function ChatView({
         preview={expandedImage}
         onClose={closeExpandedImage}
         onNavigate={navigateExpandedImage}
+      />
+      <ThreadWorktreeHandoffDialog
+        open={worktreeHandoffDialogOpen}
+        busy={handoffBusy}
+        worktreeName={worktreeHandoffName}
+        onWorktreeNameChange={setWorktreeHandoffName}
+        onOpenChange={setWorktreeHandoffDialogOpen}
+        onConfirm={confirmWorktreeHandoff}
       />
     </div>
   );

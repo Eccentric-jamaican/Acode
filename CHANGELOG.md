@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.28] - 2026-04-08
+
+### Added
+- Added a dedicated thread handoff dialog for worktree naming in chat view, aligned with dpcode UX behavior.
+
+### Changed
+- Updated worktree handoff flow to prompt for and normalize a user-specified worktree branch name before creation.
+- Improved handoff dialog state handling so thread switches reset stale dialog state.
+
+### Fixed
+- Fixed remaining chat footer clipping/overflow behavior in split and single chat layouts.
+
 ## [0.2.27] - 2026-04-08
 
 ### Added

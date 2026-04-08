@@ -803,7 +803,7 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
     <>
       <div
         ref={rootRef}
-        className="flex h-dvh min-h-0 min-w-0 flex-1 overflow-hidden bg-background"
+        className="flex h-full min-h-0 min-w-0 flex-1 overflow-hidden bg-background"
       >
         <div
           className="flex min-h-0 min-w-0"
@@ -991,8 +991,8 @@ function SingleChatSurface(props: {
 
   if (!shouldUseDiffSheet) {
     return (
-      <div className="flex h-dvh min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
-        <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none rounded-none bg-background text-foreground">
+      <div className="flex h-full min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
+        <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none rounded-none bg-background text-foreground">
           <ChatView
             key={props.threadId}
             threadId={props.threadId}
@@ -1014,7 +1014,7 @@ function SingleChatSurface(props: {
 
   return (
     <>
-      <SidebarInset className="h-dvh min-h-0 overflow-hidden overscroll-y-none rounded-none bg-background text-foreground">
+      <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none rounded-none bg-background text-foreground">
         <ChatView
           key={props.threadId}
           threadId={props.threadId}

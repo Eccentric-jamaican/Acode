@@ -1,6 +1,6 @@
 import type { RuntimeMode, ThreadId } from "@t3tools/contracts";
 import { useCallback } from "react";
-import { GitForkIcon, LaptopIcon, LockIcon, LockOpenIcon } from "lucide-react";
+import { ArrowLeftRight, GitForkIcon, LaptopIcon, LockIcon, LockOpenIcon } from "lucide-react";
 
 import { newCommandId } from "../lib/utils";
 import { readNativeApi } from "../nativeApi";
@@ -20,6 +20,9 @@ interface BranchToolbarProps {
   envLocked: boolean;
   runtimeMode?: RuntimeMode;
   onRuntimeModeChange?: (mode: RuntimeMode) => void;
+  onHandoffToWorktree?: () => void;
+  onHandoffToLocal?: () => void;
+  handoffBusy?: boolean;
   onComposerFocusRequest?: () => void;
 }
 
@@ -29,6 +32,9 @@ export default function BranchToolbar({
   envLocked,
   runtimeMode,
   onRuntimeModeChange,
+  onHandoffToWorktree,
+  onHandoffToLocal,
+  handoffBusy = false,
   onComposerFocusRequest,
 }: BranchToolbarProps) {
   const threads = useStore((store) => store.threads);
@@ -103,10 +109,15 @@ export default function BranchToolbar({
     ],
   );
 
+  const canHandoffToWorktree = Boolean(
+    hasServerThread && envLocked && !activeWorktreePath && effectiveEnvMode === "local",
+  );
+  const canHandoffToLocal = Boolean(hasServerThread && activeWorktreePath);
+
   if (!activeThreadId || !activeProject) return null;
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl shrink-0 items-center justify-between px-3 pb-4 pt-1">
+    <div className="mx-auto flex w-full max-w-3xl items-center justify-between px-3 pb-3 pt-1">
       <div className="flex items-center gap-2">
         {envLocked || activeWorktreePath ? (
           <span className="inline-flex items-center gap-1 px-1.5 text-xs font-normal text-muted-foreground/70">
@@ -129,6 +140,28 @@ export default function BranchToolbar({
             {effectiveEnvMode === "worktree" ? "New worktree" : "Local"}
           </Button>
         )}
+        {canHandoffToWorktree && onHandoffToWorktree ? (
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 px-1.5 text-xs font-normal text-muted-foreground/70 transition-colors hover:text-foreground/80 disabled:pointer-events-none disabled:opacity-50"
+            disabled={handoffBusy}
+            onClick={onHandoffToWorktree}
+          >
+            <ArrowLeftRight className="size-3.5" />
+            Hand off
+          </button>
+        ) : null}
+        {canHandoffToLocal && onHandoffToLocal ? (
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 px-1.5 text-xs font-normal text-muted-foreground/70 transition-colors hover:text-foreground/80 disabled:pointer-events-none disabled:opacity-50"
+            disabled={handoffBusy}
+            onClick={onHandoffToLocal}
+          >
+            <ArrowLeftRight className="size-3.5" />
+            Hand off to local
+          </button>
+        ) : null}
         {runtimeMode && onRuntimeModeChange ? (
           <button
             type="button"
