@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.29] - 2026-04-08
+
+### Fixed
+- Fixed a crash in long-thread diff/chat rendering when syntax highlighter received unsupported language ids (for example `env`) by normalizing aliases and falling back to safe text highlighting.
+- Hardened diff panel rendering to normalize explicit file diff language overrides before handing them to the highlighter pipeline.
+
 ## [0.2.28] - 2026-04-08
 
 ### Added

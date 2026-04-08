@@ -1,4 +1,4 @@
-import { parsePatchFiles } from "@pierre/diffs";
+import { parsePatchFiles, setLanguageOverride, type SupportedLanguages } from "@pierre/diffs";
 import { FileDiff, type FileDiffMetadata, Virtualizer } from "@pierre/diffs/react";
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
@@ -14,6 +14,7 @@ import { isElectronRuntime } from "../env";
 import { useTheme } from "../hooks/useTheme";
 import { buildPatchCacheKey } from "../lib/diffRendering";
 import { resolveDiffThemeName } from "../lib/diffRendering";
+import { normalizeSyntaxLanguage } from "../lib/syntaxLanguage";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { useStore } from "../store";
 import { ToggleGroup, Toggle } from "./ui/toggle-group";
@@ -134,6 +135,17 @@ function resolveFileDiffPath(fileDiff: FileDiffMetadata): string {
     return raw.slice(2);
   }
   return raw;
+}
+
+function normalizeFileDiffLanguage(fileDiff: FileDiffMetadata): FileDiffMetadata {
+  if (!fileDiff.lang) {
+    return fileDiff;
+  }
+  const normalized = normalizeSyntaxLanguage(fileDiff.lang);
+  if (normalized === fileDiff.lang) {
+    return fileDiff;
+  }
+  return setLanguageOverride(fileDiff, normalized as SupportedLanguages);
 }
 
 function buildFileDiffRenderKey(fileDiff: FileDiffMetadata): string {
@@ -567,6 +579,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                 }}
               >
                 {renderableFiles.map((fileDiff) => {
+                  const normalizedFileDiff = normalizeFileDiffLanguage(fileDiff);
                   const filePath = resolveFileDiffPath(fileDiff);
                   const fileKey = buildFileDiffRenderKey(fileDiff);
                   const themedFileKey = `${fileKey}:${resolvedTheme}`;
@@ -587,7 +600,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                       }}
                     >
                       <FileDiff
-                        fileDiff={fileDiff}
+                        fileDiff={normalizedFileDiff}
                         options={{
                           diffStyle: diffRenderMode === "split" ? "split" : "unified",
                           lineDiffType: "none",

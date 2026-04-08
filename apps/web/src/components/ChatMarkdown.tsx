@@ -23,6 +23,7 @@ import remarkGfm from "remark-gfm";
 import { resolveDiffThemeName, type DiffThemeName } from "../lib/diffRendering";
 import { fnv1a32 } from "../lib/diffRendering";
 import { LRUCache } from "../lib/lruCache";
+import { normalizeSyntaxLanguage } from "../lib/syntaxLanguage";
 import { useTheme } from "../hooks/useTheme";
 import { resolveMarkdownFileLinkTarget } from "../markdown-links";
 import { readNativeApi } from "../nativeApi";
@@ -43,7 +44,11 @@ const highlightedCodeCache = new LRUCache<string>(
   MAX_HIGHLIGHT_CACHE_ENTRIES,
   MAX_HIGHLIGHT_CACHE_MEMORY_BYTES,
 );
-const highlighterPromiseCache = new Map<string, Promise<DiffsHighlighter>>();
+type ResolvedHighlighter = {
+  highlighter: DiffsHighlighter;
+  language: string;
+};
+const highlighterPromiseCache = new Map<string, Promise<ResolvedHighlighter>>();
 
 function extractFenceLanguage(className: string | undefined): string {
   const match = className?.match(CODE_FENCE_LANGUAGE_REGEX);
@@ -93,16 +98,32 @@ function estimateHighlightedSize(html: string, code: string): number {
   return Math.max(html.length * 2, code.length * 3);
 }
 
-function getHighlighterPromise(language: string): Promise<DiffsHighlighter> {
-  const cached = highlighterPromiseCache.get(language);
+function getHighlighterPromise(language: string): Promise<ResolvedHighlighter> {
+  const normalizedLanguage = normalizeSyntaxLanguage(language);
+  const cached = highlighterPromiseCache.get(normalizedLanguage);
   if (cached) return cached;
 
   const promise = getSharedHighlighter({
     themes: [resolveDiffThemeName("dark"), resolveDiffThemeName("light")],
-    langs: [language as SupportedLanguages],
+    langs: [normalizedLanguage as SupportedLanguages],
     preferredHighlighter: "shiki-js",
-  });
-  highlighterPromiseCache.set(language, promise);
+  })
+    .then((highlighter) => ({ highlighter, language: normalizedLanguage }))
+    .catch(async (error) => {
+      console.warn(
+        `[ChatMarkdown] Unable to load language "${normalizedLanguage}", falling back to "text".`,
+        error,
+      );
+      const fallbackLanguage = "text";
+      const fallbackHighlighter = await getSharedHighlighter({
+        themes: [resolveDiffThemeName("dark"), resolveDiffThemeName("light")],
+        langs: [fallbackLanguage as SupportedLanguages],
+        preferredHighlighter: "shiki-js",
+      });
+      return { highlighter: fallbackHighlighter, language: fallbackLanguage };
+    });
+
+  highlighterPromiseCache.set(normalizedLanguage, promise);
   return promise;
 }
 
@@ -167,8 +188,8 @@ function SuspenseShikiCodeBlock({
   themeName,
   isStreaming,
 }: SuspenseShikiCodeBlockProps) {
-  const language = extractFenceLanguage(className);
-  const cacheKey = createHighlightCacheKey(code, language, themeName);
+  const requestedLanguage = normalizeSyntaxLanguage(extractFenceLanguage(className));
+  const cacheKey = createHighlightCacheKey(code, requestedLanguage, themeName);
   const cachedHighlightedHtml = !isStreaming ? highlightedCodeCache.get(cacheKey) : null;
 
   if (cachedHighlightedHtml != null) {
@@ -180,7 +201,7 @@ function SuspenseShikiCodeBlock({
     );
   }
 
-  const highlighter = use(getHighlighterPromise(language));
+  const { highlighter, language } = use(getHighlighterPromise(requestedLanguage));
   const highlightedHtml = useMemo(
     () => highlighter.codeToHtml(code, { lang: language, theme: themeName }),
     [code, highlighter, language, themeName],
