@@ -6,6 +6,7 @@ import { Effect, Layer, Stream } from "effect";
 
 import { CodexAdapter, CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { OpencodeAdapter, OpencodeAdapterShape } from "../Services/OpencodeAdapter.ts";
+import { ClaudeAdapter, ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { ProviderAdapterRegistry } from "../Services/ProviderAdapterRegistry.ts";
 import { ProviderAdapterRegistryLive } from "./ProviderAdapterRegistry.ts";
 import { ProviderUnsupportedError } from "../Errors.ts";
@@ -45,6 +46,23 @@ const fakeOpencodeAdapter: OpencodeAdapterShape = {
   streamEvents: Stream.empty,
 };
 
+const fakeClaudeAdapter: ClaudeAdapterShape = {
+  provider: "claudeAgent",
+  capabilities: { sessionModelSwitch: "restart-session" },
+  startSession: vi.fn(),
+  sendTurn: vi.fn(),
+  interruptTurn: vi.fn(),
+  respondToRequest: vi.fn(),
+  respondToUserInput: vi.fn(),
+  stopSession: vi.fn(),
+  listSessions: vi.fn(),
+  hasSession: vi.fn(),
+  readThread: vi.fn(),
+  rollbackThread: vi.fn(),
+  stopAll: vi.fn(),
+  streamEvents: Stream.empty,
+};
+
 const layer = it.layer(
   Layer.mergeAll(
     Layer.provide(
@@ -52,6 +70,7 @@ const layer = it.layer(
       Layer.mergeAll(
         Layer.succeed(CodexAdapter, fakeCodexAdapter),
         Layer.succeed(OpencodeAdapter, fakeOpencodeAdapter),
+        Layer.succeed(ClaudeAdapter, fakeClaudeAdapter),
       ),
     ),
     NodeServices.layer,
@@ -64,11 +83,13 @@ layer("ProviderAdapterRegistryLive", (it) => {
       const registry = yield* ProviderAdapterRegistry;
       const codex = yield* registry.getByProvider("codex");
       const opencode = yield* registry.getByProvider("opencode");
+      const claude = yield* registry.getByProvider("claudeAgent");
       assert.equal(codex, fakeCodexAdapter);
       assert.equal(opencode, fakeOpencodeAdapter);
+      assert.equal(claude, fakeClaudeAdapter);
 
       const providers = yield* registry.listProviders();
-      assert.deepEqual(providers, ["codex", "opencode"]);
+      assert.deepEqual([...providers].sort(), ["claudeAgent", "codex", "opencode"]);
     }),
   );
 

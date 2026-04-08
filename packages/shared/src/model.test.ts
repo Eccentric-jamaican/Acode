@@ -78,6 +78,7 @@ describe("resolveModelSlug", () => {
 
   it("accepts built-in OpenCode Go model slugs", () => {
     expect(resolveModelSlug("opencode-go/glm-5", "opencode")).toBe("opencode-go/glm-5");
+    expect(resolveModelSlug("opencode-go/glm-5.1", "opencode")).toBe("opencode-go/glm-5.1");
     expect(resolveModelSlug("opencode-go/kimi-k2.5", "opencode")).toBe("opencode-go/kimi-k2.5");
   });
 

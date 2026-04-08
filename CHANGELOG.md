@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.27] - 2026-04-08
+
+### Added
+- Full Claude Code provider SDK integration on server and contracts layers, including adapter wiring, session/runtime handling, and provider registry coverage.
+- Thread handoff and split-chat state modules in web, including multi-provider handoff helpers and composer/footer compact control components.
+- New OpenCode Go model option: `opencode-go/glm-5.1`.
+- Projection thread handoff migration (`019_ProjectionThreadsHandoff`) and related persistence/service updates.
+
+### Changed
+- Sidebar and split-view UX/behavior parity sweep to align worktree/handoff flows and thread rendering with the reference implementation.
+- Provider and orchestration wiring updates across server layers (`serverLayers`, provider health/registry/session directory, projection pipeline/queries).
+- Chat composer layout and controls refactor for cleaner compact behavior and reduced duplication.
+
+### Fixed
+- Fixed `ProviderModelOptions` initialization/runtime regression in desktop dev startup path.
+- Fixed model picker icon clipping in compact composer mode.
+- Fixed sidebar top spacing alignment and chat footer/toolbar bottom clipping issues.
+
 ## [0.2.23] - 2026-04-03
 
 ### Added

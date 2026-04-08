@@ -11,6 +11,7 @@ import {
   type CanonicalRequestType,
   type ProviderEvent,
   type ProviderRuntimeEvent,
+  type ThreadTokenUsageSnapshot,
   type ProviderUserInputAnswers,
   RuntimeItemId,
   RuntimeRequestId,
@@ -698,12 +699,17 @@ function mapToRuntimeEvents(
   }
 
   if (event.method === "thread/tokenUsage/updated") {
+    const usagePayload = asObject(event.payload);
+    const resolvedUsage: ThreadTokenUsageSnapshot =
+      usagePayload && typeof usagePayload.usedTokens === "number"
+        ? (usagePayload as ThreadTokenUsageSnapshot)
+        : ({ ...usagePayload, usedTokens: 0 } as ThreadTokenUsageSnapshot);
     return [
       {
         type: "thread.token-usage.updated",
         ...runtimeEventBase(event, canonicalThreadId),
         payload: {
-          usage: event.payload ?? {},
+          usage: resolvedUsage,
         },
       },
     ];

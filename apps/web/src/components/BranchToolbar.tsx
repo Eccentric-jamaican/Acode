@@ -1,5 +1,6 @@
-import type { ThreadId } from "@t3tools/contracts";
+import type { RuntimeMode, ThreadId } from "@t3tools/contracts";
 import { useCallback } from "react";
+import { GitForkIcon, LaptopIcon, LockIcon, LockOpenIcon } from "lucide-react";
 
 import { newCommandId } from "../lib/utils";
 import { readNativeApi } from "../nativeApi";
@@ -17,6 +18,8 @@ interface BranchToolbarProps {
   threadId: ThreadId;
   onEnvModeChange: (mode: EnvMode) => void;
   envLocked: boolean;
+  runtimeMode?: RuntimeMode;
+  onRuntimeModeChange?: (mode: RuntimeMode) => void;
   onComposerFocusRequest?: () => void;
 }
 
@@ -24,6 +27,8 @@ export default function BranchToolbar({
   threadId,
   onEnvModeChange,
   envLocked,
+  runtimeMode,
+  onRuntimeModeChange,
   onComposerFocusRequest,
 }: BranchToolbarProps) {
   const threads = useStore((store) => store.threads);
@@ -101,23 +106,50 @@ export default function BranchToolbar({
   if (!activeThreadId || !activeProject) return null;
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl shrink-0 items-center justify-between px-5 pb-3 pt-1">
+    <div className="mx-auto flex w-full max-w-3xl shrink-0 items-center justify-between px-3 pb-4 pt-1">
       <div className="flex items-center gap-2">
         {envLocked || activeWorktreePath ? (
-          <span className="border border-transparent px-[calc(--spacing(2)-1px)] text-sm font-medium text-muted-foreground/70 sm:text-xs">
+          <span className="inline-flex items-center gap-1 px-1.5 text-xs font-normal text-muted-foreground/70">
+            {activeWorktreePath ? <GitForkIcon className="size-3" /> : <LaptopIcon className="size-3" />}
             {activeWorktreePath ? "Worktree" : "Local"}
           </span>
         ) : (
           <Button
             type="button"
             variant="ghost"
-            className="text-muted-foreground/70 hover:text-foreground/80"
+            className="inline-flex items-center gap-1 px-1.5 text-xs font-normal text-muted-foreground/70 hover:text-foreground/80"
             size="xs"
             onClick={() => onEnvModeChange(effectiveEnvMode === "local" ? "worktree" : "local")}
           >
+            {effectiveEnvMode === "worktree" ? (
+              <GitForkIcon className="size-3" />
+            ) : (
+              <LaptopIcon className="size-3" />
+            )}
             {effectiveEnvMode === "worktree" ? "New worktree" : "Local"}
           </Button>
         )}
+        {runtimeMode && onRuntimeModeChange ? (
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-normal text-muted-foreground/70 transition-colors hover:text-foreground/80"
+            onClick={() =>
+              onRuntimeModeChange(runtimeMode === "full-access" ? "approval-required" : "full-access")
+            }
+            title={
+              runtimeMode === "full-access"
+                ? "Full access — click to require approvals"
+                : "Supervised — click for full access"
+            }
+          >
+            {runtimeMode === "full-access" ? (
+              <LockOpenIcon className="size-3" />
+            ) : (
+              <LockIcon className="size-3" />
+            )}
+            {runtimeMode === "full-access" ? "Full access" : "Supervised"}
+          </button>
+        ) : null}
       </div>
 
       <BranchToolbarBranchSelector

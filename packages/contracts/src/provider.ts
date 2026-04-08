@@ -5,6 +5,7 @@ import {
   ApprovalRequestId,
   EventId,
   IsoDateTime,
+  NonNegativeInt,
   ProviderItemId,
   ThreadId,
   TurnId,
@@ -53,8 +54,15 @@ const CodexProviderStartOptions = Schema.Struct({
   homePath: Schema.optional(TrimmedNonEmptyStringSchema),
 });
 
+const ClaudeProviderStartOptions = Schema.Struct({
+  binaryPath: Schema.optional(TrimmedNonEmptyStringSchema),
+  permissionMode: Schema.optional(TrimmedNonEmptyStringSchema),
+  maxThinkingTokens: Schema.optional(NonNegativeInt),
+});
+
 const ProviderStartOptions = Schema.Struct({
   codex: Schema.optional(CodexProviderStartOptions),
+  claudeAgent: Schema.optional(ClaudeProviderStartOptions),
 });
 
 export const ProviderSessionStartInput = Schema.Struct({
@@ -62,7 +70,7 @@ export const ProviderSessionStartInput = Schema.Struct({
   provider: Schema.optional(ProviderKind),
   cwd: Schema.optional(TrimmedNonEmptyStringSchema),
   model: Schema.optional(TrimmedNonEmptyStringSchema),
-  modelOptions: Schema.optional(ProviderModelOptions),
+  modelOptions: Schema.optional(Schema.suspend(() => ProviderModelOptions)),
   resumeCursor: Schema.optional(Schema.Unknown),
   serviceTier: Schema.optional(Schema.NullOr(ProviderServiceTier)),
   approvalPolicy: Schema.optional(ProviderApprovalPolicy),
@@ -82,7 +90,7 @@ export const ProviderSendTurnInput = Schema.Struct({
   ),
   model: Schema.optional(TrimmedNonEmptyStringSchema),
   serviceTier: Schema.optional(Schema.NullOr(ProviderServiceTier)),
-  modelOptions: Schema.optional(ProviderModelOptions),
+  modelOptions: Schema.optional(Schema.suspend(() => ProviderModelOptions)),
   interactionMode: Schema.optional(ProviderInteractionMode),
 });
 export type ProviderSendTurnInput = typeof ProviderSendTurnInput.Type;

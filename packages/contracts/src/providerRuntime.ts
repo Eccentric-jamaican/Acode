@@ -2,6 +2,8 @@ import { Schema } from "effect";
 import {
   EventId,
   IsoDateTime,
+  NonNegativeInt,
+  PositiveInt,
   ProviderItemId,
   RuntimeItemId,
   RuntimeRequestId,
@@ -19,6 +21,8 @@ const RuntimeEventRawSource = Schema.Literals([
   "codex.app-server.notification",
   "codex.app-server.request",
   "codex.eventmsg",
+  "claude.sdk.message",
+  "claude.sdk.permission",
   "codex.sdk.thread-event",
   "opencode.server.event",
 ]);
@@ -297,8 +301,27 @@ const ThreadMetadataUpdatedPayload = Schema.Struct({
 });
 export type ThreadMetadataUpdatedPayload = typeof ThreadMetadataUpdatedPayload.Type;
 
+export const ThreadTokenUsageSnapshot = Schema.Struct({
+  usedTokens: NonNegativeInt,
+  totalProcessedTokens: Schema.optional(NonNegativeInt),
+  maxTokens: Schema.optional(PositiveInt),
+  inputTokens: Schema.optional(NonNegativeInt),
+  cachedInputTokens: Schema.optional(NonNegativeInt),
+  outputTokens: Schema.optional(NonNegativeInt),
+  reasoningOutputTokens: Schema.optional(NonNegativeInt),
+  lastUsedTokens: Schema.optional(NonNegativeInt),
+  lastInputTokens: Schema.optional(NonNegativeInt),
+  lastCachedInputTokens: Schema.optional(NonNegativeInt),
+  lastOutputTokens: Schema.optional(NonNegativeInt),
+  lastReasoningOutputTokens: Schema.optional(NonNegativeInt),
+  toolUses: Schema.optional(NonNegativeInt),
+  durationMs: Schema.optional(NonNegativeInt),
+  compactsAutomatically: Schema.optional(Schema.Boolean),
+});
+export type ThreadTokenUsageSnapshot = typeof ThreadTokenUsageSnapshot.Type;
+
 const ThreadTokenUsageUpdatedPayload = Schema.Struct({
-  usage: Schema.Unknown,
+  usage: ThreadTokenUsageSnapshot,
 });
 export type ThreadTokenUsageUpdatedPayload = typeof ThreadTokenUsageUpdatedPayload.Type;
 
@@ -991,3 +1014,4 @@ export type ProviderRuntimeToolKind = typeof ProviderRuntimeToolKind.Type;
 
 export const ProviderRuntimeTurnStatus = RuntimeTurnState;
 export type ProviderRuntimeTurnStatus = RuntimeTurnState;
+

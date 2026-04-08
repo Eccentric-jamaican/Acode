@@ -235,6 +235,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           branch,
           worktree_path AS "worktreePath",
           is_pinned AS "isPinned",
+          handoff_json AS "handoff",
           latest_turn_id AS "latestTurnId",
           created_at AS "createdAt",
           updated_at AS "updatedAt",
@@ -692,7 +693,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 
           const threads: Array<OrchestrationThread> = threadRows.map((row) => {
             const normalizedRow = normalizeProjectionThreadDbRow(row);
-            return {
+            const threadBase = {
               id: normalizedRow.threadId,
               projectId: normalizedRow.projectId,
               origin: normalizedRow.origin,
@@ -713,7 +714,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               activities: activitiesByThread.get(normalizedRow.threadId) ?? [],
               checkpoints: checkpointsByThread.get(normalizedRow.threadId) ?? [],
               session: sessionsByThread.get(normalizedRow.threadId) ?? null,
-            };
+            } satisfies Omit<OrchestrationThread, "handoff">;
+            if (normalizedRow.handoff === null) {
+              return threadBase;
+            }
+            return Object.assign({ handoff: normalizedRow.handoff }, threadBase);
           });
 
           const taskRuntimes: Array<OrchestrationTaskRuntime> = tasks.map((task) => {

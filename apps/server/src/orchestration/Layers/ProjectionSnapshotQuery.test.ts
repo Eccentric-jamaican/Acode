@@ -69,6 +69,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           branch,
           worktree_path,
           is_pinned,
+          handoff_json,
           latest_turn_id,
           created_at,
           updated_at,
@@ -84,6 +85,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           NULL,
           NULL,
           0,
+          '{"sourceThreadId":"thread-source","sourceProvider":"claudeAgent","importedAt":"2026-02-24T00:00:01.500Z","bootstrapStatus":"completed"}',
           'turn-1',
           '2026-02-24T00:00:02.000Z',
           '2026-02-24T00:00:03.000Z',
@@ -303,6 +305,12 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
             activeTurnId: asTurnId("turn-1"),
             lastError: null,
             updatedAt: "2026-02-24T00:00:07.000Z",
+          },
+          handoff: {
+            sourceThreadId: ThreadId.makeUnsafe("thread-source"),
+            sourceProvider: "claudeAgent",
+            importedAt: "2026-02-24T00:00:01.500Z",
+            bootstrapStatus: "completed",
           },
         },
       ]);

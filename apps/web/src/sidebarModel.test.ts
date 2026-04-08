@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildChronologicalThreadList,
+  getVisibleThreadsForProject,
   groupThreadsByProject,
   isRelevantThread,
   orderProjectsForSidebar,
@@ -105,6 +106,45 @@ describe("sortThreadsForSidebar", () => {
       ThreadId.makeUnsafe("unpinned-new"),
     ]);
   });
+
+  it("sorts updated threads by latest user message timestamp", () => {
+    const threads = sortThreadsForSidebar(
+      [
+        makeThread("thread-1", {
+          updatedAt: "2026-03-03T00:00:00.000Z",
+          messages: [
+            {
+              id: "message-1" as never,
+              role: "user",
+              text: "older",
+              createdAt: "2026-03-01T00:00:00.000Z",
+              streaming: false,
+              completedAt: "2026-03-01T00:00:00.000Z",
+            },
+          ],
+        }),
+        makeThread("thread-2", {
+          updatedAt: "2026-03-02T00:00:00.000Z",
+          messages: [
+            {
+              id: "message-2" as never,
+              role: "user",
+              text: "newer",
+              createdAt: "2026-03-04T00:00:00.000Z",
+              streaming: false,
+              completedAt: "2026-03-04T00:00:00.000Z",
+            },
+          ],
+        }),
+      ],
+      "updated",
+    );
+
+    expect(threads.map((thread) => thread.id)).toEqual([
+      ThreadId.makeUnsafe("thread-2"),
+      ThreadId.makeUnsafe("thread-1"),
+    ]);
+  });
 });
 
 describe("project ordering helpers", () => {
@@ -147,5 +187,40 @@ describe("thread grouping helpers", () => {
     ]);
     expect(buildChronologicalThreadList(threads, { threadSort: "updated" }).map((thread) => thread.id))
       .toEqual([ThreadId.makeUnsafe("thread-2"), ThreadId.makeUnsafe("thread-1")]);
+  });
+});
+
+describe("getVisibleThreadsForProject", () => {
+  it("returns preview threads when collapsed", () => {
+    const threads = Array.from({ length: 8 }, (_, index) =>
+      makeThread(`thread-${index + 1}`, {
+        updatedAt: `2026-03-${String(20 - index).padStart(2, "0")}T00:00:00.000Z`,
+      }),
+    );
+
+    const result = getVisibleThreadsForProject({
+      threads,
+      activeThreadId: undefined,
+      isThreadListExpanded: false,
+      previewLimit: 6,
+    });
+
+    expect(result.hasHiddenThreads).toBe(true);
+    expect(result.visibleThreads).toHaveLength(6);
+  });
+
+  it("keeps the active thread visible when collapsed", () => {
+    const threads = Array.from({ length: 8 }, (_, index) => makeThread(`thread-${index + 1}`));
+    const activeThreadId = ThreadId.makeUnsafe("thread-8");
+
+    const result = getVisibleThreadsForProject({
+      threads,
+      activeThreadId,
+      isThreadListExpanded: false,
+      previewLimit: 6,
+    });
+
+    expect(result.hasHiddenThreads).toBe(true);
+    expect(result.visibleThreads.some((thread) => thread.id === activeThreadId)).toBe(true);
   });
 });

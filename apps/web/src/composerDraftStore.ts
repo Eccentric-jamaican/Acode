@@ -4,6 +4,7 @@ import {
   REASONING_EFFORT_OPTIONS_BY_PROVIDER,
   ThreadId,
   type CodexReasoningEffort,
+  type ModelSelection,
   type ProviderKind,
   type ProviderInteractionMode,
   type RuntimeMode,
@@ -104,6 +105,7 @@ interface ComposerDraftStoreState {
   draftsByThreadId: Record<ThreadId, ComposerThreadDraftState>;
   draftThreadsByThreadId: Record<ThreadId, DraftThreadState>;
   projectDraftThreadIdByProjectId: Record<ProjectId, ThreadId>;
+  stickyModelSelectionByProvider: Partial<Record<ProviderKind, ModelSelection>>;
   getDraftThreadByProjectId: (projectId: ProjectId) => ProjectDraftThread | null;
   getDraftThread: (threadId: ThreadId) => DraftThreadState | null;
   setProjectDraftThreadId: (
@@ -595,6 +597,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
       draftsByThreadId: {},
       draftThreadsByThreadId: {},
       projectDraftThreadIdByProjectId: {},
+      stickyModelSelectionByProvider: {},
       getDraftThreadByProjectId: (projectId) => {
         if (projectId.length === 0) {
           return null;

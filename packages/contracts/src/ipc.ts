@@ -113,6 +113,12 @@ export interface DesktopWindowChromeMetrics {
   captionButtonLaneWidthPx: number;
 }
 
+export interface DesktopNotificationInput {
+  title: string;
+  body: string;
+  silent?: boolean;
+}
+
 export interface DesktopBridge {
   getWsUrl: () => string | null;
   getWindowChromeMetrics: () => DesktopWindowChromeMetrics;
@@ -128,6 +134,10 @@ export interface DesktopBridge {
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
   installUpdate: () => Promise<DesktopUpdateActionResult>;
   onUpdateState: (listener: (state: DesktopUpdateState) => void) => () => void;
+  notifications: {
+    isSupported: () => Promise<boolean>;
+    show: (input: DesktopNotificationInput) => Promise<boolean>;
+  };
   browser: {
     getState: (input: BrowserProjectInput) => Promise<BrowserSessionSnapshot>;
     open: (input: BrowserOpenInput) => Promise<BrowserSessionSnapshot>;

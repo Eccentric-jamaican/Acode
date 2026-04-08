@@ -464,6 +464,7 @@ export function projectEvent(
             activities: [],
             checkpoints: [],
             session: null,
+            ...(payload.handoff !== undefined ? { handoff: payload.handoff } : {}),
           },
           event.type,
           "thread",

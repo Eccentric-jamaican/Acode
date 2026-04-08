@@ -15,6 +15,11 @@ export interface SidebarProjectGroup {
   threads: Thread[];
 }
 
+export interface SidebarVisibleProjectThreads {
+  hasHiddenThreads: boolean;
+  visibleThreads: Thread[];
+}
+
 function hasUnseenCompletion(thread: Thread): boolean {
   if (!thread.latestTurn?.completedAt) {
     return false;
@@ -58,6 +63,39 @@ export function threadTimestamp(thread: Thread, threadSort: SidebarThreadSort): 
   return threadSort === "updated" ? thread.updatedAt : thread.createdAt;
 }
 
+function toSortableTimestamp(iso: string | undefined): number | null {
+  if (!iso) return null;
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function getLatestUserMessageTimestamp(thread: Thread): number {
+  let latestUserMessageTimestamp: number | null = null;
+
+  for (const message of thread.messages) {
+    if (message.role !== "user") continue;
+    const messageTimestamp = toSortableTimestamp(message.createdAt);
+    if (messageTimestamp === null) continue;
+    latestUserMessageTimestamp =
+      latestUserMessageTimestamp === null
+        ? messageTimestamp
+        : Math.max(latestUserMessageTimestamp, messageTimestamp);
+  }
+
+  if (latestUserMessageTimestamp !== null) {
+    return latestUserMessageTimestamp;
+  }
+
+  return toSortableTimestamp(thread.updatedAt ?? thread.createdAt) ?? Number.NEGATIVE_INFINITY;
+}
+
+function getThreadSortTimestamp(thread: Thread, threadSort: SidebarThreadSort): number {
+  if (threadSort === "created") {
+    return toSortableTimestamp(thread.createdAt) ?? Number.NEGATIVE_INFINITY;
+  }
+  return getLatestUserMessageTimestamp(thread);
+}
+
 export function sortThreadsForSidebar(
   threads: readonly Thread[],
   threadSort: SidebarThreadSort,
@@ -67,11 +105,10 @@ export function sortThreadsForSidebar(
       return left.isPinned ? -1 : 1;
     }
 
-    const rightTimestamp = Date.parse(threadTimestamp(right, threadSort));
-    const leftTimestamp = Date.parse(threadTimestamp(left, threadSort));
+    const rightTimestamp = getThreadSortTimestamp(right, threadSort);
+    const leftTimestamp = getThreadSortTimestamp(left, threadSort);
     const byTimestamp =
-      (Number.isFinite(rightTimestamp) ? rightTimestamp : 0) -
-      (Number.isFinite(leftTimestamp) ? leftTimestamp : 0);
+      rightTimestamp === leftTimestamp ? 0 : rightTimestamp > leftTimestamp ? 1 : -1;
     if (byTimestamp !== 0) {
       return byTimestamp;
     }
@@ -141,4 +178,43 @@ export function buildChronologicalThreadList(
   preferences: Pick<SidebarPreferences, "threadSort">,
 ): Thread[] {
   return sortThreadsForSidebar(threads, preferences.threadSort);
+}
+
+export function getVisibleThreadsForProject(input: {
+  threads: readonly Thread[];
+  activeThreadId: Thread["id"] | undefined;
+  isThreadListExpanded: boolean;
+  previewLimit: number;
+}): SidebarVisibleProjectThreads {
+  const { activeThreadId, isThreadListExpanded, previewLimit, threads } = input;
+  const hasHiddenThreads = threads.length > previewLimit;
+
+  if (!hasHiddenThreads || isThreadListExpanded) {
+    return {
+      hasHiddenThreads,
+      visibleThreads: [...threads],
+    };
+  }
+
+  const previewThreads = threads.slice(0, previewLimit);
+  if (!activeThreadId || previewThreads.some((thread) => thread.id === activeThreadId)) {
+    return {
+      hasHiddenThreads: true,
+      visibleThreads: previewThreads,
+    };
+  }
+
+  const activeThread = threads.find((thread) => thread.id === activeThreadId);
+  if (!activeThread) {
+    return {
+      hasHiddenThreads: true,
+      visibleThreads: previewThreads,
+    };
+  }
+
+  const visibleThreadIds = new Set([...previewThreads, activeThread].map((thread) => thread.id));
+  return {
+    hasHiddenThreads: true,
+    visibleThreads: threads.filter((thread) => visibleThreadIds.has(thread.id)),
+  };
 }

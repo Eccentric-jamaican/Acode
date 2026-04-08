@@ -60,6 +60,8 @@ const UPDATE_STATE_CHANNEL = "desktop:update-state";
 const UPDATE_GET_STATE_CHANNEL = "desktop:update-get-state";
 const UPDATE_DOWNLOAD_CHANNEL = "desktop:update-download";
 const UPDATE_INSTALL_CHANNEL = "desktop:update-install";
+const NOTIFICATIONS_IS_SUPPORTED_CHANNEL = "desktop:notifications-is-supported";
+const NOTIFICATIONS_SHOW_CHANNEL = "desktop:notifications-show";
 const BROWSER_GET_STATE_CHANNEL = "desktop:browser-get-state";
 const BROWSER_OPEN_CHANNEL = "desktop:browser-open";
 const BROWSER_CLOSE_PANE_CHANNEL = "desktop:browser-close-pane";
@@ -1367,6 +1369,41 @@ function registerIpcHandlers(): void {
       completed: result.completed,
       state: updateState,
     } satisfies DesktopUpdateActionResult;
+  });
+
+  ipcMain.removeHandler(NOTIFICATIONS_IS_SUPPORTED_CHANNEL);
+  ipcMain.handle(NOTIFICATIONS_IS_SUPPORTED_CHANNEL, async () => {
+    return true;
+  });
+
+  ipcMain.removeHandler(NOTIFICATIONS_SHOW_CHANNEL);
+  ipcMain.handle(NOTIFICATIONS_SHOW_CHANNEL, async (_event, rawInput: unknown) => {
+    const input = asRecord(rawInput);
+    const title = String(input.title ?? "Notification");
+    const body = String(input.body ?? "");
+    const silent = Boolean(input.silent);
+
+    if (!mainWindow) return false;
+
+    const notification = {
+      title,
+      body,
+      silent,
+    };
+
+    // Use Electron's notification API
+    const { Notification } = await import("electron");
+    if (!Notification.isSupported()) {
+      return false;
+    }
+
+    try {
+      const notif = new Notification(notification);
+      notif.show();
+      return true;
+    } catch {
+      return false;
+    }
   });
 
   ipcMain.removeHandler(BROWSER_GET_STATE_CHANNEL);

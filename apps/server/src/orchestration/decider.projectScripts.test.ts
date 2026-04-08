@@ -367,4 +367,224 @@ describe("decider project scripts", () => {
       },
     });
   });
+
+  it("creates handoff thread with imported messages and inferred source provider", async () => {
+    const now = new Date().toISOString();
+    const initial = createEmptyReadModel(now);
+    const withProject = await Effect.runPromise(
+      projectEvent(initial, {
+        sequence: 1,
+        eventId: asEventId("evt-project-create-handoff"),
+        aggregateKind: "project",
+        aggregateId: asProjectId("project-handoff"),
+        type: "project.created",
+        occurredAt: now,
+        commandId: CommandId.makeUnsafe("cmd-project-create-handoff"),
+        causationEventId: null,
+        correlationId: CommandId.makeUnsafe("cmd-project-create-handoff"),
+        metadata: {},
+        payload: {
+          projectId: asProjectId("project-handoff"),
+          title: "Project",
+          workspaceRoot: "/tmp/project",
+          defaultModel: null,
+          scripts: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+      }),
+    );
+    const readModel = await Effect.runPromise(
+      projectEvent(withProject, {
+        sequence: 2,
+        eventId: asEventId("evt-thread-create-handoff-source"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.makeUnsafe("thread-source"),
+        type: "thread.created",
+        occurredAt: now,
+        commandId: CommandId.makeUnsafe("cmd-thread-create-handoff-source"),
+        causationEventId: null,
+        correlationId: CommandId.makeUnsafe("cmd-thread-create-handoff-source"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.makeUnsafe("thread-source"),
+          projectId: asProjectId("project-handoff"),
+          origin: "user",
+          taskId: null,
+          title: "Source Thread",
+          model: "claude-sonnet-4-6",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "full-access",
+          isPinned: false,
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+          updatedAt: now,
+          handoff: null,
+        },
+      }),
+    );
+
+    const result = await Effect.runPromise(
+      decideOrchestrationCommand({
+        command: {
+          type: "thread.handoff.create",
+          commandId: CommandId.makeUnsafe("cmd-thread-handoff-create"),
+          threadId: ThreadId.makeUnsafe("thread-target"),
+          sourceThreadId: ThreadId.makeUnsafe("thread-source"),
+          projectId: asProjectId("project-handoff"),
+          title: "Target Thread",
+          model: "gpt-5.4",
+          runtimeMode: "full-access",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          branch: null,
+          worktreePath: null,
+          importedMessages: [
+            {
+              messageId: asMessageId("handoff-msg-user"),
+              role: "user",
+              text: "user context",
+              createdAt: now,
+              updatedAt: now,
+            },
+            {
+              messageId: asMessageId("handoff-msg-assistant"),
+              role: "assistant",
+              text: "assistant context",
+              createdAt: now,
+              updatedAt: now,
+            },
+          ],
+          createdAt: now,
+        },
+        readModel,
+      }),
+    );
+
+    expect(Array.isArray(result)).toBe(true);
+    const events = Array.isArray(result) ? result : [result];
+    expect(events).toHaveLength(3);
+    expect(events[0]?.type).toBe("thread.created");
+    if (events[0]?.type !== "thread.created") {
+      throw new Error("Expected thread.created");
+    }
+    expect(events[0].payload.handoff?.sourceProvider).toBe("claudeAgent");
+
+    expect(events[1]?.type).toBe("thread.message-sent");
+    expect(events[2]?.type).toBe("thread.message-sent");
+    if (events[1]?.type === "thread.message-sent") {
+      expect(events[1].payload.turnId).toBeNull();
+      expect(events[1].payload.streaming).toBe(false);
+    }
+  });
+
+  it("rejects re-handoff when the source thread has no native assistant message after handoff", async () => {
+    const now = new Date().toISOString();
+    const initial = createEmptyReadModel(now);
+    const withProject = await Effect.runPromise(
+      projectEvent(initial, {
+        sequence: 1,
+        eventId: asEventId("evt-project-create-rehandoff"),
+        aggregateKind: "project",
+        aggregateId: asProjectId("project-rehandoff"),
+        type: "project.created",
+        occurredAt: now,
+        commandId: CommandId.makeUnsafe("cmd-project-create-rehandoff"),
+        causationEventId: null,
+        correlationId: CommandId.makeUnsafe("cmd-project-create-rehandoff"),
+        metadata: {},
+        payload: {
+          projectId: asProjectId("project-rehandoff"),
+          title: "Project",
+          workspaceRoot: "/tmp/project",
+          defaultModel: null,
+          scripts: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+      }),
+    );
+    const withSourceThread = await Effect.runPromise(
+      projectEvent(withProject, {
+        sequence: 2,
+        eventId: asEventId("evt-thread-create-rehandoff-source"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.makeUnsafe("thread-rehandoff-source"),
+        type: "thread.created",
+        occurredAt: now,
+        commandId: CommandId.makeUnsafe("cmd-thread-create-rehandoff-source"),
+        causationEventId: null,
+        correlationId: CommandId.makeUnsafe("cmd-thread-create-rehandoff-source"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.makeUnsafe("thread-rehandoff-source"),
+          projectId: asProjectId("project-rehandoff"),
+          origin: "user",
+          taskId: null,
+          title: "Source Thread",
+          model: "gpt-5.4",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "full-access",
+          isPinned: false,
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+          updatedAt: now,
+          handoff: {
+            sourceThreadId: ThreadId.makeUnsafe("thread-original"),
+            sourceProvider: "claudeAgent",
+            importedAt: now,
+            bootstrapStatus: "completed",
+          },
+        },
+      }),
+    );
+    const readModel = await Effect.runPromise(
+      projectEvent(withSourceThread, {
+        sequence: 3,
+        eventId: asEventId("evt-thread-message-imported-assistant"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.makeUnsafe("thread-rehandoff-source"),
+        type: "thread.message-sent",
+        occurredAt: now,
+        commandId: CommandId.makeUnsafe("cmd-thread-message-imported-assistant"),
+        causationEventId: null,
+        correlationId: CommandId.makeUnsafe("cmd-thread-message-imported-assistant"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.makeUnsafe("thread-rehandoff-source"),
+          messageId: asMessageId("msg-imported-assistant"),
+          role: "assistant",
+          text: "Imported assistant message",
+          turnId: null,
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+      }),
+    );
+
+    await expect(
+      Effect.runPromise(
+        decideOrchestrationCommand({
+          command: {
+            type: "thread.handoff.create",
+            commandId: CommandId.makeUnsafe("cmd-thread-rehandoff"),
+            threadId: ThreadId.makeUnsafe("thread-rehandoff-target"),
+            sourceThreadId: ThreadId.makeUnsafe("thread-rehandoff-source"),
+            projectId: asProjectId("project-rehandoff"),
+            title: "Target Thread",
+            model: "claude-sonnet-4-6",
+            runtimeMode: "full-access",
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+            branch: null,
+            worktreePath: null,
+            importedMessages: [],
+            createdAt: now,
+          },
+          readModel,
+        }),
+      ),
+    ).rejects.toThrow("must contain at least one native assistant message after handoff");
+  });
 });

@@ -2,12 +2,14 @@ import { TurnId } from "@t3tools/contracts";
 
 export type RightPanelMode = "diff" | "browser";
 export type ResolvedRightPanelMode = RightPanelMode | "none";
+export type ChatRightPanel = RightPanelMode;
 
 export interface DiffRouteSearch {
   panel?: RightPanelMode;
   diff?: "1";
   diffTurnId?: TurnId;
   diffFilePath?: string;
+  splitViewId?: string;
 }
 
 function isDiffOpenValue(value: unknown): boolean {
@@ -42,15 +44,16 @@ export function resolveRightPanelMode(search: Pick<DiffRouteSearch, "panel" | "d
 
 export function stripDiffSearchParams<T extends Record<string, unknown>>(
   params: T,
-): Omit<T, "panel" | "diff" | "diffTurnId" | "diffFilePath"> {
+): Omit<T, "panel" | "diff" | "diffTurnId" | "diffFilePath" | "splitViewId"> {
   const {
     panel: _panel,
     diff: _diff,
     diffTurnId: _diffTurnId,
     diffFilePath: _diffFilePath,
+    splitViewId: _splitViewId,
     ...rest
   } = params;
-  return rest as Omit<T, "panel" | "diff" | "diffTurnId" | "diffFilePath">;
+  return rest as Omit<T, "panel" | "diff" | "diffTurnId" | "diffFilePath" | "splitViewId">;
 }
 
 export const stripRightPanelSearchParams = stripDiffSearchParams;
@@ -91,11 +94,13 @@ export function parseDiffRouteSearch(search: Record<string, unknown>): DiffRoute
   const diffTurnId = diffTurnIdRaw ? TurnId.makeUnsafe(diffTurnIdRaw) : undefined;
   const diffFilePath =
     resolvedMode === "diff" && diffTurnId ? normalizeSearchString(search.diffFilePath) : undefined;
+  const splitViewId = normalizeSearchString(search.splitViewId);
 
   return {
     ...(resolvedMode ? { panel: resolvedMode } : {}),
     ...(diff ? { diff } : {}),
     ...(diffTurnId ? { diffTurnId } : {}),
     ...(diffFilePath ? { diffFilePath } : {}),
+    ...(splitViewId ? { splitViewId } : {}),
   };
 }

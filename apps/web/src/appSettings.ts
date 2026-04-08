@@ -29,6 +29,7 @@ const MODELS_WITH_FAST_SUPPORT = new Set(["gpt-5.4", "gpt-5.4-mini"]);
 const BUILT_IN_MODEL_SLUGS_BY_PROVIDER: Record<ProviderKind, ReadonlySet<string>> = {
   codex: new Set(getModelOptions("codex").map((option) => option.slug)),
   opencode: new Set(getModelOptions("opencode").map((option) => option.slug)),
+  claudeAgent: new Set(getModelOptions("claudeAgent").map((option) => option.slug)),
 };
 
 const AppSettingsSchema = Schema.Struct({
@@ -51,6 +52,15 @@ const AppSettingsSchema = Schema.Struct({
   ),
   customOpencodeModels: Schema.Array(Schema.String).pipe(
     Schema.withConstructorDefault(() => Option.some([])),
+  ),
+  customClaudeModels: Schema.Array(Schema.String).pipe(
+    Schema.withConstructorDefault(() => Option.some([])),
+  ),
+  enableTaskCompletionToasts: Schema.Boolean.pipe(
+    Schema.withConstructorDefault(() => Option.some(true)),
+  ),
+  enableSystemTaskCompletionNotifications: Schema.Boolean.pipe(
+    Schema.withConstructorDefault(() => Option.some(true)),
   ),
 });
 export type AppSettings = typeof AppSettingsSchema.Type;

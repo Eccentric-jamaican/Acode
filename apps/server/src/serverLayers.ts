@@ -23,6 +23,7 @@ import { ErrorInboxServiceLive } from "./errorInbox/Layers/ErrorInbox";
 import { ProviderUnsupportedError } from "./provider/Errors";
 import { makeCodexAdapterLive } from "./provider/Layers/CodexAdapter";
 import { makeOpencodeAdapterLive } from "./provider/Layers/OpencodeAdapter";
+import { makeClaudeAdapterLive } from "./provider/Layers/ClaudeAdapter";
 import { ProviderAdapterRegistryLive } from "./provider/Layers/ProviderAdapterRegistry";
 import { makeProviderServiceLive } from "./provider/Layers/ProviderService";
 import { ProviderSessionDirectoryLive } from "./provider/Layers/ProviderSessionDirectory";
@@ -63,9 +64,13 @@ export function makeServerProviderLayer(): Layer.Layer<
       nativeEventLogger ? { nativeEventLogger } : undefined,
     );
     const opencodeAdapterLayer = makeOpencodeAdapterLive();
+    const claudeAdapterLayer = makeClaudeAdapterLive(
+      nativeEventLogger ? { nativeEventLogger } : undefined,
+    );
     const adapterRegistryLayer = ProviderAdapterRegistryLive.pipe(
       Layer.provide(codexAdapterLayer),
       Layer.provide(opencodeAdapterLayer),
+      Layer.provide(claudeAdapterLayer),
       Layer.provideMerge(providerSessionDirectoryLayer),
     );
     return makeProviderServiceLive(

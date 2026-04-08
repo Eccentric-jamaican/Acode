@@ -129,12 +129,21 @@ interface BrowserPaneProps {
   activeThreadId: ThreadId | null;
   activeRuntimeMode: RuntimeMode | null;
   open: boolean;
+  layout?: "aside" | "panel";
   onRequestOpen: () => void;
   onRequestClose: () => void;
 }
 
 export default function IntegratedBrowserPane(props: BrowserPaneProps) {
-  const { activeProjectId, activeThreadId, open, onRequestOpen, onRequestClose } = props;
+  const {
+    activeProjectId,
+    activeThreadId,
+    open,
+    layout = "aside",
+    onRequestOpen,
+    onRequestClose,
+  } = props;
+  const usesAsideLayout = layout === "aside";
   const { settings } = useAppSettings();
   const width = useBrowserPaneStore((state) => state.width);
   const setWidth = useBrowserPaneStore((state) => state.setWidth);
@@ -332,6 +341,9 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
   );
 
   useLayoutEffect(() => {
+    if (!usesAsideLayout) {
+      return;
+    }
     const parent = paneRef.current?.parentElement;
     if (!parent) {
       return;
@@ -349,7 +361,7 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
       observer.disconnect();
       window.removeEventListener("resize", updateContainerWidth);
     };
-  }, [open]);
+  }, [open, usesAsideLayout]);
 
   useLayoutEffect(() => {
     if (!open || !api?.browser || !activeProjectId || !viewportRef.current) {
@@ -531,6 +543,190 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
 
   if (!isDesktopBrowserAvailable || !browserOpen) {
     return null;
+  }
+
+  if (!usesAsideLayout) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div
+          className="flex min-w-0 shrink-0 flex-col border-b border-border"
+          data-testid="integrated-browser-top-header"
+        >
+          <div className="flex h-8 min-w-0 items-center gap-1 px-2">
+            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+              {tabs.map((tab) => {
+                const isActive = tab.tabId === activeTab?.tabId;
+                const tabLabel = tab.navigation.title?.trim() || tab.navigation.url || "New tab";
+                return (
+                  <button
+                    key={tab.tabId}
+                    type="button"
+                    className={cn(
+                      "group flex min-w-0 max-w-[180px] items-center gap-1 rounded border px-2 py-0.5 text-xs",
+                      isActive
+                        ? "border-border bg-muted/70 text-foreground"
+                        : "border-transparent bg-muted/40 text-muted-foreground hover:border-border/70 hover:text-foreground",
+                    )}
+                    onClick={() => activateTab(tab.tabId)}
+                    title={tabLabel}
+                  >
+                    <span className="truncate">{tabLabel}</span>
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      aria-label={`Close tab ${tabLabel}`}
+                      className="rounded p-0.5 opacity-70 hover:bg-background hover:opacity-100"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        closeTab(tab.tabId);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ") {
+                          event.preventDefault();
+                          event.stopPropagation();
+                          closeTab(tab.tabId);
+                        }
+                      }}
+                    >
+                      <XIcon className="size-3" />
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              aria-label="New tab"
+              disabled={controlsDisabled}
+              onClick={createTab}
+            >
+              +
+            </Button>
+          </div>
+          <div className="flex h-9 min-w-0 items-center gap-2 px-2">
+            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Back"
+                disabled={controlsDisabled || !activeTab?.navigation.canGoBack}
+                onClick={() => {
+                  if (!activeProjectId) {
+                    return;
+                  }
+                  void runBrowserAction("go back", () =>
+                    api.browser.back({ projectId: activeProjectId }),
+                  ).then((nextSnapshot) => {
+                    if (nextSnapshot) {
+                      setSnapshot(nextSnapshot);
+                    }
+                  });
+                }}
+              >
+                <ArrowLeftIcon />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Forward"
+                disabled={controlsDisabled || !activeTab?.navigation.canGoForward}
+                onClick={() => {
+                  if (!activeProjectId) {
+                    return;
+                  }
+                  void runBrowserAction("go forward", () =>
+                    api.browser.forward({ projectId: activeProjectId }),
+                  ).then((nextSnapshot) => {
+                    if (nextSnapshot) {
+                      setSnapshot(nextSnapshot);
+                    }
+                  });
+                }}
+              >
+                <ArrowRightIcon />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Reload"
+                disabled={controlsDisabled}
+                onClick={() => {
+                  if (!activeProjectId) {
+                    return;
+                  }
+                  void runBrowserAction("reload page", () =>
+                    api.browser.reload({ projectId: activeProjectId }),
+                  ).then((nextSnapshot) => {
+                    if (nextSnapshot) {
+                      setSnapshot(nextSnapshot);
+                    }
+                  });
+                }}
+              >
+                <RefreshCwIcon className={cn(activeTab?.navigation.isLoading && "animate-spin")} />
+              </Button>
+              <Input
+                value={urlInput}
+                onChange={(event) => setUrlInput(event.target.value)}
+                onKeyDown={onUrlKeyDown}
+                className="h-8 min-w-[120px] flex-1 basis-0 rounded-md border-border bg-muted/40 text-xs"
+                spellCheck={false}
+                aria-label="Browser URL"
+              />
+            </div>
+            <div className="flex shrink-0 items-center gap-1" data-testid="integrated-browser-header-actions">
+              <Toggle
+                pressed={activeTab?.inspectMode === true}
+                onPressedChange={(next) => {
+                  if (!activeProjectId) {
+                    return;
+                  }
+                  void runBrowserAction("toggle inspect mode", () =>
+                    api.browser.setInspectMode({ projectId: activeProjectId, enabled: next }),
+                  ).then((nextSnapshot) => {
+                    if (nextSnapshot) {
+                      setSnapshot(nextSnapshot);
+                    }
+                  });
+                }}
+                variant="outline"
+                size="sm"
+                aria-label="Inspect element"
+                disabled={controlsDisabled}
+              >
+                <SearchIcon className="size-3.5" />
+              </Toggle>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label="Collapse browser"
+                onClick={onRequestClose}
+              >
+                <XIcon />
+              </Button>
+            </div>
+          </div>
+        </div>
+        <div className="relative min-h-0 flex-1">
+          <div
+            ref={viewportRef}
+            className="absolute inset-0"
+            data-integrated-browser-native-viewport="true"
+          />
+          {!activeTab && (
+            <div className="absolute inset-0 flex items-center justify-center bg-background/80 text-xs text-muted-foreground">
+              Loading browser...
+            </div>
+          )}
+        </div>
+      </div>
+    );
   }
 
   return (

@@ -2,6 +2,7 @@ import type {
   MessageId,
   OrchestrationCommand,
   OrchestrationEvent,
+  ProviderKind,
   OrchestrationReadModel,
   ThreadId,
 } from "@t3tools/contracts";
@@ -61,6 +62,23 @@ function newThreadIdFromTask(taskId: string): ThreadId {
 
 function newMessageId(): MessageId {
   return crypto.randomUUID() as MessageId;
+}
+
+function inferProviderFromModel(model: string): ProviderKind {
+  const normalized = model.trim().toLowerCase();
+  if (normalized.includes("claude")) {
+    return "claudeAgent";
+  }
+  if (normalized === "opencode/default" || /^[^/\s]+\/[^/\s]+$/.test(normalized)) {
+    return "opencode";
+  }
+  return "codex";
+}
+
+function hasNativeHandoffMessages(
+  thread: Pick<OrchestrationReadModel["threads"][number], "messages">,
+): boolean {
+  return thread.messages.some((message) => message.role === "assistant" && message.turnId !== null);
 }
 
 function taskRunPrompt(input: {
@@ -619,6 +637,93 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           updatedAt: command.createdAt,
         },
       };
+    }
+
+    case "thread.handoff.create": {
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      const sourceThread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.sourceThreadId,
+      });
+      yield* requireThreadAbsent({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+
+      if (sourceThread.projectId !== command.projectId) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Source thread '${command.sourceThreadId}' belongs to a different project.`,
+        });
+      }
+
+      if (sourceThread.handoff != null && !hasNativeHandoffMessages(sourceThread)) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Source thread '${command.sourceThreadId}' must contain at least one native assistant message after handoff before it can be handed off again.`,
+        });
+      }
+
+      const createdEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.created",
+        payload: {
+          threadId: command.threadId,
+          projectId: command.projectId,
+          origin: "user",
+          taskId: null,
+          title: command.title,
+          model: command.model,
+          runtimeMode: command.runtimeMode,
+          interactionMode: command.interactionMode,
+          isPinned: false,
+          branch: command.branch,
+          worktreePath: command.worktreePath,
+          createdAt: command.createdAt,
+          updatedAt: command.createdAt,
+          handoff: {
+            sourceThreadId: command.sourceThreadId,
+            sourceProvider: inferProviderFromModel(sourceThread.model),
+            importedAt: command.createdAt,
+            bootstrapStatus: "completed",
+          },
+        },
+      };
+
+      const importedMessageEvents: ReadonlyArray<Omit<OrchestrationEvent, "sequence">> =
+        command.importedMessages.map((message) => ({
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: command.createdAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.message-sent",
+          payload: {
+            threadId: command.threadId,
+            messageId: message.messageId,
+            role: message.role,
+            text: message.text,
+            ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+            turnId: null,
+            streaming: false,
+            createdAt: message.createdAt,
+            updatedAt: message.updatedAt,
+          },
+        }));
+
+      return [createdEvent, ...importedMessageEvents];
     }
 
     case "thread.delete": {

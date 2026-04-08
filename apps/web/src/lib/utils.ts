@@ -23,3 +23,5 @@ export const newTaskId = (): TaskId => TaskId.makeUnsafe(crypto.randomUUID());
 export const newThreadId = (): ThreadId => ThreadId.makeUnsafe(crypto.randomUUID());
 
 export const newMessageId = (): MessageId => MessageId.makeUnsafe(crypto.randomUUID());
+
+export const randomUUID = (): string => crypto.randomUUID();

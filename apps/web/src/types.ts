@@ -2,8 +2,6 @@ import type {
   ErrorInboxEntry as ContractErrorInboxEntry,
   OrchestrationLatestTurn,
   OrchestrationProjectRules as ContractOrchestrationProjectRules,
-  OrchestrationProposedPlanId,
-  OrchestrationSessionStatus,
   OrchestrationTask as ContractOrchestrationTask,
   OrchestrationTaskRuntime as ContractOrchestrationTaskRuntime,
   OrchestrationThreadActivity,
@@ -17,6 +15,9 @@ import type {
   ProviderKind,
   ProviderInteractionMode,
   RuntimeMode,
+  ThreadHandoff as ContractThreadHandoff,
+  OrchestrationProposedPlanId,
+  OrchestrationSessionStatus,
 } from "@t3tools/contracts";
 
 export type SessionPhase = "disconnected" | "connecting" | "ready" | "running";
@@ -114,6 +115,7 @@ export interface Thread {
   isPinned: boolean;
   turnDiffSummaries: TurnDiffSummary[];
   activities: OrchestrationThreadActivity[];
+  handoff?: ContractThreadHandoff | null;
 }
 
 export interface Task {

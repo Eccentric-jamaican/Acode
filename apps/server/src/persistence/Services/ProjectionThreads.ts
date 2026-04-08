@@ -12,6 +12,7 @@ import {
   ProviderInteractionMode,
   RuntimeMode,
   TaskId,
+  ThreadHandoff,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -32,6 +33,7 @@ export const ProjectionThread = Schema.Struct({
   branch: Schema.NullOr(Schema.String),
   worktreePath: Schema.NullOr(Schema.String),
   isPinned: Schema.Boolean,
+  handoff: Schema.NullOr(ThreadHandoff),
   latestTurnId: Schema.NullOr(TurnId),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -42,6 +44,7 @@ export type ProjectionThread = typeof ProjectionThread.Type;
 export const ProjectionThreadDbRow = ProjectionThread.mapFields(
   Struct.assign({
     isPinned: Schema.Number,
+    handoff: Schema.NullOr(Schema.fromJsonString(ThreadHandoff)),
   }),
 );
 export type ProjectionThreadDbRow = typeof ProjectionThreadDbRow.Type;
