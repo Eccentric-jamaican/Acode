@@ -58,6 +58,7 @@ const initialState: AppState = {
   threadsHydrated: false,
 };
 const persistedExpandedProjectCwds = new Set<string>();
+let hasPersistedExpandedProjectCwds = false;
 
 // ── Persist helpers ──────────────────────────────────────────────────
 
@@ -65,16 +66,26 @@ function readPersistedState(): AppState {
   if (typeof window === "undefined") return initialState;
   try {
     const raw = window.localStorage.getItem(PERSISTED_STATE_KEY);
-    if (!raw) return initialState;
+    if (!raw) {
+      hasPersistedExpandedProjectCwds = false;
+      persistedExpandedProjectCwds.clear();
+      return initialState;
+    }
     const parsed = JSON.parse(raw) as { expandedProjectCwds?: string[] };
     persistedExpandedProjectCwds.clear();
-    for (const cwd of parsed.expandedProjectCwds ?? []) {
+    const expandedProjectCwds = Array.isArray(parsed.expandedProjectCwds)
+      ? parsed.expandedProjectCwds
+      : null;
+    hasPersistedExpandedProjectCwds = expandedProjectCwds !== null;
+    for (const cwd of expandedProjectCwds ?? []) {
       if (typeof cwd === "string" && cwd.length > 0) {
         persistedExpandedProjectCwds.add(cwd);
       }
     }
     return { ...initialState };
   } catch {
+    hasPersistedExpandedProjectCwds = false;
+    persistedExpandedProjectCwds.clear();
     return initialState;
   }
 }
@@ -132,7 +143,7 @@ function mapProjectsFromReadModel(
         resolveModelSlug(project.defaultModel ?? DEFAULT_MODEL_BY_PROVIDER.codex),
       expanded:
         existing?.expanded ??
-        (persistedExpandedProjectCwds.size > 0
+        (hasPersistedExpandedProjectCwds
           ? persistedExpandedProjectCwds.has(project.workspaceRoot)
           : true),
       scripts: project.scripts.map((script) => ({ ...script })),
@@ -420,6 +431,30 @@ export function setProjectExpanded(
   return changed ? { ...state, projects } : state;
 }
 
+export function setAllProjectsExpanded(state: AppState, expanded: boolean): AppState {
+  let changed = false;
+  const projects = state.projects.map((project) => {
+    if (project.expanded === expanded) return project;
+    changed = true;
+    return { ...project, expanded };
+  });
+  return changed ? { ...state, projects } : state;
+}
+
+export function collapseProjectsExcept(
+  state: AppState,
+  activeProjectId: Project["id"] | null,
+): AppState {
+  let changed = false;
+  const projects = state.projects.map((project) => {
+    const nextExpanded = activeProjectId !== null && project.id === activeProjectId;
+    if (project.expanded === nextExpanded) return project;
+    changed = true;
+    return { ...project, expanded: nextExpanded };
+  });
+  return changed ? { ...state, projects } : state;
+}
+
 export function setError(state: AppState, threadId: ThreadId, error: string | null): AppState {
   const threads = updateThread(state.threads, threadId, (t) => {
     if (t.error === error) return t;
@@ -457,6 +492,8 @@ interface AppStore extends AppState {
   markThreadUnread: (threadId: ThreadId) => void;
   toggleProject: (projectId: Project["id"]) => void;
   setProjectExpanded: (projectId: Project["id"], expanded: boolean) => void;
+  setAllProjectsExpanded: (expanded: boolean) => void;
+  collapseProjectsExcept: (activeProjectId: Project["id"] | null) => void;
   setError: (threadId: ThreadId, error: string | null) => void;
   setThreadBranch: (threadId: ThreadId, branch: string | null, worktreePath: string | null) => void;
 }
@@ -472,6 +509,9 @@ export const useStore = create<AppStore>((set) => ({
   toggleProject: (projectId) => set((state) => toggleProject(state, projectId)),
   setProjectExpanded: (projectId, expanded) =>
     set((state) => setProjectExpanded(state, projectId, expanded)),
+  setAllProjectsExpanded: (expanded) => set((state) => setAllProjectsExpanded(state, expanded)),
+  collapseProjectsExcept: (activeProjectId) =>
+    set((state) => collapseProjectsExcept(state, activeProjectId)),
   setError: (threadId, error) => set((state) => setError(state, threadId, error)),
   setThreadBranch: (threadId, branch, worktreePath) =>
     set((state) => setThreadBranch(state, threadId, branch, worktreePath)),

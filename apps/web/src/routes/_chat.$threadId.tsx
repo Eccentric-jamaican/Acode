@@ -5,6 +5,7 @@ import { Suspense, lazy, type ReactNode, useCallback, useEffect, useMemo, useRef
 import ChatView from "../components/ChatView";
 import IntegratedBrowserPane from "../components/IntegratedBrowserPane";
 import { useComposerDraftStore } from "../composerDraftStore";
+import { useDisposableThreadLifecycle } from "../hooks/useDisposableThreadLifecycle";
 import {
   parseDiffRouteSearch,
   resolveRightPanelMode,
@@ -1050,6 +1051,7 @@ function ChatThreadRouteView() {
   const threadId = Route.useParams({
     select: (params) => ThreadId.makeUnsafe(params.threadId),
   });
+  useDisposableThreadLifecycle(threadId);
   const search = Route.useSearch();
   const threadExists = useStore((store) => store.threads.some((thread) => thread.id === threadId));
   const draftThreadExists = useComposerDraftStore(

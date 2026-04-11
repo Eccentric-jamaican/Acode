@@ -24,7 +24,8 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FiGitBranch } from "react-icons/fi";
 import { IoFilter } from "react-icons/io5";
-import { TbFolderPlus } from "react-icons/tb";
+import { LuMessageCircleDashed } from "react-icons/lu";
+import { TbArrowsDiagonal, TbArrowsDiagonalMinimize2, TbFolderPlus } from "react-icons/tb";
 import {
   DEFAULT_RUNTIME_MODE,
   DEFAULT_MODEL_BY_PROVIDER,
@@ -51,6 +52,7 @@ import { serverConfigQueryOptions, serverQueryKeys } from "../lib/serverReactQue
 import { readNativeApi } from "../nativeApi";
 import { type DraftThreadEnvMode, useComposerDraftStore } from "../composerDraftStore";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
+import { useTemporaryThreadStore } from "../temporaryThreadStore";
 import {
   buildChronologicalThreadList,
   groupThreadsByProject,
@@ -106,6 +108,7 @@ import { OpenAI, OpenCodeIcon, ClaudeAI } from "./Icons";
 import type { ProviderKind } from "@t3tools/contracts";
 import { useThreadHandoff } from "../hooks/useThreadHandoff";
 import { ProjectSidebarIcon } from "./ProjectSidebarIcon";
+import { ThreadPinToggleButton } from "./ThreadPinToggleButton";
 import {
   canCreateThreadHandoff,
   inferProviderFromModel,
@@ -778,7 +781,10 @@ export default function Sidebar() {
   const threadsHydrated = useStore((store) => store.threadsHydrated);
   const markThreadUnread = useStore((store) => store.markThreadUnread);
   const toggleProject = useStore((store) => store.toggleProject);
+  const setAllProjectsExpanded = useStore((store) => store.setAllProjectsExpanded);
+  const collapseProjectsExcept = useStore((store) => store.collapseProjectsExcept);
   const clearComposerDraftForThread = useComposerDraftStore((store) => store.clearThreadDraft);
+  const draftThreadsByThreadId = useComposerDraftStore((store) => store.draftThreadsByThreadId);
   const getDraftThreadByProjectId = useComposerDraftStore(
     (store) => store.getDraftThreadByProjectId,
   );
@@ -793,6 +799,9 @@ export default function Sidebar() {
   const clearProjectDraftThreadById = useComposerDraftStore(
     (store) => store.clearProjectDraftThreadById,
   );
+  const temporaryThreadIds = useTemporaryThreadStore((store) => store.temporaryThreadIds);
+  const markTemporaryThread = useTemporaryThreadStore((store) => store.markTemporaryThread);
+  const clearTemporaryThread = useTemporaryThreadStore((store) => store.clearTemporaryThread);
   const navigate = useNavigate();
   const { createThreadHandoff } = useThreadHandoff();
   const pathname = useRouterState({ select: (state) => state.location.pathname });
@@ -966,6 +975,11 @@ export default function Sidebar() {
     [routeThreadId, threads],
   );
   const activeDraftThread = routeThreadId ? getDraftThread(routeThreadId) : null;
+  const focusedProjectId = activeThread?.projectId ?? activeDraftThread?.projectId ?? null;
+  const allProjectsExpanded = useMemo(
+    () => projects.length > 0 && projects.every((project) => project.expanded),
+    [projects],
+  );
   const orderedProjects = useMemo(
     () => orderProjectsForSidebar(projects, sidebarPreferences.projectOrder),
     [projects, sidebarPreferences.projectOrder],
@@ -1108,12 +1122,18 @@ export default function Sidebar() {
         branch?: string | null;
         worktreePath?: string | null;
         envMode?: DraftThreadEnvMode;
+        temporary?: boolean;
       },
     ): Promise<void> => {
+      const wantsTemporaryThread = options?.temporary === true;
       const hasBranchOption = options?.branch !== undefined;
       const hasWorktreePathOption = options?.worktreePath !== undefined;
       const hasEnvModeOption = options?.envMode !== undefined;
-      const storedDraftThread = getDraftThreadByProjectId(projectId);
+      const storedDraftThreadCandidate = getDraftThreadByProjectId(projectId);
+      const storedDraftThread =
+        !wantsTemporaryThread && storedDraftThreadCandidate?.isTemporary !== true
+          ? storedDraftThreadCandidate
+          : null;
       if (storedDraftThread) {
         return (async () => {
           if (hasBranchOption || hasWorktreePathOption || hasEnvModeOption) {
@@ -1135,7 +1155,11 @@ export default function Sidebar() {
       }
       clearProjectDraftThreadId(projectId);
 
-      const activeDraftThread = routeThreadId ? getDraftThread(routeThreadId) : null;
+      const activeDraftThreadCandidate = routeThreadId ? getDraftThread(routeThreadId) : null;
+      const activeDraftThread =
+        !wantsTemporaryThread && activeDraftThreadCandidate?.isTemporary !== true
+          ? activeDraftThreadCandidate
+          : null;
       if (activeDraftThread && routeThreadId && activeDraftThread.projectId === projectId) {
         if (hasBranchOption || hasWorktreePathOption || hasEnvModeOption) {
           setDraftThreadContext(routeThreadId, {
@@ -1156,7 +1180,11 @@ export default function Sidebar() {
           worktreePath: options?.worktreePath ?? null,
           envMode: options?.envMode ?? "local",
           runtimeMode: DEFAULT_RUNTIME_MODE,
+          ...(wantsTemporaryThread ? { isTemporary: true } : {}),
         });
+        if (wantsTemporaryThread) {
+          markTemporaryThread(threadId);
+        }
 
         await navigate({
           to: "/$threadId",
@@ -1172,6 +1200,7 @@ export default function Sidebar() {
       routeThreadId,
       setDraftThreadContext,
       setProjectDraftThreadId,
+      markTemporaryThread,
     ],
   );
 
@@ -1359,6 +1388,14 @@ export default function Sidebar() {
     });
   }, []);
 
+  const handleToggleProjects = useCallback(() => {
+    if (allProjectsExpanded) {
+      collapseProjectsExcept(focusedProjectId);
+      return;
+    }
+    setAllProjectsExpanded(true);
+  }, [allProjectsExpanded, collapseProjectsExcept, focusedProjectId, setAllProjectsExpanded]);
+
   const cancelRename = useCallback(() => {
     setRenamingThreadId(null);
     renamingInputRef.current = null;
@@ -1454,13 +1491,17 @@ export default function Sidebar() {
       if (!api) return;
       const thread = threads.find((t) => t.id === threadId);
       if (!thread) return;
+      const isDisposableThread =
+        temporaryThreadIds[thread.id] === true || draftThreadsByThreadId[thread.id]?.isTemporary === true;
       const hasPendingApprovals = derivePendingApprovals(thread.activities).length > 0;
       const hasPendingUserInput = derivePendingUserInputs(thread.activities).length > 0;
-      const canHandoff = canCreateThreadHandoff({
-        thread,
-        hasPendingApprovals,
-        hasPendingUserInput,
-      });
+      const canHandoff =
+        !isDisposableThread &&
+        canCreateThreadHandoff({
+          thread,
+          hasPendingApprovals,
+          hasPendingUserInput,
+        });
       const sourceProvider = inferProviderFromModel(thread.model);
       const handoffTargetProviders = canHandoff ? resolveHandoffTargetProviders(sourceProvider) : [];
       const handoffMenuItems = handoffTargetProviders.map((provider) => ({
@@ -1602,6 +1643,7 @@ export default function Sidebar() {
       clearComposerDraftForThread(threadId);
       clearProjectDraftThreadById(thread.projectId, thread.id);
       clearTerminalState(threadId);
+      clearTemporaryThread(threadId);
       if (shouldNavigateToFallback) {
         if (fallbackThreadId) {
           void navigate({
@@ -1643,7 +1685,9 @@ export default function Sidebar() {
       appSettings.confirmThreadDelete,
       clearComposerDraftForThread,
       clearProjectDraftThreadById,
+      clearTemporaryThread,
       clearTerminalState,
+      draftThreadsByThreadId,
       handleSetThreadPinned,
       handoffThread,
       markThreadUnread,
@@ -1651,6 +1695,7 @@ export default function Sidebar() {
       projects,
       removeWorktreeMutation,
       routeThreadId,
+      temporaryThreadIds,
       threads,
     ],
   );
@@ -1687,6 +1732,7 @@ export default function Sidebar() {
         const projectDraftThread = getDraftThreadByProjectId(projectId);
         if (projectDraftThread) {
           clearComposerDraftForThread(projectDraftThread.threadId);
+          clearTemporaryThread(projectDraftThread.threadId);
         }
         clearProjectDraftThreadId(projectId);
         await api.orchestration.dispatchCommand({
@@ -1707,6 +1753,7 @@ export default function Sidebar() {
     [
       clearComposerDraftForThread,
       clearProjectDraftThreadId,
+      clearTemporaryThread,
       getDraftThreadByProjectId,
       projects,
       threads,
@@ -1956,17 +2003,33 @@ export default function Sidebar() {
       );
       const provider = getProviderFromModel(thread.model);
       const handoffBadgeLabel = resolveThreadHandoffBadgeLabel(thread);
+      const isDisposableThread =
+        temporaryThreadIds[thread.id] === true || draftThreadsByThreadId[thread.id]?.isTemporary === true;
       const timeLabel = formatRelativeTime(threadTimestamp(thread, sidebarPreferences.threadSort));
+      const secondaryMetaClass = isActive ? "text-foreground/65" : "text-muted-foreground/45";
       const RowWrapper = options?.variant === "flat" ? SidebarMenuItem : SidebarMenuSubItem;
 
       return (
-        <RowWrapper key={thread.id} className="relative w-full" data-thread-item>
+        <RowWrapper key={thread.id} className="group/thread-row relative w-full" data-thread-item>
+          <ThreadPinToggleButton
+            pinned={thread.isPinned}
+            presentation="overlay"
+            toneClassName={secondaryMetaClass}
+            onToggle={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              void handleSetThreadPinned(thread.id, !thread.isPinned);
+            }}
+          />
           {threadStatus ? (
             <span
               className={cn(
-                "pointer-events-none absolute left-3 top-1/2 z-10 h-1.5 w-1.5 -translate-y-1/2 rounded-full",
+                "pointer-events-none absolute left-3 top-1/2 z-10 h-1.5 w-1.5 -translate-y-1/2 rounded-full transition-opacity",
                 threadStatus.dotClass,
                 threadStatus.pulse ? "animate-pulse" : "",
+                thread.isPinned
+                  ? "opacity-0"
+                  : "opacity-100 group-hover/thread-row:opacity-0 group-focus-within/thread-row:opacity-0",
               )}
             />
           ) : null}
@@ -2029,8 +2092,7 @@ export default function Sidebar() {
               {thread.origin === "task" ? (
                 <KanbanSquareIcon className="size-3 shrink-0 text-muted-foreground/60" />
               ) : null}
-              {thread.isPinned && <PinIcon className="size-3 shrink-0 text-muted-foreground/60" />}
-              {handoffBadgeLabel && thread.handoff ? (
+              {!isDisposableThread && handoffBadgeLabel && thread.handoff ? (
                 <Tooltip>
                   <TooltipTrigger
                     render={
@@ -2090,7 +2152,7 @@ export default function Sidebar() {
                   </span>
                 ) : null}
               </div>
-              {handoffBadgeLabel ? (
+              {!isDisposableThread && handoffBadgeLabel ? (
                 <Tooltip>
                   <TooltipTrigger
                     render={
@@ -2119,10 +2181,22 @@ export default function Sidebar() {
                   />
                 </span>
               )}
+              {isDisposableThread ? (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <span className="inline-flex shrink-0 items-center text-muted-foreground/55">
+                        <LuMessageCircleDashed className="size-3" />
+                      </span>
+                    }
+                  />
+                  <TooltipPopup side="top">Disposable chat</TooltipPopup>
+                </Tooltip>
+              ) : null}
               <span
                 className={cn(
                   "text-[12px]",
-                  isActive ? "text-foreground/65" : "text-muted-foreground/45",
+                  secondaryMetaClass,
                 )}
               >
                 {timeLabel}
@@ -2138,6 +2212,7 @@ export default function Sidebar() {
       handleThreadContextMenu,
       navigate,
       openPrLink,
+      handleSetThreadPinned,
       pendingApprovalByThreadId,
       pendingUserInputByThreadId,
       prByThreadId,
@@ -2145,7 +2220,9 @@ export default function Sidebar() {
       renamingTitle,
       routeThreadId,
       sidebarPreferences.threadSort,
+      draftThreadsByThreadId,
       terminalStateByThreadId,
+      temporaryThreadIds,
     ],
   );
 
@@ -2245,6 +2322,19 @@ export default function Sidebar() {
                   {project.name}
                 </span>
               </CollapsibleTrigger>
+              <SidebarMenuAction
+                showOnHover
+                aria-label={`New disposable thread in ${project.name}`}
+                title={`New disposable thread in ${project.name}`}
+                className="right-7 top-1 size-5 rounded-md p-0 text-muted-foreground/60 hover:bg-white/8 hover:text-foreground"
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  void handleNewThread(project.id, { temporary: true });
+                }}
+              >
+                <LuMessageCircleDashed className="size-3.5" />
+              </SidebarMenuAction>
               <SidebarMenuAction
                 showOnHover
                 aria-label={`New thread in ${project.name}`}
@@ -2481,6 +2571,46 @@ export default function Sidebar() {
                     </div>
                   </PopoverPopup>
                 </Popover>
+
+                {shouldShowProjectGroups && projects.length > 0 ? (
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <button
+                          type="button"
+                          aria-label={
+                            allProjectsExpanded
+                              ? focusedProjectId
+                                ? "Collapse all projects except the active project"
+                                : "Collapse all projects"
+                              : "Expand all projects"
+                          }
+                          className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground/70 transition-colors duration-150 hover:bg-accent hover:text-foreground disabled:cursor-default disabled:opacity-45"
+                          onClick={handleToggleProjects}
+                        >
+                          {allProjectsExpanded ? (
+                            <TbArrowsDiagonalMinimize2 className="size-4" />
+                          ) : (
+                            <TbArrowsDiagonal className="size-4" />
+                          )}
+                        </button>
+                      }
+                    >
+                      {allProjectsExpanded ? (
+                        <TbArrowsDiagonalMinimize2 className="size-4" />
+                      ) : (
+                        <TbArrowsDiagonal className="size-4" />
+                      )}
+                    </TooltipTrigger>
+                    <TooltipPopup side="bottom">
+                      {allProjectsExpanded
+                        ? focusedProjectId
+                          ? "Collapse all projects except the active thread's project"
+                          : "Collapse all projects"
+                        : "Expand all projects"}
+                    </TooltipPopup>
+                  </Tooltip>
+                ) : null}
 
                 <Menu>
                   <MenuTrigger

@@ -65,6 +65,7 @@ interface PersistedDraftThreadState {
   branch: string | null;
   worktreePath: string | null;
   envMode: DraftThreadEnvMode;
+  isTemporary?: boolean;
 }
 
 interface PersistedComposerDraftStoreState {
@@ -95,6 +96,7 @@ export interface DraftThreadState {
   branch: string | null;
   worktreePath: string | null;
   envMode: DraftThreadEnvMode;
+  isTemporary?: boolean;
 }
 
 interface ProjectDraftThread extends DraftThreadState {
@@ -118,6 +120,7 @@ interface ComposerDraftStoreState {
       envMode?: DraftThreadEnvMode;
       runtimeMode?: RuntimeMode;
       interactionMode?: ProviderInteractionMode;
+      isTemporary?: boolean;
     },
   ) => void;
   setDraftThreadContext: (
@@ -130,6 +133,7 @@ interface ComposerDraftStoreState {
       envMode?: DraftThreadEnvMode;
       runtimeMode?: RuntimeMode;
       interactionMode?: ProviderInteractionMode;
+      isTemporary?: boolean;
     },
   ) => void;
   clearProjectDraftThreadId: (projectId: ProjectId) => void;
@@ -349,6 +353,7 @@ function normalizePersistedComposerDraftState(value: unknown): PersistedComposer
       const branch = candidateDraftThread.branch;
       const worktreePath = candidateDraftThread.worktreePath;
       const normalizedWorktreePath = typeof worktreePath === "string" ? worktreePath : null;
+      const isTemporary = candidateDraftThread.isTemporary === true ? true : undefined;
       if (typeof projectId !== "string" || projectId.length === 0) {
         continue;
       }
@@ -371,6 +376,7 @@ function normalizePersistedComposerDraftState(value: unknown): PersistedComposer
         branch: typeof branch === "string" ? branch : null,
         worktreePath: normalizedWorktreePath,
         envMode: normalizeDraftThreadEnvMode(candidateDraftThread.envMode, normalizedWorktreePath),
+        ...(isTemporary ? { isTemporary: true } : {}),
       };
     }
   }
@@ -632,6 +638,12 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             options?.worktreePath === undefined
               ? (existingThread?.worktreePath ?? null)
               : (options.worktreePath ?? null);
+          const nextIsTemporary =
+            options?.isTemporary === true
+              ? true
+              : options?.isTemporary === false
+                ? false
+                : existingThread?.isTemporary === true;
           const nextDraftThread: DraftThreadState = {
             projectId,
             createdAt: options?.createdAt ?? existingThread?.createdAt ?? new Date().toISOString(),
@@ -648,6 +660,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             envMode:
               options?.envMode ??
               (nextWorktreePath ? "worktree" : (existingThread?.envMode ?? "local")),
+            ...(nextIsTemporary ? { isTemporary: true } : {}),
           };
           const hasSameProjectMapping = previousThreadIdForProject === threadId;
           const hasSameDraftThread =
@@ -658,7 +671,8 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             existingThread.interactionMode === nextDraftThread.interactionMode &&
             existingThread.branch === nextDraftThread.branch &&
             existingThread.worktreePath === nextDraftThread.worktreePath &&
-            existingThread.envMode === nextDraftThread.envMode;
+            existingThread.envMode === nextDraftThread.envMode &&
+            (existingThread.isTemporary === true) === (nextDraftThread.isTemporary === true);
           if (hasSameProjectMapping && hasSameDraftThread) {
             return state;
           }
@@ -704,6 +718,12 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
           }
           const nextWorktreePath =
             options.worktreePath === undefined ? existing.worktreePath : (options.worktreePath ?? null);
+          const nextIsTemporary =
+            options.isTemporary === true
+              ? true
+              : options.isTemporary === false
+                ? false
+                : existing.isTemporary === true;
           const nextDraftThread: DraftThreadState = {
             projectId: nextProjectId,
             createdAt:
@@ -717,6 +737,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             envMode:
               options.envMode ??
               (nextWorktreePath ? "worktree" : (existing.envMode ?? "local")),
+            ...(nextIsTemporary ? { isTemporary: true } : {}),
           };
           const isUnchanged =
             nextDraftThread.projectId === existing.projectId &&
@@ -725,7 +746,8 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             nextDraftThread.interactionMode === existing.interactionMode &&
             nextDraftThread.branch === existing.branch &&
             nextDraftThread.worktreePath === existing.worktreePath &&
-            nextDraftThread.envMode === existing.envMode;
+            nextDraftThread.envMode === existing.envMode &&
+            (nextDraftThread.isTemporary === true) === (existing.isTemporary === true);
           if (isUnchanged) {
             return state;
           }

@@ -10,6 +10,7 @@ import {
   type ProjectEntry,
   type ProjectScript,
   type ModelSlug,
+  PROVIDER_DISPLAY_NAMES,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
   type ResolvedKeybindingsConfig,
@@ -40,6 +41,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { FiGitBranch } from "react-icons/fi";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import { useNavigate, useSearch } from "@tanstack/react-router";
@@ -110,7 +112,9 @@ import {
 } from "../types";
 import { basenameOfPath, getVscodeIconUrlForEntry } from "../vscode-icons";
 import { useTheme } from "../hooks/useTheme";
+import { useThreadHandoff } from "../hooks/useThreadHandoff";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
+import { useIsDisposableThread } from "../hooks/useIsDisposableThread";
 import BranchToolbar from "./BranchToolbar";
 import GitActionsControl from "./GitActionsControl";
 import { ThreadWorktreeHandoffDialog } from "./ThreadWorktreeHandoffDialog";
@@ -173,6 +177,12 @@ import { Badge } from "./ui/badge";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { Command, CommandItem, CommandList } from "./ui/command";
 import { toastManager } from "./ui/toast";
+import {
+  canCreateThreadHandoff,
+  inferProviderFromModel,
+  resolveHandoffTargetProviders,
+  resolveThreadHandoffBadgeLabel,
+} from "../lib/threadHandoff";
 import { decodeProjectScriptKeybindingRule } from "~/lib/projectScriptKeybindings";
 import ProjectScriptsControl, { type NewProjectScriptInput } from "./ProjectScriptsControl";
 import {
@@ -615,6 +625,7 @@ export default function ChatView({
   const setStoreThreadBranch = useStore((store) => store.setThreadBranch);
   const { settings } = useAppSettings();
   const navigate = useNavigate();
+  const { createThreadHandoff } = useThreadHandoff();
   const rawSearch = useSearch({
     strict: false,
     select: (params) => parseDiffRouteSearch(params),
@@ -931,6 +942,36 @@ export default function ChatView({
   const pendingUserInputs = useMemo(
     () => derivePendingUserInputs(threadActivities),
     [threadActivities],
+  );
+  const handoffBadgeLabel = useMemo(
+    () => (activeThread ? resolveThreadHandoffBadgeLabel(activeThread) : null),
+    [activeThread],
+  );
+  const handoffBadgeSourceProvider = activeThread?.handoff?.sourceProvider ?? null;
+  const handoffBadgeTargetProvider = activeThread ? inferProviderFromModel(activeThread.model) : null;
+  const handoffTargetProvider = useMemo(
+    () =>
+      activeThread
+        ? (resolveHandoffTargetProviders(inferProviderFromModel(activeThread.model))[0] ?? null)
+        : null,
+    [activeThread],
+  );
+  const handoffActionLabel = useMemo(() => {
+    if (!activeThread) {
+      return "Create handoff thread";
+    }
+    return `Handoff to ${PROVIDER_DISPLAY_NAMES[handoffTargetProvider ?? "codex"]}`;
+  }, [activeThread, handoffTargetProvider]);
+  const handoffDisabled = !(
+    activeThread &&
+    activeProject &&
+    isServerThread &&
+    canCreateThreadHandoff({
+      thread: activeThread,
+      isBusy: isWorking,
+      hasPendingApprovals: pendingApprovals.length > 0,
+      hasPendingUserInput: pendingUserInputs.length > 0,
+    })
   );
   const activePendingUserInput = pendingUserInputs[0] ?? null;
   const activePendingDraftAnswers = useMemo(
@@ -3523,6 +3564,27 @@ export default function ChatView({
     },
     [isLocalDraftThread, scheduleComposerFocus, setDraftThreadContext, threadId],
   );
+  const onCreateProviderHandoffThread = useCallback(async () => {
+    if (!activeThread || handoffDisabled) {
+      return;
+    }
+
+    try {
+      await createThreadHandoff(
+        activeThread,
+        handoffTargetProvider ? { targetProvider: handoffTargetProvider } : undefined,
+      );
+    } catch (error) {
+      toastManager.add({
+        type: "error",
+        title: "Could not create handoff thread",
+        description:
+          error instanceof Error
+            ? error.message
+            : "An error occurred while creating the handoff thread.",
+      });
+    }
+  }, [activeThread, createThreadHandoff, handoffDisabled, handoffTargetProvider]);
   const onHandoffToWorktree = useCallback(() => {
     if (!activeThread || !isServerThread || handoffBusy) {
       return;
@@ -4011,6 +4073,12 @@ export default function ChatView({
           keybindings={keybindings}
           availableEditors={availableEditors}
           diffToggleShortcutLabel={diffPanelShortcutLabel}
+          handoffBadgeLabel={handoffBadgeLabel}
+          handoffActionLabel={handoffActionLabel}
+          handoffDisabled={handoffDisabled}
+          handoffActionTargetProvider={handoffTargetProvider}
+          handoffBadgeSourceProvider={handoffBadgeSourceProvider}
+          handoffBadgeTargetProvider={handoffBadgeTargetProvider}
           browserPaneOpen={resolvedBrowserPaneOpen}
           gitCwd={gitCwd}
           diffOpen={resolvedDiffOpen}
@@ -4038,6 +4106,7 @@ export default function ChatView({
           }
           onToggleDiff={onToggleDiff}
           onToggleBrowser={onToggleBrowser}
+          onCreateHandoff={onCreateProviderHandoffThread}
         />
       </header>
 
@@ -4728,6 +4797,12 @@ interface ChatHeaderProps {
   keybindings: ResolvedKeybindingsConfig;
   availableEditors: ReadonlyArray<EditorId>;
   diffToggleShortcutLabel: string | null;
+  handoffBadgeLabel: string | null;
+  handoffActionLabel: string;
+  handoffDisabled: boolean;
+  handoffActionTargetProvider: ProviderKind | null;
+  handoffBadgeSourceProvider: ProviderKind | null;
+  handoffBadgeTargetProvider: ProviderKind | null;
   browserPaneOpen: boolean;
   gitCwd: string | null;
   diffOpen: boolean;
@@ -4741,6 +4816,7 @@ interface ChatHeaderProps {
   onOpenTask: (() => void) | null;
   onToggleDiff: () => void;
   onToggleBrowser: () => void;
+  onCreateHandoff: () => void;
 }
 
 const ChatHeader = memo(function ChatHeader({
@@ -4755,6 +4831,12 @@ const ChatHeader = memo(function ChatHeader({
   keybindings,
   availableEditors,
   diffToggleShortcutLabel,
+  handoffBadgeLabel,
+  handoffActionLabel,
+  handoffDisabled,
+  handoffActionTargetProvider,
+  handoffBadgeSourceProvider,
+  handoffBadgeTargetProvider,
   browserPaneOpen,
   gitCwd,
   diffOpen,
@@ -4768,6 +4850,7 @@ const ChatHeader = memo(function ChatHeader({
   onOpenTask,
   onToggleDiff,
   onToggleBrowser,
+  onCreateHandoff,
 }: ChatHeaderProps) {
   const { isMobile, state } = useSidebar();
   const needsDesktopTrafficLightInset = isElectron && !isMobile && state === "collapsed";
@@ -4776,6 +4859,7 @@ const ChatHeader = memo(function ChatHeader({
   const { data: gitStatus = null } = useQuery(gitStatusQueryOptions(gitCwd));
   const diffTotals = gitStatus?.workingTree ?? null;
   const showDiffTotals = (diffTotals?.insertions ?? 0) > 0 || (diffTotals?.deletions ?? 0) > 0;
+  const isDisposableThread = useIsDisposableThread(activeThreadId);
   const chatLayoutAction =
     surfaceMode === "single" && onSplitSurface
       ? { kind: "split" as const, label: "Split chat", onClick: onSplitSurface }
@@ -4783,6 +4867,15 @@ const ChatHeader = memo(function ChatHeader({
         ? { kind: "maximize" as const, label: "Expand this chat", onClick: onMaximizeSurface }
         : null;
   const hasCollapsibleControls = Boolean(activeProjectScripts || activeProjectName || onOpenTask);
+  const renderProviderIcon = (provider: ProviderKind | null, className: string) => {
+    if (provider === "claudeAgent") {
+      return <ClaudeAI className={cn("text-[#d97757]", className)} />;
+    }
+    if (provider === "opencode") {
+      return <OpenCodeIcon className={cn("text-muted-foreground/75", className)} />;
+    }
+    return <OpenAI className={cn("text-muted-foreground/75", className)} />;
+  };
   const preferredEditor = useMemo<EditorId | null>(() => {
     const stored =
       typeof window !== "undefined"
@@ -4821,13 +4914,36 @@ const ChatHeader = memo(function ChatHeader({
         <div className="shrink-0 md:hidden">
           <SidebarTrigger className="size-7 shrink-0" />
         </div>
-        <h2
-          className="max-w-[clamp(16rem,50vw,40rem)] min-w-0 flex-1 truncate text-sm font-medium text-foreground"
-          data-testid="chat-header-title"
-          title={activeThreadTitle}
-        >
-          {activeThreadTitle}
-        </h2>
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <h2
+            className="max-w-[clamp(16rem,50vw,40rem)] min-w-0 flex-1 truncate text-sm font-medium text-foreground"
+            data-testid="chat-header-title"
+            title={activeThreadTitle}
+          >
+            {activeThreadTitle}
+          </h2>
+          {!isDisposableThread && handoffBadgeLabel ? (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <Badge
+                    variant="outline"
+                    className="hidden !h-6 shrink-0 items-center justify-center gap-1 rounded-md px-1.5 text-[10px] sm:inline-flex"
+                  >
+                    <span className="inline-flex size-4 shrink-0 items-center justify-center">
+                      {renderProviderIcon(handoffBadgeSourceProvider, "size-3")}
+                    </span>
+                    <span className="text-muted-foreground/45">→</span>
+                    <span className="inline-flex size-4 shrink-0 items-center justify-center">
+                      {renderProviderIcon(handoffBadgeTargetProvider, "size-3")}
+                    </span>
+                  </Badge>
+                }
+              />
+              <TooltipPopup side="bottom">{handoffBadgeLabel}</TooltipPopup>
+            </Tooltip>
+          ) : null}
+        </div>
         {activeTaskTitle ? (
           <Badge variant="outline" className="min-w-0 max-w-24 truncate gap-1 sm:max-w-36">
             <KanbanSquareIcon className="size-3" />
@@ -4839,6 +4955,35 @@ const ChatHeader = memo(function ChatHeader({
         className="flex shrink-0 items-center gap-1.5 @lg/header-actions:gap-2"
         data-testid="chat-header-actions"
       >
+        {!isDisposableThread ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Button
+                  type="button"
+                  size="xs"
+                  variant="outline"
+                  className={compact ? "shrink-0 gap-1" : "shrink-0 gap-1.5"}
+                  aria-label={handoffActionLabel}
+                  disabled={handoffDisabled}
+                  onClick={onCreateHandoff}
+                >
+                  <FiGitBranch className="size-3.5 shrink-0" />
+                  {compact ? null : <span className="truncate">Hand off to</span>}
+                  <span className="inline-flex size-3.5 shrink-0 items-center justify-center">
+                    {renderProviderIcon(handoffActionTargetProvider, "size-3.5")}
+                  </span>
+                  {!compact && (
+                    <span className="truncate">
+                      {PROVIDER_DISPLAY_NAMES[handoffActionTargetProvider ?? "codex"]}
+                    </span>
+                  )}
+                </Button>
+              }
+            />
+            <TooltipPopup side="bottom">{handoffActionLabel}</TooltipPopup>
+          </Tooltip>
+        ) : null}
         {!compact && activeProjectScripts && (
           <ProjectScriptsControl
             scripts={activeProjectScripts}
