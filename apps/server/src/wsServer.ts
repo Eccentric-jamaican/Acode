@@ -57,6 +57,7 @@ import { Keybindings } from "./keybindings";
 import { searchWorkspaceEntries } from "./workspaceEntries";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery";
+import { ProviderDiscoveryService } from "./provider/Services/ProviderDiscoveryService";
 import { ProviderService } from "./provider/Services/ProviderService";
 import { ProviderHealth } from "./provider/Services/ProviderHealth";
 import { CodexAccountService } from "./provider/Services/CodexAccountService";
@@ -259,6 +260,7 @@ export type ServerCoreRuntimeServices =
   | ProjectionSnapshotQuery
   | CheckpointDiffQuery
   | ProviderService
+  | ProviderDiscoveryService
   | ProviderHealth
   | ErrorInboxService
   | ServerRuntimeStartup;
@@ -308,6 +310,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const terminalManager = yield* TerminalManager;
   const keybindingsManager = yield* Keybindings;
   const providerHealth = yield* ProviderHealth;
+  const providerDiscovery = yield* ProviderDiscoveryService;
   const codexAccountService = yield* CodexAccountService;
   const git = yield* GitCore;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -928,6 +931,11 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         return yield* gitManager.runStackedAction(body);
       }
 
+      case WS_METHODS.gitClone: {
+        const body = stripRequestTag(request.body);
+        return yield* git.cloneRepo(body);
+      }
+
       case WS_METHODS.gitListBranches: {
         const body = stripRequestTag(request.body);
         return yield* git.listBranches(body);
@@ -1071,6 +1079,36 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         }
         yield* codexAccountService.logout();
         return {};
+      }
+
+      case WS_METHODS.providerGetComposerCapabilities: {
+        const body = stripRequestTag(request.body);
+        return yield* providerDiscovery.getComposerCapabilities(body);
+      }
+
+      case WS_METHODS.providerListCommands: {
+        const body = stripRequestTag(request.body);
+        return yield* providerDiscovery.listCommands(body);
+      }
+
+      case WS_METHODS.providerListSkills: {
+        const body = stripRequestTag(request.body);
+        return yield* providerDiscovery.listSkills(body);
+      }
+
+      case WS_METHODS.providerListPlugins: {
+        const body = stripRequestTag(request.body);
+        return yield* providerDiscovery.listPlugins(body);
+      }
+
+      case WS_METHODS.providerReadPlugin: {
+        const body = stripRequestTag(request.body);
+        return yield* providerDiscovery.readPlugin(body);
+      }
+
+      case WS_METHODS.providerListModels: {
+        const body = stripRequestTag(request.body);
+        return yield* providerDiscovery.listModels(body);
       }
 
       default: {

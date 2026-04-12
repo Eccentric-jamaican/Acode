@@ -1,13 +1,78 @@
+import { type ResolvedKeybindingsConfig } from "@t3tools/contracts";
+import { useQuery } from "@tanstack/react-query";
 import { Outlet, createFileRoute, useNavigate, useRouterState } from "@tanstack/react-router";
 import { type CSSProperties, useEffect } from "react";
 
 import DesktopShellTitlebarBand from "../components/DesktopShellTitlebarBand";
 import { DiffWorkerPoolProvider } from "../components/DiffWorkerPoolProvider";
 import ThreadSidebar from "../components/Sidebar";
+import { emitToggleSidebarSearchPalette } from "../lib/sidebarSearchPalette";
+import { isTerminalFocused } from "../lib/terminalFocus";
+import { serverConfigQueryOptions } from "../lib/serverReactQuery";
+import { resolveShortcutCommand } from "../keybindings";
+import { useSidebar } from "~/components/ui/sidebar";
 import { Sidebar, SidebarProvider } from "~/components/ui/sidebar";
 
-function ChatRouteLayout() {
+const EMPTY_KEYBINDINGS: ResolvedKeybindingsConfig = [];
+
+function ChatRouteGlobalShortcuts() {
   const navigate = useNavigate();
+  const { toggleSidebar } = useSidebar();
+  const serverConfigQuery = useQuery(serverConfigQueryOptions());
+  const keybindings = serverConfigQuery.data?.keybindings ?? EMPTY_KEYBINDINGS;
+
+  useEffect(() => {
+    const onWindowKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      const command = resolveShortcutCommand(event, keybindings, {
+        context: {
+          terminalFocus: isTerminalFocused(),
+          terminalOpen: false,
+        },
+      });
+      if (command === "sidebar.toggle") {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleSidebar();
+        return;
+      }
+      if (command === "sidebar.search") {
+        event.preventDefault();
+        event.stopPropagation();
+        emitToggleSidebarSearchPalette();
+      }
+    };
+
+    window.addEventListener("keydown", onWindowKeyDown, { capture: true });
+    return () => {
+      window.removeEventListener("keydown", onWindowKeyDown, { capture: true });
+    };
+  }, [keybindings, toggleSidebar]);
+
+  useEffect(() => {
+    const onMenuAction = window.desktopBridge?.onMenuAction;
+    if (typeof onMenuAction !== "function") {
+      return;
+    }
+
+    const unsubscribe = onMenuAction((action) => {
+      if (action === "toggle-sidebar") {
+        toggleSidebar();
+        return;
+      }
+      if (action !== "open-settings") return;
+      void navigate({ to: "/settings" });
+    });
+
+    return () => {
+      unsubscribe?.();
+    };
+  }, [navigate, toggleSidebar]);
+
+  return null;
+}
+
+function ChatRouteLayout() {
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
@@ -20,22 +85,6 @@ function ChatRouteLayout() {
     typeof window !== "undefined" &&
     (window.desktopBridge !== undefined || window.nativeApi !== undefined);
 
-  useEffect(() => {
-    const onMenuAction = window.desktopBridge?.onMenuAction;
-    if (typeof onMenuAction !== "function") {
-      return;
-    }
-
-    const unsubscribe = onMenuAction((action) => {
-      if (action !== "open-settings") return;
-      void navigate({ to: "/settings" });
-    });
-
-    return () => {
-      unsubscribe?.();
-    };
-  }, [navigate]);
-
   return (
     <SidebarProvider
       defaultOpen
@@ -47,6 +96,7 @@ function ChatRouteLayout() {
         } as CSSProperties
       }
     >
+      <ChatRouteGlobalShortcuts />
       <Sidebar
         side="left"
         collapsible="offcanvas"

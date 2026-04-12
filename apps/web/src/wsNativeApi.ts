@@ -262,6 +262,7 @@ export function createWsNativeApi(): NativeApi {
       },
     },
     git: {
+      clone: (input) => transport.request(WS_METHODS.gitClone, input),
       pull: (input) => transport.request(WS_METHODS.gitPull, input),
       status: (input) => transport.request(WS_METHODS.gitStatus, input),
       runStackedAction: (input) => transport.request(WS_METHODS.gitRunStackedAction, input),
@@ -298,6 +299,15 @@ export function createWsNativeApi(): NativeApi {
         transport.request(WS_METHODS.serverCancelProviderLogin, input),
       logoutProvider: (input) => transport.request(WS_METHODS.serverLogoutProvider, input),
       onErrorInboxUpdated: (callback) => onServerErrorInboxUpdated(callback),
+    },
+    provider: {
+      getComposerCapabilities: (input) =>
+        transport.request(WS_METHODS.providerGetComposerCapabilities, input),
+      listCommands: (input) => transport.request(WS_METHODS.providerListCommands, input),
+      listSkills: (input) => transport.request(WS_METHODS.providerListSkills, input),
+      listPlugins: (input) => transport.request(WS_METHODS.providerListPlugins, input),
+      readPlugin: (input) => transport.request(WS_METHODS.providerReadPlugin, input),
+      listModels: (input) => transport.request(WS_METHODS.providerListModels, input),
     },
     orchestration: {
       getSnapshot: () => transport.request(ORCHESTRATION_WS_METHODS.getSnapshot),

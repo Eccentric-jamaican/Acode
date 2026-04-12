@@ -9,6 +9,8 @@
 import { ServiceMap } from "effect";
 import type { Effect, Scope } from "effect";
 import type {
+  GitCloneInput,
+  GitCloneResult,
   GitCheckoutInput,
   GitCreateBranchInput,
   GitCreateWorktreeInput,
@@ -109,6 +111,11 @@ export interface GitCoreShape {
     cwd: string,
     key: string,
   ) => Effect.Effect<string | null, GitCommandError>;
+
+  /**
+   * Clone a repository into a new directory under a parent directory.
+   */
+  readonly cloneRepo: (input: GitCloneInput) => Effect.Effect<GitCloneResult, GitCommandError>;
 
   /**
    * List local + remote branches and branch metadata.

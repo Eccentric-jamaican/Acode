@@ -1,4 +1,6 @@
 import type {
+  GitCloneInput,
+  GitCloneResult,
   GitCheckoutInput,
   GitCreateBranchInput,
   GitCreateWorktreeInput,
@@ -69,6 +71,20 @@ import type {
   OrchestrationReadModel,
 } from "./orchestration";
 import { EditorId } from "./editor";
+import type {
+  ProviderComposerCapabilities,
+  ProviderGetComposerCapabilitiesInput,
+  ProviderListCommandsInput,
+  ProviderListCommandsResult,
+  ProviderListModelsInput,
+  ProviderListModelsResult,
+  ProviderListPluginsInput,
+  ProviderListPluginsResult,
+  ProviderListSkillsInput,
+  ProviderListSkillsResult,
+  ProviderReadPluginInput,
+  ProviderReadPluginResult,
+} from "./providerDiscovery";
 
 export interface ContextMenuItem<T extends string = string> {
   id: T;
@@ -179,6 +195,7 @@ export interface NativeApi {
     openExternal: (url: string) => Promise<void>;
   };
   git: {
+    clone: (input: GitCloneInput) => Promise<GitCloneResult>;
     // Existing branch/worktree API
     listBranches: (input: GitListBranchesInput) => Promise<GitListBranchesResult>;
     createWorktree: (input: GitCreateWorktreeInput) => Promise<GitCreateWorktreeResult>;
@@ -218,6 +235,16 @@ export interface NativeApi {
     ) => Promise<ServerCancelProviderLoginResult>;
     logoutProvider: (input: ServerLogoutProviderInput) => Promise<ServerLogoutProviderResult>;
     onErrorInboxUpdated: (callback: (payload: ServerErrorInboxUpdatedPayload) => void) => () => void;
+  };
+  provider: {
+    getComposerCapabilities: (
+      input: ProviderGetComposerCapabilitiesInput,
+    ) => Promise<ProviderComposerCapabilities>;
+    listCommands: (input: ProviderListCommandsInput) => Promise<ProviderListCommandsResult>;
+    listSkills: (input: ProviderListSkillsInput) => Promise<ProviderListSkillsResult>;
+    listPlugins: (input: ProviderListPluginsInput) => Promise<ProviderListPluginsResult>;
+    readPlugin: (input: ProviderReadPluginInput) => Promise<ProviderReadPluginResult>;
+    listModels: (input: ProviderListModelsInput) => Promise<ProviderListModelsResult>;
   };
   orchestration: {
     getSnapshot: () => Promise<OrchestrationReadModel>;

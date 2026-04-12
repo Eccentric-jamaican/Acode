@@ -17,6 +17,7 @@ import {
   LucideIcon,
   PinIcon,
   RocketIcon,
+  SearchIcon,
   SettingsIcon,
   SquarePenIcon,
   TerminalIcon,
@@ -42,7 +43,7 @@ import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/rea
 import { useNavigate, useParams, useRouterState } from "@tanstack/react-router";
 import { useAppSettings } from "../appSettings";
 import { isElectron } from "../env";
-import { cn, newCommandId, newProjectId, newThreadId } from "../lib/utils";
+import { cn, isMacPlatform, newCommandId, newProjectId, newThreadId } from "../lib/utils";
 import { useStore } from "../store";
 import { isChatNewLocalShortcut, isChatNewShortcut, shortcutLabelForCommand } from "../keybindings";
 import { type Project, type Thread } from "../types";
@@ -109,12 +110,19 @@ import type { ProviderKind } from "@t3tools/contracts";
 import { useThreadHandoff } from "../hooks/useThreadHandoff";
 import { ProjectSidebarIcon } from "./ProjectSidebarIcon";
 import { ThreadPinToggleButton } from "./ThreadPinToggleButton";
+import { SidebarSearchPalette } from "./SidebarSearchPalette";
+import {
+  type SidebarSearchAction,
+  type SidebarSearchProject,
+  type SidebarSearchThread,
+} from "./SidebarSearchPalette.logic";
 import {
   canCreateThreadHandoff,
   inferProviderFromModel,
   resolveHandoffTargetProviders,
   resolveThreadHandoffBadgeLabel,
 } from "../lib/threadHandoff";
+import { onToggleSidebarSearchPalette } from "../lib/sidebarSearchPalette";
 
 function getProviderFromModel(model: string): ProviderKind {
   return inferProviderFromModel(model);
@@ -817,6 +825,7 @@ export default function Sidebar() {
   const queryClient = useQueryClient();
   const removeWorktreeMutation = useMutation(gitRemoveWorktreeMutationOptions({ queryClient }));
   const [settingsPopoverOpen, setSettingsPopoverOpen] = useState(false);
+  const [searchPaletteOpen, setSearchPaletteOpen] = useState(false);
   const [addingProject, setAddingProject] = useState(false);
   const [newCwd, setNewCwd] = useState("");
   const [isPickingFolder, setIsPickingFolder] = useState(false);
@@ -1060,6 +1069,12 @@ export default function Sidebar() {
     });
   }, [projects]);
 
+  useEffect(() => {
+    return onToggleSidebarSearchPalette(() => {
+      setSearchPaletteOpen((existing) => !existing);
+    });
+  }, []);
+
   const openPrLink = useCallback((event: React.MouseEvent<HTMLElement>, prUrl: string) => {
     event.preventDefault();
     event.stopPropagation();
@@ -1226,7 +1241,7 @@ export default function Sidebar() {
   const addProjectFromPath = useCallback(
     async (rawCwd: string) => {
       const cwd = rawCwd.trim();
-      if (!cwd || isAddingProject) return;
+      if (!cwd || isAddingProject) return false;
       const api = readNativeApi();
       if (!api) {
         toastManager.add({
@@ -1234,7 +1249,7 @@ export default function Sidebar() {
           title: "Unable to add project",
           description: "Native API is unavailable.",
         });
-        return;
+        return false;
       }
 
       setIsAddingProject(true);
@@ -1250,7 +1265,7 @@ export default function Sidebar() {
       if (existing) {
         focusMostRecentThreadForProject(existing.id);
         finishAddingProject();
-        return;
+        return true;
       }
 
       const projectId = newProjectId();
@@ -1276,6 +1291,7 @@ export default function Sidebar() {
           });
         }
         finishAddingProject();
+        return true;
       } catch (error) {
         toastManager.add({
           type: "error",
@@ -1286,6 +1302,7 @@ export default function Sidebar() {
           ),
         });
         finishAddingProject({ closeComposer: false });
+        return false;
       }
     },
     [focusMostRecentThreadForProject, handleNewThread, isAddingProject, projects],
@@ -1922,6 +1939,73 @@ export default function Sidebar() {
       shortcutLabelForCommand(keybindings, "chat.new"),
     [keybindings],
   );
+  const searchShortcutLabel = useMemo(
+    () =>
+      shortcutLabelForCommand(keybindings, "sidebar.search") ??
+      (isMacPlatform(navigator.platform) ? "⌘K" : "Ctrl+K"),
+    [keybindings],
+  );
+  const searchPaletteProjects = useMemo<SidebarSearchProject[]>(
+    () =>
+      projects.map((project) => ({
+        id: project.id,
+        name: project.name,
+        cwd: project.cwd,
+      })),
+    [projects],
+  );
+  const searchPaletteThreads = useMemo<SidebarSearchThread[]>(
+    () =>
+      threads.map((thread) => ({
+        id: thread.id,
+        title: thread.title,
+        projectId: thread.projectId,
+        projectName: projectById.get(thread.projectId)?.name ?? "Unknown project",
+        provider: getProviderFromModel(thread.model),
+        createdAt: thread.createdAt,
+        updatedAt: thread.updatedAt,
+        messages: thread.messages.map((message) => ({
+          text: message.text,
+        })),
+      })),
+    [projectById, threads],
+  );
+  const searchPaletteActions = useMemo<SidebarSearchAction[]>(
+    () => [
+      {
+        id: "new-thread",
+        label: "New thread",
+        description: "Start a fresh chat in the current project.",
+        keywords: ["chat", "new"],
+        shortcutLabel: newThreadShortcutLabel,
+      },
+      {
+        id: "add-project",
+        label: "Open folder",
+        description: "Open a repository or folder in the sidebar.",
+        keywords: ["folder", "repo", "repository", "open"],
+      },
+      {
+        id: "clone-repository",
+        label: "Clone git Repository",
+        description: "Clone a Git repository into a new local folder.",
+        keywords: ["clone", "git", "repo", "repository", "remote"],
+      },
+      {
+        id: "settings",
+        label: "Settings",
+        description: "Open app settings.",
+        keywords: ["preferences", "config"],
+      },
+    ],
+    [newThreadShortcutLabel],
+  );
+  const handleOpenProjectFromSearch = useCallback(
+    (projectId: string) => {
+      focusMostRecentThreadForProject(ProjectId.makeUnsafe(projectId));
+    },
+    [focusMostRecentThreadForProject],
+  );
 
   const handleDesktopUpdateButtonClick = useCallback(() => {
     const bridge = window.desktopBridge;
@@ -2514,6 +2598,27 @@ export default function Sidebar() {
           <SidebarSectionHeading
             actions={
               <>
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <button
+                        type="button"
+                        className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground/70 transition-colors duration-150 hover:bg-accent hover:text-foreground"
+                        aria-label="Search chats"
+                        data-testid="sidebar-search-chats"
+                        onClick={() => {
+                          setSearchPaletteOpen(true);
+                        }}
+                      >
+                        <SearchIcon className="size-4" />
+                      </button>
+                    }
+                  />
+                  <TooltipPopup side="bottom">
+                    {searchShortcutLabel ? `Search chats (${searchShortcutLabel})` : "Search chats"}
+                  </TooltipPopup>
+                </Tooltip>
+
                 <Popover onOpenChange={setAddingProject} open={addingProject}>
                   <PopoverTrigger
                     className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground/70 transition-colors duration-150 hover:bg-accent hover:text-foreground"
@@ -2770,6 +2875,46 @@ export default function Sidebar() {
           onLogout={handleLogoutProvider}
         />
       </SidebarFooter>
+
+      <SidebarSearchPalette
+        open={searchPaletteOpen}
+        onOpenChange={setSearchPaletteOpen}
+        actions={searchPaletteActions}
+        projects={searchPaletteProjects}
+        threads={searchPaletteThreads}
+        onCreateThread={handlePrimaryNewThread}
+        onAddProject={() => {
+          setAddingProject(true);
+        }}
+        onCloneRepository={async ({ repositoryUrl, directoryName }) => {
+          const api = readNativeApi();
+          if (!api) {
+            throw new Error("Native API is unavailable.");
+          }
+
+          const parentDirectory = await api.dialogs.pickFolder();
+          if (!parentDirectory) {
+            return null;
+          }
+
+          return api.git.clone({
+            repositoryUrl,
+            parentDirectory,
+            directoryName,
+          });
+        }}
+        onAddProjectFromPath={addProjectFromPath}
+        onOpenSettings={() => {
+          void navigate({ to: "/settings" });
+        }}
+        onOpenProject={handleOpenProjectFromSearch}
+        onOpenThread={(threadId) => {
+          void navigate({
+            to: "/$threadId",
+            params: { threadId: ThreadId.makeUnsafe(threadId) },
+          });
+        }}
+      />
     </>
   );
 }

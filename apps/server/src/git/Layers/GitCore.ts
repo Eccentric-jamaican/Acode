@@ -826,6 +826,67 @@ const makeGitCore = Effect.gen(function* () {
       Effect.map((trimmed) => (trimmed.length > 0 ? trimmed : null)),
     );
 
+  const cloneRepo: GitCoreShape["cloneRepo"] = (input) =>
+    Effect.gen(function* () {
+      const sanitizedDirectoryName = input.directoryName.trim();
+      if (
+        sanitizedDirectoryName.length === 0 ||
+        sanitizedDirectoryName === "." ||
+        sanitizedDirectoryName === ".." ||
+        sanitizedDirectoryName.includes("/") ||
+        sanitizedDirectoryName.includes("\\")
+      ) {
+        return yield* createGitCommandError(
+          "GitCore.cloneRepo",
+          input.parentDirectory,
+          ["clone", input.repositoryUrl, input.directoryName],
+          "Repository folder name must be a single directory name.",
+        );
+      }
+
+      const destinationPath = path.join(input.parentDirectory, sanitizedDirectoryName);
+      const existingDestination = yield* fileSystem.stat(destinationPath).pipe(
+        Effect.map(() => true),
+        Effect.catch(() => Effect.succeed(false)),
+      );
+      if (existingDestination) {
+        return yield* createGitCommandError(
+          "GitCore.cloneRepo",
+          input.parentDirectory,
+          ["clone", input.repositoryUrl, sanitizedDirectoryName],
+          `Destination already exists: ${destinationPath}`,
+        );
+      }
+
+      yield* fileSystem.makeDirectory(input.parentDirectory, { recursive: true }).pipe(
+        Effect.mapError((cause) =>
+          createGitCommandError(
+            "GitCore.cloneRepo",
+            input.parentDirectory,
+            ["clone", input.repositoryUrl, sanitizedDirectoryName],
+            `Failed to prepare destination directory: ${String(cause)}`,
+            cause,
+          ),
+        ),
+      );
+
+      yield* executeGit(
+        "GitCore.cloneRepo",
+        input.parentDirectory,
+        ["clone", input.repositoryUrl, sanitizedDirectoryName],
+        {
+          timeoutMs: 10 * 60_000,
+          fallbackErrorMessage: "git clone failed",
+        },
+      );
+
+      return {
+        cwd: destinationPath,
+        repositoryUrl: input.repositoryUrl,
+        directoryName: sanitizedDirectoryName,
+      };
+    });
+
   const listBranches: GitCoreShape["listBranches"] = (input) =>
     Effect.gen(function* () {
       const branchRecencyPromise = readBranchRecency(input.cwd).pipe(
@@ -1192,6 +1253,7 @@ const makeGitCore = Effect.gen(function* () {
     pullCurrentBranch,
     readRangeContext,
     readConfigValue,
+    cloneRepo,
     listBranches,
     createWorktree,
     removeWorktree,

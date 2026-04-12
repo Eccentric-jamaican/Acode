@@ -17,6 +17,7 @@ import {
   OrchestrationReplayEventsInput,
 } from "./orchestration";
 import {
+  GitCloneInput,
   GitCheckoutInput,
   GitCreateBranchInput,
   GitCreateWorktreeInput,
@@ -38,6 +39,14 @@ import {
 import { KeybindingRule } from "./keybindings";
 import { ProjectSearchEntriesInput, ProjectWriteFileInput } from "./project";
 import { OpenInEditorInput } from "./editor";
+import {
+  ProviderListCommandsInput,
+  ProviderGetComposerCapabilitiesInput,
+  ProviderListPluginsInput,
+  ProviderListModelsInput,
+  ProviderReadPluginInput,
+  ProviderListSkillsInput,
+} from "./providerDiscovery";
 import {
   ServerCancelProviderLoginInput,
   ServerLogoutProviderInput,
@@ -61,6 +70,7 @@ export const WS_METHODS = {
   gitPull: "git.pull",
   gitStatus: "git.status",
   gitRunStackedAction: "git.runStackedAction",
+  gitClone: "git.clone",
   gitListBranches: "git.listBranches",
   gitCreateWorktree: "git.createWorktree",
   gitRemoveWorktree: "git.removeWorktree",
@@ -86,6 +96,14 @@ export const WS_METHODS = {
   serverStartProviderLogin: "server.startProviderLogin",
   serverCancelProviderLogin: "server.cancelProviderLogin",
   serverLogoutProvider: "server.logoutProvider",
+
+  // Provider discovery
+  providerGetComposerCapabilities: "provider.getComposerCapabilities",
+  providerListCommands: "provider.listCommands",
+  providerListSkills: "provider.listSkills",
+  providerListPlugins: "provider.listPlugins",
+  providerReadPlugin: "provider.readPlugin",
+  providerListModels: "provider.listModels",
 } as const;
 
 // ── Push Event Channels ──────────────────────────────────────────────
@@ -133,6 +151,7 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.gitPull, GitPullInput),
   tagRequestBody(WS_METHODS.gitStatus, GitStatusInput),
   tagRequestBody(WS_METHODS.gitRunStackedAction, GitRunStackedActionInput),
+  tagRequestBody(WS_METHODS.gitClone, GitCloneInput),
   tagRequestBody(WS_METHODS.gitListBranches, GitListBranchesInput),
   tagRequestBody(WS_METHODS.gitCreateWorktree, GitCreateWorktreeInput),
   tagRequestBody(WS_METHODS.gitRemoveWorktree, GitRemoveWorktreeInput),
@@ -164,6 +183,14 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.serverStartProviderLogin, ServerStartProviderLoginInput),
   tagRequestBody(WS_METHODS.serverCancelProviderLogin, ServerCancelProviderLoginInput),
   tagRequestBody(WS_METHODS.serverLogoutProvider, ServerLogoutProviderInput),
+
+  // Provider discovery
+  tagRequestBody(WS_METHODS.providerGetComposerCapabilities, ProviderGetComposerCapabilitiesInput),
+  tagRequestBody(WS_METHODS.providerListCommands, ProviderListCommandsInput),
+  tagRequestBody(WS_METHODS.providerListSkills, ProviderListSkillsInput),
+  tagRequestBody(WS_METHODS.providerListPlugins, ProviderListPluginsInput),
+  tagRequestBody(WS_METHODS.providerReadPlugin, ProviderReadPluginInput),
+  tagRequestBody(WS_METHODS.providerListModels, ProviderListModelsInput),
 ]);
 
 export const WebSocketRequest = Schema.Struct({

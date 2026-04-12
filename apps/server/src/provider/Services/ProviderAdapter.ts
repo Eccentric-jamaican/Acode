@@ -9,8 +9,18 @@
  */
 import type {
   ApprovalRequestId,
+  ProviderComposerCapabilities,
   ProviderApprovalDecision,
   ProviderKind,
+  ProviderListCommandsInput,
+  ProviderListCommandsResult,
+  ProviderListModelsResult,
+  ProviderListPluginsInput,
+  ProviderListPluginsResult,
+  ProviderReadPluginInput,
+  ProviderReadPluginResult,
+  ProviderListSkillsResult,
+  ProviderListSkillsInput,
   ProviderUserInputAnswers,
   ProviderRuntimeEvent,
   ProviderSendTurnInput,
@@ -30,6 +40,12 @@ export interface ProviderAdapterCapabilities {
    * Declares whether changing the model on an existing session is supported.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
+  readonly supportsSkillMentions?: boolean;
+  readonly supportsSkillDiscovery?: boolean;
+  readonly supportsNativeSlashCommandDiscovery?: boolean;
+  readonly supportsPluginMentions?: boolean;
+  readonly supportsPluginDiscovery?: boolean;
+  readonly supportsRuntimeModelList?: boolean;
 }
 
 export interface ProviderThreadTurnSnapshot {
@@ -128,4 +144,42 @@ export interface ProviderAdapterShape<TError> {
    * Canonical runtime event stream emitted by this adapter.
    */
   readonly streamEvents: Stream.Stream<ProviderRuntimeEvent>;
+
+  /**
+   * Read provider-specific composer capabilities.
+   */
+  readonly getComposerCapabilities?: () => Effect.Effect<ProviderComposerCapabilities, TError>;
+
+  /**
+   * List skills available for a given cwd.
+   */
+  readonly listSkills?: (
+    input: ProviderListSkillsInput,
+  ) => Effect.Effect<ProviderListSkillsResult, TError>;
+
+  /**
+   * List provider-native slash commands available for a given cwd.
+   */
+  readonly listCommands?: (
+    input: ProviderListCommandsInput,
+  ) => Effect.Effect<ProviderListCommandsResult, TError>;
+
+  /**
+   * List plugins available for the current provider/runtime.
+   */
+  readonly listPlugins?: (
+    input: ProviderListPluginsInput,
+  ) => Effect.Effect<ProviderListPluginsResult, TError>;
+
+  /**
+   * Read one plugin in detail from a marketplace entry.
+   */
+  readonly readPlugin?: (
+    input: ProviderReadPluginInput,
+  ) => Effect.Effect<ProviderReadPluginResult, TError>;
+
+  /**
+   * List models directly from the provider runtime when supported.
+   */
+  readonly listModels?: () => Effect.Effect<ProviderListModelsResult, TError>;
 }

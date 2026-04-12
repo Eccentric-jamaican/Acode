@@ -7,6 +7,11 @@ import path from "node:path";
 import {
   EventId,
   OPENCODE_DEFAULT_MODEL_SLUG,
+  type ProviderComposerCapabilities,
+  type ProviderListCommandsInput,
+  type ProviderListCommandsResult,
+  type ProviderListSkillsInput,
+  type ProviderListSkillsResult,
   RuntimeItemId,
   RuntimeRequestId,
   ThreadId,
@@ -34,6 +39,7 @@ import {
 import { OpencodeMessageRoleGate } from "./OpencodeMessageRoleGate.ts";
 import { OpencodeAdapter, type OpencodeAdapterShape } from "../Services/OpencodeAdapter.ts";
 import { buildOpencodePromptAsyncBody, opencodeAgentForInteractionMode } from "./OpencodeTurnMapping.ts";
+import { discoverSkillsForCwd } from "./SkillDiscovery.ts";
 
 const PROVIDER = "opencode" as const;
 const HOST = "127.0.0.1";
@@ -1576,6 +1582,37 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
 
     const hasSession: OpencodeAdapterShape["hasSession"] = (threadId) => Effect.sync(() => sessions.has(threadId));
 
+    const composerCapabilities: ProviderComposerCapabilities = {
+      provider: PROVIDER,
+      supportsSkillMentions: true,
+      supportsSkillDiscovery: true,
+      supportsNativeSlashCommandDiscovery: false,
+      supportsPluginMentions: false,
+      supportsPluginDiscovery: false,
+      supportsRuntimeModelList: false,
+    };
+
+    const getComposerCapabilities: NonNullable<OpencodeAdapterShape["getComposerCapabilities"]> = () =>
+      Effect.succeed(composerCapabilities);
+
+    const listSkills: NonNullable<OpencodeAdapterShape["listSkills"]> = (
+      input: ProviderListSkillsInput,
+    ) =>
+      Effect.succeed({
+        skills: discoverSkillsForCwd(input.cwd),
+        source: "local-scan",
+        cached: false,
+      } satisfies ProviderListSkillsResult);
+
+    const listCommands: NonNullable<OpencodeAdapterShape["listCommands"]> = (
+      _input: ProviderListCommandsInput,
+    ) =>
+      Effect.succeed({
+        commands: [],
+        source: "unsupported",
+        cached: false,
+      } satisfies ProviderListCommandsResult);
+
     const stopAll: OpencodeAdapterShape["stopAll"] = () =>
       Effect.gen(function* () {
         sessions.clear();
@@ -1607,7 +1644,15 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
 
     return {
       provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "in-session" },
+      capabilities: {
+        sessionModelSwitch: "in-session",
+        supportsSkillMentions: true,
+        supportsSkillDiscovery: true,
+        supportsNativeSlashCommandDiscovery: false,
+        supportsPluginMentions: false,
+        supportsPluginDiscovery: false,
+        supportsRuntimeModelList: false,
+      },
       startSession,
       sendTurn,
       interruptTurn,
@@ -1619,6 +1664,9 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
       readThread,
       rollbackThread,
       stopAll,
+      getComposerCapabilities,
+      listSkills,
+      listCommands,
       streamEvents: Stream.fromQueue(queue),
     } satisfies OpencodeAdapterShape;
   });

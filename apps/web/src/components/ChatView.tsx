@@ -18,6 +18,8 @@ import {
   type ProviderModelOptions,
   type ServerProviderStatus,
   type ProviderKind,
+  type ProviderNativeCommandDescriptor,
+  type ProviderSkillDescriptor,
   type ThreadId,
   type TurnId,
   OrchestrationThreadActivity,
@@ -52,6 +54,19 @@ import {
 } from "~/lib/gitReactQuery";
 import { projectSearchEntriesQueryOptions } from "~/lib/projectReactQuery";
 import { serverConfigQueryOptions, serverQueryKeys } from "~/lib/serverReactQuery";
+import {
+  buildCommandSearchBlob,
+  buildSkillSearchBlob,
+  normalizeProviderDiscoveryText,
+  resolveProviderDiscoveryCwd,
+} from "~/lib/providerDiscovery";
+import {
+  providerCommandsQueryOptions,
+  providerComposerCapabilitiesQueryOptions,
+  providerSkillsQueryOptions,
+  supportsNativeSlashCommandDiscovery,
+  supportsSkillDiscovery,
+} from "~/lib/providerDiscoveryReactQuery";
 
 import { isElectron, isElectronRuntime } from "../env";
 import {
@@ -69,6 +84,11 @@ import {
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
 } from "../composer-logic";
+import {
+  filterComposerSlashCommands,
+  getAvailableComposerSlashCommands,
+  getProviderNativeSlashCommandSearchTerms,
+} from "../composerSlashCommands";
 import {
   derivePendingApprovals,
   derivePendingUserInputs,
@@ -236,6 +256,8 @@ const EMPTY_KEYBINDINGS: ResolvedKeybindingsConfig = [];
 const EMPTY_PROJECT_ENTRIES: ProjectEntry[] = [];
 const EMPTY_AVAILABLE_EDITORS: EditorId[] = [];
 const EMPTY_PROVIDER_STATUSES: ServerProviderStatus[] = [];
+const EMPTY_PROVIDER_NATIVE_COMMANDS: ProviderNativeCommandDescriptor[] = [];
+const EMPTY_PROVIDER_SKILLS: ProviderSkillDescriptor[] = [];
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
 const COMPOSER_PATH_QUERY_DEBOUNCE_MS = 120;
 const SCRIPT_TERMINAL_COLS = 120;
@@ -248,6 +270,10 @@ const CODEX_REASONING_LABEL_BY_OPTION: Record<CodexReasoningEffort, string> = {
   high: "High",
   xhigh: "Extra High",
 };
+
+function skillMentionPrefix(provider: ProviderKind): string {
+  return provider === "claudeAgent" ? "/" : "$";
+}
 
 function readLastInvokedScriptByProjectFromStorage(): Record<string, string> {
   const stored = localStorage.getItem(LAST_INVOKED_SCRIPT_BY_PROJECT_KEY);
@@ -344,6 +370,21 @@ type ComposerCommandItem =
       id: string;
       type: "slash-command";
       command: ComposerSlashCommand;
+      label: string;
+      description: string;
+    }
+  | {
+      id: string;
+      type: "provider-native-command";
+      provider: ProviderKind;
+      command: ProviderNativeCommandDescriptor["name"];
+      label: string;
+      description: string;
+    }
+  | {
+      id: string;
+      type: "skill";
+      skill: ProviderSkillDescriptor;
       label: string;
       description: string;
     }
@@ -524,6 +565,10 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
       {props.item.type === "slash-command" ? (
         <BotIcon className="size-4 text-muted-foreground/80" />
       ) : null}
+      {props.item.type === "provider-native-command" ? (
+        <BotIcon className="size-4 text-muted-foreground/80" />
+      ) : null}
+      {props.item.type === "skill" ? <KanbanSquareIcon className="size-4 text-muted-foreground/80" /> : null}
       {props.item.type === "model" ? (
         <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
           model
@@ -573,9 +618,15 @@ const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
         {props.items.length === 0 && (
           <p className="px-3 py-2 text-muted-foreground/70 text-xs">
             {props.isLoading
-              ? "Searching workspace files..."
+              ? props.triggerKind === "path"
+                ? "Searching workspace files..."
+                : props.triggerKind === "skill"
+                  ? "Loading skills..."
+                  : "Loading commands..."
               : props.triggerKind === "path"
                 ? "No matching files or folders."
+                : props.triggerKind === "skill"
+                  ? "No matching skill."
                 : "No matching command."}
           </p>
         )}
@@ -1286,6 +1337,8 @@ export default function ChatView({
   const composerTriggerKind = composerTrigger?.kind ?? null;
   const pathTriggerQuery = composerTrigger?.kind === "path" ? composerTrigger.query : "";
   const isPathTrigger = composerTriggerKind === "path";
+  const skillTriggerQuery = composerTrigger?.kind === "skill" ? composerTrigger.query : "";
+  const isSkillTrigger = composerTriggerKind === "skill";
   const [debouncedPathQuery, composerPathQueryDebouncer] = useDebouncedValue(
     pathTriggerQuery,
     { wait: COMPOSER_PATH_QUERY_DEBOUNCE_MS },
@@ -1309,6 +1362,42 @@ export default function ChatView({
     return branches[0]?.name ?? null;
   }, [branchesQuery.data?.branches]);
   const serverConfigQuery = useQuery(serverConfigQueryOptions());
+  const composerDiscoveryCwd = resolveProviderDiscoveryCwd({
+    activeThreadWorktreePath: activeThread?.worktreePath ?? null,
+    activeProjectCwd: activeProject?.cwd ?? null,
+    serverCwd: serverConfigQuery.data?.cwd ?? null,
+  });
+  const providerComposerCapabilitiesQuery = useQuery(
+    providerComposerCapabilitiesQueryOptions(selectedProvider),
+  );
+  const providerCommandsQuery = useQuery(
+    providerCommandsQueryOptions({
+      provider: selectedProvider,
+      cwd: composerDiscoveryCwd,
+      threadId,
+      query:
+        composerTriggerKind === "slash-command" || composerTriggerKind === "slash-model"
+          ? (composerTrigger?.query ?? "")
+          : "",
+      enabled:
+        (composerTriggerKind === "slash-command" || composerTriggerKind === "slash-model") &&
+        supportsNativeSlashCommandDiscovery(providerComposerCapabilitiesQuery.data) &&
+        composerDiscoveryCwd !== null,
+    }),
+  );
+  const providerSkillsQuery = useQuery(
+    providerSkillsQueryOptions({
+      provider: selectedProvider,
+      cwd: composerDiscoveryCwd,
+      threadId,
+      query: skillTriggerQuery,
+      enabled:
+        (isSkillTrigger ||
+          (composerTriggerKind === "slash-command" && selectedProvider === "claudeAgent")) &&
+        supportsSkillDiscovery(providerComposerCapabilitiesQuery.data) &&
+        composerDiscoveryCwd !== null,
+    }),
+  );
   const workspaceEntriesQuery = useQuery(
     projectSearchEntriesQueryOptions({
       cwd: gitCwd,
@@ -1318,6 +1407,12 @@ export default function ChatView({
     }),
   );
   const workspaceEntries = workspaceEntriesQuery.data?.entries ?? EMPTY_PROJECT_ENTRIES;
+  const providerNativeCommands = providerCommandsQuery.data?.commands ?? EMPTY_PROVIDER_NATIVE_COMMANDS;
+  const providerNativeCommandNames = useMemo(
+    () => providerNativeCommands.map((command) => command.name),
+    [providerNativeCommands],
+  );
+  const providerSkills = providerSkillsQuery.data?.skills ?? EMPTY_PROVIDER_SKILLS;
   const composerMenuItems = useMemo<ComposerCommandItem[]>(() => {
     if (!composerTrigger) return [];
     if (composerTrigger.kind === "path") {
@@ -1332,36 +1427,68 @@ export default function ChatView({
     }
 
     if (composerTrigger.kind === "slash-command") {
-      const slashCommandItems = [
-        {
-          id: "slash:model",
-          type: "slash-command",
-          command: "model",
-          label: "/model",
-          description: "Switch response model for this thread",
-        },
-        {
-          id: "slash:plan",
-          type: "slash-command",
-          command: "plan",
-          label: "/plan",
-          description: "Switch this thread into plan mode",
-        },
-        {
-          id: "slash:default",
-          type: "slash-command",
-          command: "default",
-          label: "/default",
-          description: "Switch this thread back to normal chat mode",
-        },
-      ] satisfies ReadonlyArray<Extract<ComposerCommandItem, { type: "slash-command" }>>;
-      const query = composerTrigger.query.trim().toLowerCase();
-      if (!query) {
-        return [...slashCommandItems];
-      }
-      return slashCommandItems.filter(
-        (item) => item.command.includes(query) || item.label.slice(1).includes(query),
-      );
+      const normalizedQuery = normalizeProviderDiscoveryText(composerTrigger.query);
+      const builtInItems = filterComposerSlashCommands(
+        composerTrigger.query,
+        getAvailableComposerSlashCommands({
+          provider: selectedProvider,
+          providerNativeCommandNames,
+        }),
+      ).map((definition) => ({
+        id: `slash:${definition.command}`,
+        type: "slash-command" as const,
+        command: definition.command,
+        label: definition.label,
+        description: definition.description,
+      }));
+      const providerCommandItems = providerNativeCommands
+        .filter((command) => {
+          if (!normalizedQuery) return true;
+          return (
+            buildCommandSearchBlob(command).includes(normalizedQuery) ||
+            getProviderNativeSlashCommandSearchTerms(selectedProvider, command.name).some((term) =>
+              term.includes(normalizedQuery),
+            )
+          );
+        })
+        .map((command) => ({
+          id: `provider-command:${selectedProvider}:${command.name}`,
+          type: "provider-native-command" as const,
+          provider: selectedProvider,
+          command: command.name,
+          label: `/${command.name}`,
+          description: command.description ?? `Run ${selectedProvider} native command`,
+        }));
+      const slashSkillItems: ComposerCommandItem[] =
+        selectedProvider === "claudeAgent"
+          ? providerSkills
+              .filter((skill) =>
+                normalizedQuery ? buildSkillSearchBlob(skill).includes(normalizedQuery) : true,
+              )
+              .map((skill) => ({
+                id: `skill:${skill.path}`,
+                type: "skill" as const,
+                skill,
+                label: skill.interface?.displayName ?? skill.name,
+                description: skill.interface?.shortDescription ?? skill.description ?? skill.path,
+              }))
+          : [];
+      return [...builtInItems, ...providerCommandItems, ...slashSkillItems];
+    }
+
+    if (composerTrigger.kind === "skill") {
+      const normalizedQuery = normalizeProviderDiscoveryText(composerTrigger.query);
+      return providerSkills
+        .filter((skill) =>
+          normalizedQuery ? buildSkillSearchBlob(skill).includes(normalizedQuery) : true,
+        )
+        .map((skill) => ({
+          id: `skill:${skill.path}`,
+          type: "skill",
+          skill,
+          label: skill.interface?.displayName ?? skill.name,
+          description: skill.interface?.shortDescription ?? skill.description ?? skill.path,
+        }));
     }
 
     return searchableModelOptions
@@ -1382,7 +1509,16 @@ export default function ChatView({
         showFastBadge:
           provider === "codex" && shouldShowFastTierIcon(slug, selectedServiceTierSetting),
       }));
-  }, [composerTrigger, searchableModelOptions, selectedServiceTierSetting, workspaceEntries]);
+  }, [
+    composerTrigger,
+    providerNativeCommandNames,
+    providerNativeCommands,
+    providerSkills,
+    searchableModelOptions,
+    selectedProvider,
+    selectedServiceTierSetting,
+    workspaceEntries,
+  ]);
   const composerMenuOpen = Boolean(composerTrigger);
   const activeComposerMenuItem = useMemo(
     () =>
@@ -3876,6 +4012,34 @@ export default function ChatView({
         }
         return;
       }
+      if (item.type === "provider-native-command") {
+        const applied = applyPromptReplacement(
+          trigger.rangeStart,
+          trigger.rangeEnd,
+          `/${item.command} `,
+          {
+            expectedText: expectedToken,
+          },
+        );
+        if (applied) {
+          setComposerHighlightedItemId(null);
+        }
+        return;
+      }
+      if (item.type === "skill") {
+        const applied = applyPromptReplacement(
+          trigger.rangeStart,
+          trigger.rangeEnd,
+          `${skillMentionPrefix(selectedProvider)}${item.skill.name} `,
+          {
+            expectedText: expectedToken,
+          },
+        );
+        if (applied) {
+          setComposerHighlightedItemId(null);
+        }
+        return;
+      }
       onProviderModelSelect(item.provider, item.model);
       const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
         expectedText: expectedToken,
@@ -3889,6 +4053,7 @@ export default function ChatView({
       handleInteractionModeChange,
       onProviderModelSelect,
       resolveActiveComposerTrigger,
+      selectedProvider,
     ],
   );
   const onComposerMenuItemHighlighted = useCallback((itemId: string | null) => {
@@ -3913,10 +4078,13 @@ export default function ChatView({
     [composerHighlightedItemId, composerMenuItems],
   );
   const isComposerMenuLoading =
-    composerTriggerKind === "path" &&
-    ((pathTriggerQuery.length > 0 && composerPathQueryDebouncer.state.isPending) ||
-      workspaceEntriesQuery.isLoading ||
-      workspaceEntriesQuery.isFetching);
+    (composerTriggerKind === "path" &&
+      ((pathTriggerQuery.length > 0 && composerPathQueryDebouncer.state.isPending) ||
+        workspaceEntriesQuery.isLoading ||
+        workspaceEntriesQuery.isFetching)) ||
+    ((composerTriggerKind === "slash-command" || composerTriggerKind === "slash-model") &&
+      providerCommandsQuery.isFetching) ||
+    (composerTriggerKind === "skill" && providerSkillsQuery.isFetching);
 
   const onPromptChange = useCallback(
     (nextPrompt: string, nextCursor: number, cursorAdjacentToMention: boolean) => {

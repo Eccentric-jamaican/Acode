@@ -39,6 +39,7 @@ import {
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import { discoverSkillsForCwd } from "./SkillDiscovery.ts";
 
 const PROVIDER = "codex" as const;
 
@@ -1500,6 +1501,12 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
       provider: PROVIDER,
       capabilities: {
         sessionModelSwitch: "in-session",
+        supportsSkillMentions: true,
+        supportsSkillDiscovery: true,
+        supportsNativeSlashCommandDiscovery: false,
+        supportsPluginMentions: false,
+        supportsPluginDiscovery: false,
+        supportsRuntimeModelList: false,
       },
       startSession,
       sendTurn,
@@ -1512,6 +1519,28 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
       listSessions,
       hasSession,
       stopAll,
+      getComposerCapabilities: () =>
+        Effect.succeed({
+          provider: "codex",
+          supportsSkillMentions: true,
+          supportsSkillDiscovery: true,
+          supportsNativeSlashCommandDiscovery: false,
+          supportsPluginMentions: false,
+          supportsPluginDiscovery: false,
+          supportsRuntimeModelList: false,
+        }),
+      listSkills: (input) =>
+        Effect.succeed({
+          skills: discoverSkillsForCwd(input.cwd),
+          source: "local-scan",
+          cached: false,
+        }),
+      listCommands: () =>
+        Effect.succeed({
+          commands: [],
+          source: "unsupported",
+          cached: false,
+        }),
       streamEvents: Stream.fromQueue(runtimeEventQueue),
     } satisfies CodexAdapterShape;
   });

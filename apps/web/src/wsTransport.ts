@@ -1,4 +1,10 @@
-import { ORCHESTRATION_WS_METHODS, WebSocketResponse, WsPush, WsResponse } from "@t3tools/contracts";
+import {
+  ORCHESTRATION_WS_METHODS,
+  WS_METHODS,
+  WebSocketResponse,
+  WsPush,
+  WsResponse,
+} from "@t3tools/contracts";
 import { Cause, Schema } from "effect";
 
 type PushListener = (data: unknown) => void;
@@ -25,6 +31,7 @@ interface DispatchCommandReceipt {
 }
 
 const REQUEST_TIMEOUT_MS = 60_000;
+const GIT_CLONE_TIMEOUT_MS = 10 * 60_000;
 const ORCHESTRATION_DISPATCH_TIMEOUT_MS = 180_000;
 const ORCHESTRATION_DISPATCH_THREAD_CREATE_TIMEOUT_MS = 300_000;
 const ORCHESTRATION_DISPATCH_TURN_START_TIMEOUT_MS = 300_000;
@@ -55,6 +62,9 @@ function readDispatchCommandId(params: unknown): string | null {
 }
 
 function requestTimeoutMs(method: string, params: unknown): number {
+  if (method === WS_METHODS.gitClone) {
+    return GIT_CLONE_TIMEOUT_MS;
+  }
   if (method !== ORCHESTRATION_WS_METHODS.dispatchCommand) {
     return REQUEST_TIMEOUT_MS;
   }

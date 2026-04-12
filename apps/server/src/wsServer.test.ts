@@ -47,6 +47,10 @@ import { TerminalManager, type TerminalManagerShape } from "./terminal/Services/
 import { makeSqlitePersistenceLive, SqlitePersistenceMemory } from "./persistence/Layers/Sqlite";
 import { SqlClient, SqlError } from "effect/unstable/sql";
 import { ProviderService, type ProviderServiceShape } from "./provider/Services/ProviderService";
+import {
+  ProviderDiscoveryService,
+  type ProviderDiscoveryServiceShape,
+} from "./provider/Services/ProviderDiscoveryService";
 import { ProviderHealth, type ProviderHealthShape } from "./provider/Services/ProviderHealth";
 import { CodexAccountService, type CodexAccountServiceShape } from "./provider/Services/CodexAccountService";
 import { Open, type OpenShape } from "./open";
@@ -122,6 +126,53 @@ const defaultCodexAccountService: CodexAccountServiceShape = {
   cancelLogin: () => Effect.succeed({ status: "notFound" }),
   logout: () => Effect.void,
   updates: Stream.empty,
+};
+
+const defaultProviderDiscoveryService: ProviderDiscoveryServiceShape = {
+  getComposerCapabilities: () =>
+    Effect.succeed({
+      provider: "codex",
+      supportsSkillMentions: true,
+      supportsSkillDiscovery: true,
+      supportsNativeSlashCommandDiscovery: false,
+      supportsPluginMentions: false,
+      supportsPluginDiscovery: false,
+      supportsRuntimeModelList: false,
+    }),
+  listCommands: () => Effect.succeed({ commands: [], source: "unsupported", cached: false }),
+  listSkills: () => Effect.succeed({ skills: [], source: "unsupported", cached: false }),
+  listPlugins: () =>
+    Effect.succeed({
+      marketplaces: [],
+      marketplaceLoadErrors: [],
+      remoteSyncError: null,
+      featuredPluginIds: [],
+      source: "unsupported",
+      cached: false,
+    }),
+  readPlugin: (input) =>
+    Effect.succeed({
+      plugin: {
+        marketplaceName: "default",
+        marketplacePath: input.marketplacePath,
+        summary: {
+          id: input.pluginName,
+          name: input.pluginName,
+          source: { type: "local", path: input.marketplacePath },
+          installed: false,
+          enabled: false,
+          installPolicy: "NOT_AVAILABLE",
+          authPolicy: "ON_USE",
+        },
+        description: "",
+        skills: [],
+        apps: [],
+        mcpServers: [],
+      },
+      source: "unsupported",
+      cached: false,
+    }),
+  listModels: () => Effect.succeed({ models: [], source: "unsupported", cached: false }),
 };
 
 class MockTerminalManager implements TerminalManagerShape {
@@ -431,7 +482,8 @@ describe("WebSocket Server", () => {
       authToken?: string;
       stateDir?: string;
       staticDir?: string;
-      providerLayer?: Layer.Layer<ProviderService, never>;
+      providerLayer?: Layer.Layer<ProviderService | ProviderDiscoveryService, never>;
+      providerDiscovery?: ProviderDiscoveryServiceShape;
       providerHealth?: ProviderHealthShape;
       codexAccountService?: CodexAccountServiceShape;
       open?: OpenShape;
@@ -450,6 +502,10 @@ describe("WebSocket Server", () => {
     const providerHealthLayer = Layer.succeed(
       ProviderHealth,
       options.providerHealth ?? defaultProviderHealthService,
+    );
+    const providerDiscoveryLayer = Layer.succeed(
+      ProviderDiscoveryService,
+      options.providerDiscovery ?? defaultProviderDiscoveryService,
     );
     const codexAccountServiceLayer = Layer.succeed(
       CodexAccountService,
@@ -493,6 +549,7 @@ describe("WebSocket Server", () => {
     const dependenciesLayer = Layer.empty.pipe(
       Layer.provideMerge(runtimeLayer),
       Layer.provideMerge(providerHealthLayer),
+      Layer.provideMerge(providerDiscoveryLayer),
       Layer.provideMerge(codexAccountServiceLayer),
       Layer.provideMerge(openLayer),
       Layer.provideMerge(baseLayer),
@@ -1379,7 +1436,10 @@ describe("WebSocket Server", () => {
       rollbackConversation: () => unsupported(),
       streamEvents: Stream.fromPubSub(runtimeEventPubSub),
     };
-    const providerLayer = Layer.succeed(ProviderService, providerService);
+    const providerLayer = Layer.merge(
+      Layer.succeed(ProviderService, providerService),
+      Layer.succeed(ProviderDiscoveryService, defaultProviderDiscoveryService),
+    );
 
     server = await createTestServer({
       cwd: "/test",

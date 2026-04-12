@@ -17,6 +17,7 @@ import {
   type SDKResultMessage,
   type SettingSource,
   type SDKUserMessage,
+  type SlashCommand,
 } from "@anthropic-ai/claude-agent-sdk";
 import {
   ApprovalRequestId,
@@ -40,6 +41,11 @@ import {
   TurnId,
   type UserInputQuestion,
   ClaudeCodeEffort,
+  type ProviderComposerCapabilities,
+  type ProviderListCommandsInput,
+  type ProviderListCommandsResult,
+  type ProviderListSkillsInput,
+  type ProviderListSkillsResult,
 } from "@t3tools/contracts";
 import {
   hasEffortLevel,
@@ -169,6 +175,7 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
   readonly setModel: (model?: string) => Promise<void>;
   readonly setPermissionMode: (mode: PermissionMode) => Promise<void>;
   readonly setMaxThinkingTokens: (maxThinkingTokens: number | null) => Promise<void>;
+  readonly supportedCommands: () => Promise<SlashCommand[]>;
   readonly close: () => void;
 }
 
@@ -179,6 +186,27 @@ export interface ClaudeAdapterLiveOptions {
   }) => ClaudeQueryRuntime;
   readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
+}
+
+function mapSupportedCommands(commands: SlashCommand[]): ProviderListCommandsResult {
+  return {
+    commands: commands.map((command) => ({
+      name: command.name,
+      description: command.description || undefined,
+    })),
+    source: "claudeAgent",
+    cached: false,
+  };
+}
+
+function neverResolvingUserMessageStream(): AsyncIterable<SDKUserMessage> {
+  return {
+    [Symbol.asyncIterator](): AsyncIterator<SDKUserMessage> {
+      return {
+        next: async () => new Promise<IteratorResult<SDKUserMessage>>(() => {}),
+      };
+    },
+  };
 }
 
 function resolveClaudeModelConfig(input: {
@@ -975,6 +1003,8 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
       }) => query({ prompt: input.prompt, options: input.options }) as ClaudeQueryRuntime);
 
     const sessions = new Map<ThreadId, ClaudeSessionContext>();
+    let commandsCache: { result: ProviderListCommandsResult; cwd: string } | null = null;
+    let pendingCommandDiscovery: Promise<ProviderListCommandsResult> | null = null;
     const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
 
     const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
@@ -3131,6 +3161,95 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         return context !== undefined && !context.stopped;
       });
 
+    async function discoverCommandsViaTemporaryProcess(
+      cwd: string,
+    ): Promise<ProviderListCommandsResult> {
+      const tempQuery = createQuery({
+        prompt: neverResolvingUserMessageStream(),
+        options: {
+          cwd,
+          pathToClaudeCodeExecutable: "claude",
+          settingSources: [...CLAUDE_SETTING_SOURCES],
+          permissionMode: "plan" as PermissionMode,
+          persistSession: false,
+        },
+      });
+
+      try {
+        void (async () => {
+          for await (const message of tempQuery) {
+            void message;
+          }
+        })().catch(() => undefined);
+
+        const commands = await tempQuery.supportedCommands();
+        return mapSupportedCommands(commands);
+      } finally {
+        tempQuery.close();
+      }
+    }
+
+    const listCommands: NonNullable<ClaudeAdapterShape["listCommands"]> = (
+      input: ProviderListCommandsInput,
+    ) =>
+      Effect.gen(function* () {
+        const context = input.threadId
+          ? sessions.get(ThreadId.makeUnsafe(input.threadId))
+          : [...sessions.values()].find((sessionContext) => !sessionContext.stopped);
+
+        if (context && !context.stopped) {
+          const commands = yield* Effect.tryPromise({
+            try: () => context.query.supportedCommands(),
+            catch: (cause) => toRequestError(context.session.threadId, "listCommands", cause),
+          });
+          const result = mapSupportedCommands(commands);
+          commandsCache = { result, cwd: input.cwd };
+          return result;
+        }
+
+        if (commandsCache && commandsCache.cwd === input.cwd && !input.forceReload) {
+          return { ...commandsCache.result, cached: true } satisfies ProviderListCommandsResult;
+        }
+
+        const discoveryPromise =
+          pendingCommandDiscovery ?? discoverCommandsViaTemporaryProcess(input.cwd);
+        pendingCommandDiscovery = discoveryPromise;
+
+        const result = yield* Effect.tryPromise({
+          try: () => discoveryPromise,
+          catch: (cause) =>
+            new ProviderAdapterProcessError({
+              provider: PROVIDER,
+              threadId: ThreadId.makeUnsafe("discovery"),
+              detail: toMessage(cause, "Failed to discover Claude commands."),
+              cause,
+            }),
+        }).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              pendingCommandDiscovery = null;
+            }),
+          ),
+          Effect.tapError(() =>
+            Effect.sync(() => {
+              pendingCommandDiscovery = null;
+            }),
+          ),
+        );
+
+        commandsCache = { result, cwd: input.cwd };
+        return result;
+      });
+
+    const listSkills: NonNullable<ClaudeAdapterShape["listSkills"]> = (
+      _input: ProviderListSkillsInput,
+    ) =>
+      Effect.succeed({
+        skills: [],
+        source: "unsupported",
+        cached: false,
+      } satisfies ProviderListSkillsResult);
+
     const stopAll: ClaudeAdapterShape["stopAll"] = () =>
       Effect.forEach(
         sessions,
@@ -3152,10 +3271,29 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
       ).pipe(Effect.tap(() => Queue.shutdown(runtimeEventQueue))),
     );
 
+    const composerCapabilities: ProviderComposerCapabilities = {
+      provider: PROVIDER,
+      supportsSkillMentions: false,
+      supportsSkillDiscovery: false,
+      supportsNativeSlashCommandDiscovery: true,
+      supportsPluginMentions: false,
+      supportsPluginDiscovery: false,
+      supportsRuntimeModelList: false,
+    };
+
+    const getComposerCapabilities: NonNullable<ClaudeAdapterShape["getComposerCapabilities"]> = () =>
+      Effect.succeed(composerCapabilities);
+
     return {
       provider: PROVIDER,
       capabilities: {
         sessionModelSwitch: "in-session",
+        supportsSkillMentions: false,
+        supportsSkillDiscovery: false,
+        supportsNativeSlashCommandDiscovery: true,
+        supportsPluginMentions: false,
+        supportsPluginDiscovery: false,
+        supportsRuntimeModelList: false,
       },
       startSession,
       sendTurn,
@@ -3168,6 +3306,9 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
       listSessions,
       hasSession,
       stopAll,
+      getComposerCapabilities,
+      listCommands,
+      listSkills,
       streamEvents: Stream.fromQueue(runtimeEventQueue),
     } satisfies ClaudeAdapterShape;
   });

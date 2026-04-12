@@ -1,7 +1,12 @@
 import { splitPromptIntoComposerSegments } from "./composer-editor-mentions";
+import {
+  BUILT_IN_COMPOSER_SLASH_COMMANDS,
+  isBuiltInComposerSlashCommand,
+  type ComposerSlashCommand as BuiltInComposerSlashCommand,
+} from "./composerSlashCommands";
 
-export type ComposerTriggerKind = "path" | "slash-command" | "slash-model";
-export type ComposerSlashCommand = "model" | "plan" | "default";
+export type ComposerTriggerKind = "path" | "slash-command" | "slash-model" | "skill";
+export type ComposerSlashCommand = BuiltInComposerSlashCommand;
 
 export interface ComposerTrigger {
   kind: ComposerTriggerKind;
@@ -9,8 +14,6 @@ export interface ComposerTrigger {
   rangeStart: number;
   rangeEnd: number;
 }
-
-const SLASH_COMMANDS: readonly ComposerSlashCommand[] = ["model", "plan", "default"];
 
 function clampCursor(text: string, cursor: number): number {
   if (!Number.isFinite(cursor)) return text.length;
@@ -124,7 +127,11 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
           rangeEnd: cursor,
         };
       }
-      if (SLASH_COMMANDS.some((command) => command.startsWith(commandQuery.toLowerCase()))) {
+      if (
+        BUILT_IN_COMPOSER_SLASH_COMMANDS.some((command) =>
+          command.startsWith(commandQuery.toLowerCase()),
+        )
+      ) {
         return {
           kind: "slash-command",
           query: commandQuery,
@@ -132,7 +139,12 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
           rangeEnd: cursor,
         };
       }
-      return null;
+      return {
+        kind: "slash-command",
+        query: commandQuery,
+        rangeStart: lineStart,
+        rangeEnd: cursor,
+      };
     }
 
     const modelMatch = /^\/model(?:\s+(.*))?$/.exec(linePrefix);
@@ -148,6 +160,14 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
 
   const tokenStart = tokenStartForCursor(text, cursor);
   const token = text.slice(tokenStart, cursor);
+  if (token.startsWith("$")) {
+    return {
+      kind: "skill",
+      query: token.slice(1),
+      rangeStart: tokenStart,
+      rangeEnd: cursor,
+    };
+  }
   if (!token.startsWith("@")) {
     return null;
   }
@@ -164,11 +184,15 @@ export function parseStandaloneComposerSlashCommand(text: string): Exclude<
   ComposerSlashCommand,
   "model"
 > | null {
-  const match = /^\/(plan|default)\s*$/i.exec(text.trim());
+  const match = /^\/([a-z-]+)\s*$/i.exec(text.trim());
   if (!match) {
     return null;
   }
-  return match[1]?.toLowerCase() === "plan" ? "plan" : "default";
+  const command = match[1]?.toLowerCase();
+  if (!command || !isBuiltInComposerSlashCommand(command) || command === "model") {
+    return null;
+  }
+  return command;
 }
 
 export function replaceTextRange(

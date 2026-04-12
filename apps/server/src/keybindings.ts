@@ -61,6 +61,8 @@ type WhenToken =
   | { type: "rparen" };
 
 export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
+  { key: "mod+b", command: "sidebar.toggle", when: "!terminalFocus" },
+  { key: "mod+k", command: "sidebar.search", when: "!terminalFocus" },
   { key: "mod+j", command: "terminal.toggle" },
   { key: "mod+d", command: "terminal.split", when: "terminalFocus" },
   { key: "mod+n", command: "terminal.new", when: "terminalFocus" },
@@ -71,6 +73,18 @@ export const DEFAULT_KEYBINDINGS: ReadonlyArray<KeybindingRule> = [
   { key: "mod+shift+n", command: "chat.newLocal", when: "!terminalFocus" },
   { key: "mod+o", command: "editor.openFavorite" },
 ];
+
+const LEGACY_SIDEBAR_SEARCH_SHORTCUT_RULE: KeybindingRule = {
+  key: "mod+k",
+  command: "sidebar.toggle",
+  when: "!terminalFocus",
+};
+
+const DEFAULT_SIDEBAR_TOGGLE_SHORTCUT_RULE: KeybindingRule = {
+  key: "mod+b",
+  command: "sidebar.toggle",
+  when: "!terminalFocus",
+};
 
 function normalizeKeyToken(token: string): string {
   if (token === "space") return " ";
@@ -734,7 +748,33 @@ const makeKeybindings = Effect.gen(function* () {
         yield* Cache.invalidate(resolvedConfigCache, resolvedConfigCacheKey);
         return;
       }
-      const customConfig = runtimeConfig.keybindings;
+      let customConfig = runtimeConfig.keybindings;
+      const hasSidebarSearchCommand = customConfig.some(
+        (entry) => entry.command === "sidebar.search",
+      );
+      const hasLegacySidebarSearchShortcut = customConfig.some((entry) =>
+        isSameKeybindingRule(entry, LEGACY_SIDEBAR_SEARCH_SHORTCUT_RULE),
+      );
+      const hasDefaultSidebarToggleShortcut = customConfig.some((entry) =>
+        isSameKeybindingRule(entry, DEFAULT_SIDEBAR_TOGGLE_SHORTCUT_RULE),
+      );
+      const didMigrateLegacySidebarSearchShortcut =
+        !hasSidebarSearchCommand &&
+        hasLegacySidebarSearchShortcut &&
+        hasDefaultSidebarToggleShortcut;
+      if (didMigrateLegacySidebarSearchShortcut) {
+        customConfig = customConfig.map((entry) =>
+          isSameKeybindingRule(entry, LEGACY_SIDEBAR_SEARCH_SHORTCUT_RULE)
+            ? { ...entry, command: "sidebar.search" }
+            : entry,
+        );
+        yield* Effect.logInfo("migrated legacy sidebar.search keybinding", {
+          path: keybindingsConfigPath,
+          fromCommand: LEGACY_SIDEBAR_SEARCH_SHORTCUT_RULE.command,
+          toCommand: "sidebar.search",
+          key: LEGACY_SIDEBAR_SEARCH_SHORTCUT_RULE.key,
+        });
+      }
       const existingCommands = new Set(customConfig.map((entry) => entry.command));
       const missingDefaults: KeybindingRule[] = [];
       const shortcutConflictWarnings: Array<{
@@ -772,6 +812,9 @@ const makeKeybindings = Effect.gen(function* () {
         });
       }
       if (missingDefaults.length === 0) {
+        if (didMigrateLegacySidebarSearchShortcut) {
+          yield* writeConfigAtomically(customConfig);
+        }
         yield* Cache.invalidate(resolvedConfigCache, resolvedConfigCacheKey);
         return;
       }

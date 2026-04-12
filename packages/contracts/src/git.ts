@@ -93,6 +93,13 @@ export const GitInitInput = Schema.Struct({
 });
 export type GitInitInput = typeof GitInitInput.Type;
 
+export const GitCloneInput = Schema.Struct({
+  repositoryUrl: TrimmedNonEmptyStringSchema,
+  parentDirectory: TrimmedNonEmptyStringSchema,
+  directoryName: TrimmedNonEmptyStringSchema,
+});
+export type GitCloneInput = typeof GitCloneInput.Type;
+
 // RPC Results
 
 const GitStatusPr = Schema.Struct({
@@ -170,3 +177,10 @@ export const GitPullResult = Schema.Struct({
   upstreamBranch: TrimmedNonEmptyStringSchema.pipe(Schema.NullOr),
 });
 export type GitPullResult = typeof GitPullResult.Type;
+
+export const GitCloneResult = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  repositoryUrl: TrimmedNonEmptyStringSchema,
+  directoryName: TrimmedNonEmptyStringSchema,
+});
+export type GitCloneResult = typeof GitCloneResult.Type;
