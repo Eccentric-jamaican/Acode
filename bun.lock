@@ -14,7 +14,7 @@
     },
     "apps/desktop": {
       "name": "@t3tools/desktop",
-      "version": "0.2.30",
+      "version": "0.2.31",
       "dependencies": {
         "effect": "catalog:",
         "electron": "40.6.0",
@@ -43,7 +43,7 @@
     },
     "apps/server": {
       "name": "t3",
-      "version": "0.2.30",
+      "version": "0.2.31",
       "bin": {
         "t3": "./dist/index.mjs",
       },
@@ -73,7 +73,7 @@
     },
     "apps/web": {
       "name": "@t3tools/web",
-      "version": "0.2.30",
+      "version": "0.2.31",
       "dependencies": {
         "@base-ui/react": "^1.2.0",
         "@chenglou/pretext": "^0.0.4",
@@ -119,7 +119,7 @@
     },
     "packages/contracts": {
       "name": "@t3tools/contracts",
-      "version": "0.2.30",
+      "version": "0.2.31",
       "dependencies": {
         "effect": "catalog:",
       },
@@ -133,7 +133,7 @@
     },
     "packages/shared": {
       "name": "@t3tools/shared",
-      "version": "0.2.30",
+      "version": "0.2.31",
       "dependencies": {
         "@t3tools/contracts": "workspace:*",
         "effect": "catalog:",
