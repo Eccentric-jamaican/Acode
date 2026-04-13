@@ -38,10 +38,12 @@ import {
   memo,
   useCallback,
   useEffect,
+  type KeyboardEvent as ReactKeyboardEvent,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type WheelEvent as ReactWheelEvent,
 } from "react";
 import { FiGitBranch } from "react-icons/fi";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -259,11 +261,15 @@ const EMPTY_PROVIDER_STATUSES: ServerProviderStatus[] = [];
 const EMPTY_PROVIDER_NATIVE_COMMANDS: ProviderNativeCommandDescriptor[] = [];
 const EMPTY_PROVIDER_SKILLS: ProviderSkillDescriptor[] = [];
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
+const EMPTY_HANDOFF_TARGET_PROVIDERS: readonly ProviderKind[] = [];
 const COMPOSER_PATH_QUERY_DEBOUNCE_MS = 120;
 const SCRIPT_TERMINAL_COLS = 120;
 const SCRIPT_TERMINAL_ROWS = 30;
 const WORKTREE_BRANCH_PREFIX = "t3code";
 const HEADER_COMPACT_BREAKPOINT = 480;
+const HANDOFF_WHEEL_SNAP_DELTA = 36;
+const HANDOFF_WHEEL_RESET_GAP_MS = 220;
+const HANDOFF_WHEEL_COOLDOWN_MS = 180;
 const CODEX_REASONING_LABEL_BY_OPTION: Record<CodexReasoningEffort, string> = {
   low: "Low",
   medium: "Medium",
@@ -1000,19 +1006,41 @@ export default function ChatView({
   );
   const handoffBadgeSourceProvider = activeThread?.handoff?.sourceProvider ?? null;
   const handoffBadgeTargetProvider = activeThread ? inferProviderFromModel(activeThread.model) : null;
-  const handoffTargetProvider = useMemo(
+  const handoffTargetProviders = useMemo(
     () =>
       activeThread
-        ? (resolveHandoffTargetProviders(inferProviderFromModel(activeThread.model))[0] ?? null)
-        : null,
+        ? resolveHandoffTargetProviders(inferProviderFromModel(activeThread.model))
+        : EMPTY_HANDOFF_TARGET_PROVIDERS,
     [activeThread],
   );
+  const [handoffTargetProviderIndex, setHandoffTargetProviderIndex] = useState(0);
+  const handoffTargetProvidersKey = handoffTargetProviders.join("|");
+  useEffect(() => {
+    setHandoffTargetProviderIndex(0);
+  }, [activeThread?.id, handoffTargetProvidersKey]);
+  const handoffTargetProvider: ProviderKind | null =
+    handoffTargetProviders.length > 0
+      ? handoffTargetProviders[((handoffTargetProviderIndex % handoffTargetProviders.length) + handoffTargetProviders.length) % handoffTargetProviders.length] ?? null
+      : null;
+  const onCycleHandoffTargetProvider = useCallback((direction: 1 | -1) => {
+    setHandoffTargetProviderIndex((currentIndex) => {
+      if (handoffTargetProviders.length <= 1) {
+        return 0;
+      }
+      const nextIndex = currentIndex + direction;
+      const normalized = ((nextIndex % handoffTargetProviders.length) + handoffTargetProviders.length) % handoffTargetProviders.length;
+      return normalized;
+    });
+  }, [handoffTargetProviders.length]);
   const handoffActionLabel = useMemo(() => {
     if (!activeThread) {
       return "Create handoff thread";
     }
-    return `Handoff to ${PROVIDER_DISPLAY_NAMES[handoffTargetProvider ?? "codex"]}`;
-  }, [activeThread, handoffTargetProvider]);
+    const providerLabel = PROVIDER_DISPLAY_NAMES[handoffTargetProvider ?? "codex"];
+    return handoffTargetProviders.length > 1
+      ? `Handoff to ${providerLabel} (scroll to switch provider)`
+      : `Handoff to ${providerLabel}`;
+  }, [activeThread, handoffTargetProvider, handoffTargetProviders.length]);
   const handoffDisabled = !(
     activeThread &&
     activeProject &&
@@ -4245,6 +4273,7 @@ export default function ChatView({
           handoffActionLabel={handoffActionLabel}
           handoffDisabled={handoffDisabled}
           handoffActionTargetProvider={handoffTargetProvider}
+          handoffTargetProviderCount={handoffTargetProviders.length}
           handoffBadgeSourceProvider={handoffBadgeSourceProvider}
           handoffBadgeTargetProvider={handoffBadgeTargetProvider}
           browserPaneOpen={resolvedBrowserPaneOpen}
@@ -4275,6 +4304,7 @@ export default function ChatView({
           onToggleDiff={onToggleDiff}
           onToggleBrowser={onToggleBrowser}
           onCreateHandoff={onCreateProviderHandoffThread}
+          onCycleHandoffTargetProvider={onCycleHandoffTargetProvider}
         />
       </header>
 
@@ -4969,6 +4999,7 @@ interface ChatHeaderProps {
   handoffActionLabel: string;
   handoffDisabled: boolean;
   handoffActionTargetProvider: ProviderKind | null;
+  handoffTargetProviderCount: number;
   handoffBadgeSourceProvider: ProviderKind | null;
   handoffBadgeTargetProvider: ProviderKind | null;
   browserPaneOpen: boolean;
@@ -4985,6 +5016,7 @@ interface ChatHeaderProps {
   onToggleDiff: () => void;
   onToggleBrowser: () => void;
   onCreateHandoff: () => void;
+  onCycleHandoffTargetProvider: (direction: 1 | -1) => void;
 }
 
 const ChatHeader = memo(function ChatHeader({
@@ -5003,6 +5035,7 @@ const ChatHeader = memo(function ChatHeader({
   handoffActionLabel,
   handoffDisabled,
   handoffActionTargetProvider,
+  handoffTargetProviderCount,
   handoffBadgeSourceProvider,
   handoffBadgeTargetProvider,
   browserPaneOpen,
@@ -5019,6 +5052,7 @@ const ChatHeader = memo(function ChatHeader({
   onToggleDiff,
   onToggleBrowser,
   onCreateHandoff,
+  onCycleHandoffTargetProvider,
 }: ChatHeaderProps) {
   const { isMobile, state } = useSidebar();
   const needsDesktopTrafficLightInset = isElectron && !isMobile && state === "collapsed";
@@ -5035,6 +5069,91 @@ const ChatHeader = memo(function ChatHeader({
         ? { kind: "maximize" as const, label: "Expand this chat", onClick: onMaximizeSurface }
         : null;
   const hasCollapsibleControls = Boolean(activeProjectScripts || activeProjectName || onOpenTask);
+  const [handoffFlipDirection, setHandoffFlipDirection] = useState<1 | -1 | 0>(0);
+  const handoffWheelAccumRef = useRef(0);
+  const handoffWheelCooldownUntilRef = useRef(0);
+  const handoffWheelLastEventAtRef = useRef(0);
+  const handoffCanCycle = handoffTargetProviderCount > 1 && !handoffDisabled;
+  const cycleHandoffTargetProvider = useCallback((direction: 1 | -1) => {
+    if (!handoffCanCycle) {
+      return;
+    }
+    setHandoffFlipDirection(direction);
+    onCycleHandoffTargetProvider(direction);
+  }, [handoffCanCycle, onCycleHandoffTargetProvider]);
+  const onHandoffWheel = useCallback((event: ReactWheelEvent<HTMLButtonElement>) => {
+    if (!handoffCanCycle) {
+      return;
+    }
+    const now = Date.now();
+    if (now < handoffWheelCooldownUntilRef.current) {
+      return;
+    }
+
+    if (now - handoffWheelLastEventAtRef.current > HANDOFF_WHEEL_RESET_GAP_MS) {
+      handoffWheelAccumRef.current = 0;
+    }
+    handoffWheelLastEventAtRef.current = now;
+
+    if (Math.abs(event.deltaY) < 1) {
+      return;
+    }
+    if (
+      handoffWheelAccumRef.current !== 0 &&
+      Math.sign(handoffWheelAccumRef.current) !== Math.sign(event.deltaY)
+    ) {
+      handoffWheelAccumRef.current = 0;
+    }
+
+    handoffWheelAccumRef.current += event.deltaY;
+    if (Math.abs(handoffWheelAccumRef.current) < HANDOFF_WHEEL_SNAP_DELTA) {
+      return;
+    }
+
+    const direction: 1 | -1 = handoffWheelAccumRef.current > 0 ? 1 : -1;
+    handoffWheelAccumRef.current = 0;
+    handoffWheelCooldownUntilRef.current = now + HANDOFF_WHEEL_COOLDOWN_MS;
+    cycleHandoffTargetProvider(direction);
+  }, [cycleHandoffTargetProvider, handoffCanCycle]);
+  useEffect(() => {
+    if (handoffCanCycle) {
+      return;
+    }
+    handoffWheelAccumRef.current = 0;
+    handoffWheelCooldownUntilRef.current = 0;
+    handoffWheelLastEventAtRef.current = 0;
+  }, [handoffCanCycle]);
+  const onHandoffKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (!handoffCanCycle) {
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      cycleHandoffTargetProvider(1);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      cycleHandoffTargetProvider(-1);
+    }
+  }, [cycleHandoffTargetProvider, handoffCanCycle]);
+  useEffect(() => {
+    if (handoffFlipDirection === 0) {
+      return;
+    }
+    const timeoutId = window.setTimeout(() => {
+      setHandoffFlipDirection(0);
+    }, 200);
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [handoffActionTargetProvider, handoffFlipDirection]);
+  const handoffProviderAnimationClass =
+    handoffFlipDirection > 0
+      ? "handoff-provider-flip-down"
+      : handoffFlipDirection < 0
+        ? "handoff-provider-flip-up"
+        : "";
   const renderProviderIcon = (provider: ProviderKind | null, className: string) => {
     if (provider === "claudeAgent") {
       return <ClaudeAI className={cn("text-[#d97757]", className)} />;
@@ -5131,21 +5250,31 @@ const ChatHeader = memo(function ChatHeader({
                   type="button"
                   size="xs"
                   variant="outline"
-                  className={compact ? "shrink-0 gap-1" : "shrink-0 gap-1.5"}
+                  className={cn(
+                    compact ? "shrink-0 gap-1" : "shrink-0 gap-1.5",
+                    handoffCanCycle ? "cursor-ns-resize" : "",
+                  )}
                   aria-label={handoffActionLabel}
                   disabled={handoffDisabled}
                   onClick={onCreateHandoff}
+                  onWheel={onHandoffWheel}
+                  onKeyDown={onHandoffKeyDown}
                 >
                   <FiGitBranch className="size-3.5 shrink-0" />
                   {compact ? null : <span className="truncate">Hand off to</span>}
-                  <span className="inline-flex size-3.5 shrink-0 items-center justify-center">
-                    {renderProviderIcon(handoffActionTargetProvider, "size-3.5")}
-                  </span>
-                  {!compact && (
-                    <span className="truncate">
-                      {PROVIDER_DISPLAY_NAMES[handoffActionTargetProvider ?? "codex"]}
+                  <span
+                    key={handoffActionTargetProvider ?? "codex"}
+                    className={cn("inline-flex items-center gap-1.5", handoffProviderAnimationClass)}
+                  >
+                    <span className="inline-flex size-3.5 shrink-0 items-center justify-center">
+                      {renderProviderIcon(handoffActionTargetProvider, "size-3.5")}
                     </span>
-                  )}
+                    {!compact && (
+                      <span className="truncate">
+                        {PROVIDER_DISPLAY_NAMES[handoffActionTargetProvider ?? "codex"]}
+                      </span>
+                    )}
+                  </span>
                 </Button>
               }
             />

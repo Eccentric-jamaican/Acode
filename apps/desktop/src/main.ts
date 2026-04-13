@@ -2,6 +2,7 @@ import * as ChildProcess from "node:child_process";
 import * as Crypto from "node:crypto";
 import * as FS from "node:fs";
 import * as Http from "node:http";
+import * as Net from "node:net";
 import * as OS from "node:os";
 import * as Path from "node:path";
 
@@ -97,6 +98,9 @@ const LOG_FILE_MAX_FILES = 10;
 const APP_RUN_ID = Crypto.randomBytes(6).toString("hex");
 const AUTO_UPDATE_STARTUP_DELAY_MS = 15_000;
 const AUTO_UPDATE_POLL_INTERVAL_MS = 4 * 60 * 60 * 1000;
+const BACKEND_READY_TIMEOUT_MS = 45_000;
+const BACKEND_READY_POLL_INTERVAL_MS = 250;
+const BACKEND_READY_SOCKET_TIMEOUT_MS = 500;
 
 type DesktopUpdateErrorContext = DesktopUpdateState["errorContext"];
 
@@ -302,45 +306,66 @@ async function startBrowserBridgeServer(): Promise<void> {
     return;
   }
   browserBridgeAuthToken = Crypto.randomBytes(24).toString("hex");
-  const server = Http.createServer(async (request, response) => {
-    try {
-      if (request.method !== "POST" || request.url !== "/rpc") {
-        response.writeHead(404).end();
-        return;
+  const createBridgeServer = () =>
+    Http.createServer(async (request, response) => {
+      try {
+        if (request.method !== "POST" || request.url !== "/rpc") {
+          response.writeHead(404).end();
+          return;
+        }
+        if (request.headers["x-t3-browser-token"] !== browserBridgeAuthToken) {
+          response.writeHead(401).end(JSON.stringify({ error: "Unauthorized" }));
+          return;
+        }
+        const body = await readRequestBody(request);
+        const result = await handleBrowserBridgeRequest(body);
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ result }));
+      } catch (error) {
+        response.writeHead(500, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({
+            error: error instanceof Error ? error.message : String(error),
+          }),
+        );
       }
-      if (request.headers["x-t3-browser-token"] !== browserBridgeAuthToken) {
-        response.writeHead(401).end(JSON.stringify({ error: "Unauthorized" }));
-        return;
-      }
-      const body = await readRequestBody(request);
-      const result = await handleBrowserBridgeRequest(body);
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ result }));
-    } catch (error) {
-      response.writeHead(500, { "content-type": "application/json" });
-      response.end(
-        JSON.stringify({
-          error: error instanceof Error ? error.message : String(error),
-        }),
-      );
-    }
-  });
-
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      server.off("error", reject);
-      resolve();
     });
-  });
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    server.close();
-    throw new Error("Could not resolve browser bridge server address.");
+
+  const MAX_BIND_ATTEMPTS = 12;
+  let attempt = 0;
+  while (attempt < MAX_BIND_ATTEMPTS) {
+    attempt += 1;
+    const server = createBridgeServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        server.off("error", reject);
+        resolve();
+      });
+    });
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      server.close();
+      throw new Error("Could not resolve browser bridge server address.");
+    }
+    if (address.port === backendPort) {
+      writeDesktopLogHeader(
+        `browser bridge bind retry because selected port collides with backend port=${backendPort} attempt=${attempt}`,
+      );
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
+      continue;
+    }
+    browserBridgeServer = server;
+    browserBridgeUrl = `http://127.0.0.1:${address.port}/rpc`;
+    server.unref();
+    return;
   }
-  browserBridgeServer = server;
-  browserBridgeUrl = `http://127.0.0.1:${address.port}/rpc`;
-  server.unref();
+
+  throw new Error(
+    `Failed to bind browser bridge server on a port distinct from backend port ${backendPort}.`,
+  );
 }
 
 function stopBrowserBridgeServer(): void {
@@ -1081,10 +1106,9 @@ function backendEnv(): NodeJS.ProcessEnv {
     T3CODE_DESKTOP_BROWSER_BRIDGE_URL: browserBridgeUrl,
     T3CODE_DESKTOP_BROWSER_BRIDGE_TOKEN: browserBridgeAuthToken,
   };
-  // Only set auth token if it's non-empty (skip in dev mode)
-  if (backendAuthToken) {
-    env.T3CODE_AUTH_TOKEN = backendAuthToken;
-  }
+  // Always set T3CODE_AUTH_TOKEN explicitly so inherited shell env cannot
+  // accidentally enable backend auth while desktop bridge WS URL has no token.
+  env.T3CODE_AUTH_TOKEN = backendAuthToken;
   return env;
 }
 
@@ -1157,6 +1181,46 @@ function startBackend(): void {
     const reason = `code=${code ?? "null"} signal=${signal ?? "null"}`;
     scheduleBackendRestart(reason);
   });
+}
+
+async function canConnectToBackendPort(port: number): Promise<boolean> {
+  if (!Number.isInteger(port) || port <= 0) {
+    return false;
+  }
+
+  return new Promise<boolean>((resolve) => {
+    const socket = new Net.Socket();
+    let settled = false;
+    const settle = (result: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(result);
+    };
+
+    socket.setTimeout(BACKEND_READY_SOCKET_TIMEOUT_MS);
+    socket.once("connect", () => settle(true));
+    socket.once("timeout", () => settle(false));
+    socket.once("error", () => settle(false));
+    socket.connect(port, "127.0.0.1");
+  });
+}
+
+async function waitForBackendReady(port: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (isQuitting) {
+      return false;
+    }
+    if (await canConnectToBackendPort(port)) {
+      return true;
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, BACKEND_READY_POLL_INTERVAL_MS);
+    });
+  }
+  return false;
 }
 
 function stopBackend(): void {
@@ -1656,6 +1720,14 @@ async function bootstrap(): Promise<void> {
   writeDesktopLogHeader("bootstrap ipc handlers registered");
   startBackend();
   writeDesktopLogHeader("bootstrap backend start requested");
+  const backendReady = await waitForBackendReady(backendPort, BACKEND_READY_TIMEOUT_MS);
+  if (!backendReady) {
+    writeDesktopLogHeader(
+      `backend did not become ready within ${BACKEND_READY_TIMEOUT_MS}ms on port=${backendPort}; launching window anyway`,
+    );
+  } else {
+    writeDesktopLogHeader(`backend is accepting connections on port=${backendPort}`);
+  }
   mainWindow = createWindow();
   writeDesktopLogHeader("bootstrap main window created");
 }
