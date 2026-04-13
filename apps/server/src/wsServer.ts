@@ -493,6 +493,29 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         } as OrchestrationCommand;
       }
 
+      case "thread.handoff.create": {
+        const handoffCommand = input.command;
+        const normalizedImportedMessages = yield* Effect.forEach(
+          handoffCommand.importedMessages,
+          (message) =>
+            Effect.gen(function* () {
+              const normalizedAttachments = (yield* persistClientAttachments({
+                ownerId: handoffCommand.threadId,
+                attachments: message.attachments,
+              })) as ReadonlyArray<PersistedChatAttachment> | undefined;
+              return {
+                ...message,
+                ...(normalizedAttachments !== undefined ? { attachments: normalizedAttachments } : {}),
+              };
+            }),
+          { concurrency: 1 },
+        );
+        return {
+          ...handoffCommand,
+          importedMessages: normalizedImportedMessages,
+        } as OrchestrationCommand;
+      }
+
       default:
         return input.command as OrchestrationCommand;
     }

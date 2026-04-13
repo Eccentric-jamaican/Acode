@@ -4,6 +4,7 @@ import type {
   OrchestrationEvent,
   ProviderKind,
   OrchestrationReadModel,
+  ThreadHandoffImportedMessage,
   ThreadId,
 } from "@t3tools/contracts";
 import { Effect } from "effect";
@@ -79,6 +80,29 @@ function hasNativeHandoffMessages(
   thread: Pick<OrchestrationReadModel["threads"][number], "messages">,
 ): boolean {
   return thread.messages.some((message) => message.role === "assistant" && message.turnId !== null);
+}
+
+function buildImportedHandoffMessagesFromSourceThread(
+  thread: Pick<OrchestrationReadModel["threads"][number], "messages">,
+): ReadonlyArray<ThreadHandoffImportedMessage> {
+  return thread.messages
+    .filter(
+      (
+        message,
+      ): message is (typeof thread.messages)[number] & {
+        readonly role: "user" | "assistant";
+      } =>
+        (message.role === "user" || message.role === "assistant") &&
+        message.streaming === false,
+    )
+    .map((message) => ({
+      messageId: newMessageId(),
+      role: message.role,
+      text: message.text,
+      ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+      createdAt: message.createdAt,
+      updatedAt: message.updatedAt,
+    }));
 }
 
 function taskRunPrompt(input: {
@@ -701,8 +725,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         },
       };
 
+      const importedMessagesFromSource = buildImportedHandoffMessagesFromSourceThread(sourceThread);
+      const importedMessages =
+        importedMessagesFromSource.length > 0 ? importedMessagesFromSource : command.importedMessages;
+
       const importedMessageEvents: ReadonlyArray<Omit<OrchestrationEvent, "sequence">> =
-        command.importedMessages.map((message) => ({
+        importedMessages.map((message) => ({
           ...withEventBase({
             aggregateKind: "thread",
             aggregateId: command.threadId,

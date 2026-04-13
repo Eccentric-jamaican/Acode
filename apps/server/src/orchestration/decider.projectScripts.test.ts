@@ -394,7 +394,7 @@ describe("decider project scripts", () => {
         },
       }),
     );
-    const readModel = await Effect.runPromise(
+    const withSourceThread = await Effect.runPromise(
       projectEvent(withProject, {
         sequence: 2,
         eventId: asEventId("evt-thread-create-handoff-source"),
@@ -424,6 +424,63 @@ describe("decider project scripts", () => {
         },
       }),
     );
+    const withSourceUserMessage = await Effect.runPromise(
+      projectEvent(withSourceThread, {
+        sequence: 3,
+        eventId: asEventId("evt-thread-create-handoff-source-user"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.makeUnsafe("thread-source"),
+        type: "thread.message-sent",
+        occurredAt: now,
+        commandId: CommandId.makeUnsafe("cmd-thread-create-handoff-source-user"),
+        causationEventId: null,
+        correlationId: CommandId.makeUnsafe("cmd-thread-create-handoff-source-user"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.makeUnsafe("thread-source"),
+          messageId: asMessageId("source-msg-user"),
+          role: "user",
+          text: "source user context",
+          attachments: [
+            {
+              type: "image",
+              id: "thread-source-11111111-1111-1111-1111-111111111111",
+              name: "wireframe.png",
+              mimeType: "image/png",
+              sizeBytes: 128,
+            },
+          ],
+          turnId: null,
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+      }),
+    );
+    const readModel = await Effect.runPromise(
+      projectEvent(withSourceUserMessage, {
+        sequence: 4,
+        eventId: asEventId("evt-thread-create-handoff-source-assistant"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.makeUnsafe("thread-source"),
+        type: "thread.message-sent",
+        occurredAt: now,
+        commandId: CommandId.makeUnsafe("cmd-thread-create-handoff-source-assistant"),
+        causationEventId: null,
+        correlationId: CommandId.makeUnsafe("cmd-thread-create-handoff-source-assistant"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.makeUnsafe("thread-source"),
+          messageId: asMessageId("source-msg-assistant"),
+          role: "assistant",
+          text: "source assistant context",
+          turnId: null,
+          streaming: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+      }),
+    );
 
     const result = await Effect.runPromise(
       decideOrchestrationCommand({
@@ -443,14 +500,14 @@ describe("decider project scripts", () => {
             {
               messageId: asMessageId("handoff-msg-user"),
               role: "user",
-              text: "user context",
+              text: "stale command user context",
               createdAt: now,
               updatedAt: now,
             },
             {
               messageId: asMessageId("handoff-msg-assistant"),
               role: "assistant",
-              text: "assistant context",
+              text: "stale command assistant context",
               createdAt: now,
               updatedAt: now,
             },
@@ -473,8 +530,116 @@ describe("decider project scripts", () => {
     expect(events[1]?.type).toBe("thread.message-sent");
     expect(events[2]?.type).toBe("thread.message-sent");
     if (events[1]?.type === "thread.message-sent") {
+      expect(events[1].payload.text).toBe("source user context");
+      expect(events[1].payload.attachments).toEqual([
+        {
+          type: "image",
+          id: "thread-source-11111111-1111-1111-1111-111111111111",
+          name: "wireframe.png",
+          mimeType: "image/png",
+          sizeBytes: 128,
+        },
+      ]);
       expect(events[1].payload.turnId).toBeNull();
       expect(events[1].payload.streaming).toBe(false);
+    }
+    if (events[2]?.type === "thread.message-sent") {
+      expect(events[2].payload.text).toBe("source assistant context");
+    }
+  });
+
+  it("falls back to command-provided handoff messages when the source thread has no importable messages", async () => {
+    const now = new Date().toISOString();
+    const initial = createEmptyReadModel(now);
+    const withProject = await Effect.runPromise(
+      projectEvent(initial, {
+        sequence: 1,
+        eventId: asEventId("evt-project-create-handoff-fallback"),
+        aggregateKind: "project",
+        aggregateId: asProjectId("project-handoff-fallback"),
+        type: "project.created",
+        occurredAt: now,
+        commandId: CommandId.makeUnsafe("cmd-project-create-handoff-fallback"),
+        causationEventId: null,
+        correlationId: CommandId.makeUnsafe("cmd-project-create-handoff-fallback"),
+        metadata: {},
+        payload: {
+          projectId: asProjectId("project-handoff-fallback"),
+          title: "Project",
+          workspaceRoot: "/tmp/project",
+          defaultModel: null,
+          scripts: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+      }),
+    );
+    const readModel = await Effect.runPromise(
+      projectEvent(withProject, {
+        sequence: 2,
+        eventId: asEventId("evt-thread-create-handoff-fallback-source"),
+        aggregateKind: "thread",
+        aggregateId: ThreadId.makeUnsafe("thread-fallback-source"),
+        type: "thread.created",
+        occurredAt: now,
+        commandId: CommandId.makeUnsafe("cmd-thread-create-handoff-fallback-source"),
+        causationEventId: null,
+        correlationId: CommandId.makeUnsafe("cmd-thread-create-handoff-fallback-source"),
+        metadata: {},
+        payload: {
+          threadId: ThreadId.makeUnsafe("thread-fallback-source"),
+          projectId: asProjectId("project-handoff-fallback"),
+          origin: "user",
+          taskId: null,
+          title: "Source Thread",
+          model: "gpt-5.4",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "full-access",
+          isPinned: false,
+          branch: null,
+          worktreePath: null,
+          createdAt: now,
+          updatedAt: now,
+          handoff: null,
+        },
+      }),
+    );
+
+    const result = await Effect.runPromise(
+      decideOrchestrationCommand({
+        command: {
+          type: "thread.handoff.create",
+          commandId: CommandId.makeUnsafe("cmd-thread-handoff-create-fallback"),
+          threadId: ThreadId.makeUnsafe("thread-fallback-target"),
+          sourceThreadId: ThreadId.makeUnsafe("thread-fallback-source"),
+          projectId: asProjectId("project-handoff-fallback"),
+          title: "Target Thread",
+          model: "gpt-5.4",
+          runtimeMode: "full-access",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          branch: null,
+          worktreePath: null,
+          importedMessages: [
+            {
+              messageId: asMessageId("handoff-fallback-msg-user"),
+              role: "user",
+              text: "command fallback message",
+              createdAt: now,
+              updatedAt: now,
+            },
+          ],
+          createdAt: now,
+        },
+        readModel,
+      }),
+    );
+
+    expect(Array.isArray(result)).toBe(true);
+    const events = Array.isArray(result) ? result : [result];
+    expect(events).toHaveLength(2);
+    expect(events[1]?.type).toBe("thread.message-sent");
+    if (events[1]?.type === "thread.message-sent") {
+      expect(events[1].payload.text).toBe("command fallback message");
     }
   });
 
