@@ -12,6 +12,10 @@ import {
   type RuntimeMode,
   type TurnId,
 } from "@t3tools/contracts";
+import {
+  buildPromptThreadTitleFallback,
+  isGenericChatThreadTitle,
+} from "@t3tools/shared/chatThreads";
 import { Cache, Cause, Duration, Effect, Layer, Option, Queue, Schema, Stream } from "effect";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
@@ -435,6 +439,64 @@ const make = Effect.gen(function* () {
       );
   });
 
+  const maybeGenerateAndRenameThreadTitleForFirstTurn = Effect.fnUntraced(function* (input: {
+    readonly threadId: ThreadId;
+    readonly messageId: string;
+    readonly messageText: string;
+    readonly attachments?: ReadonlyArray<ChatAttachment>;
+  }) {
+    const readModel = yield* orchestrationEngine.getReadModel();
+    const thread = readModel.threads.find((entry) => entry.id === input.threadId);
+    if (!thread) {
+      return;
+    }
+
+    const userMessages = thread.messages.filter((message) => message.role === "user");
+    if (userMessages.length !== 1 || userMessages[0]?.id !== input.messageId) {
+      return;
+    }
+
+    const fallbackTitle = buildPromptThreadTitleFallback(
+      input.messageText.trim() || input.attachments?.[0]?.name || "",
+    );
+    const currentTitle = thread.title.trim();
+    if (!isGenericChatThreadTitle(currentTitle) && currentTitle !== fallbackTitle) {
+      return;
+    }
+
+    const cwd = resolveThreadWorkspaceCwd({
+      thread,
+      projects: readModel.projects,
+    });
+    const nextTitle = yield* textGeneration
+      .generateThreadTitle({
+        cwd: cwd ?? process.cwd(),
+        message: input.messageText,
+        ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+      })
+      .pipe(
+        Effect.map((generated) => generated.title),
+        Effect.catch((error) =>
+          Effect.logWarning("provider command reactor failed to generate thread title", {
+            threadId: input.threadId,
+            cwd,
+            reason: error.message,
+          }).pipe(Effect.as(fallbackTitle)),
+        ),
+      );
+
+    if (nextTitle === currentTitle) {
+      return;
+    }
+
+    yield* orchestrationEngine.dispatch({
+      type: "thread.meta.update",
+      commandId: serverCommandId("thread-title-rename"),
+      threadId: input.threadId,
+      title: nextTitle,
+    });
+  });
+
   const processTurnStartRequested = Effect.fnUntraced(function* (
     event: Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>,
   ) {
@@ -465,6 +527,12 @@ const make = Effect.gen(function* () {
       threadId: event.payload.threadId,
       branch: thread.branch,
       worktreePath: thread.worktreePath,
+      messageId: message.id,
+      messageText: message.text,
+      ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+    }).pipe(Effect.forkScoped);
+    yield* maybeGenerateAndRenameThreadTitleForFirstTurn({
+      threadId: event.payload.threadId,
       messageId: message.id,
       messageText: message.text,
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),

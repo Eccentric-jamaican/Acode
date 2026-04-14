@@ -3,7 +3,15 @@ import { FileDiff, type FileDiffMetadata, Virtualizer } from "@pierre/diffs/reac
 import { useQuery } from "@tanstack/react-query";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { ThreadId, type TurnId } from "@t3tools/contracts";
-import { ChevronLeftIcon, ChevronRightIcon, Columns2Icon, Rows3Icon } from "lucide-react";
+import {
+  AlignLeftIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  Columns2Icon,
+  FileDiffIcon,
+  GitForkIcon,
+  Rows3Icon,
+} from "lucide-react";
 import { type WheelEvent as ReactWheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { checkpointDiffQueryOptions } from "~/lib/providerReactQuery";
 import { cn } from "~/lib/utils";
@@ -21,6 +29,23 @@ import { ToggleGroup, Toggle } from "./ui/toggle-group";
 
 type DiffRenderMode = "stacked" | "split";
 type DiffThemeType = "light" | "dark";
+type DiffSurfaceMode = "review" | "summary" | "total";
+
+interface PatchSummaryFileStat {
+  path: string;
+  additions: number;
+  deletions: number;
+}
+
+interface PatchSummary {
+  filesChanged: number;
+  additions: number;
+  deletions: number;
+  renamedFiles: number;
+  createdFiles: number;
+  deletedFiles: number;
+  topFiles: PatchSummaryFileStat[];
+}
 
 const DIFF_PANEL_UNSAFE_CSS = `
 [data-diffs-header],
@@ -159,6 +184,102 @@ function formatTurnChipTimestamp(isoDate: string): string {
   }).format(new Date(isoDate));
 }
 
+function summarizePatch(patch: string | undefined): PatchSummary | null {
+  if (!patch || patch.trim().length === 0) {
+    return null;
+  }
+
+  const lines = patch.split(/\r?\n/);
+  const touchedPaths = new Set<string>();
+  const perFileStats = new Map<string, PatchSummaryFileStat>();
+  let currentPath: string | null = null;
+  let additions = 0;
+  let deletions = 0;
+  let renamedFiles = 0;
+  let createdFiles = 0;
+  let deletedFiles = 0;
+
+  const ensureFileStat = (path: string): PatchSummaryFileStat => {
+    const existing = perFileStats.get(path);
+    if (existing) return existing;
+    const created: PatchSummaryFileStat = { path, additions: 0, deletions: 0 };
+    perFileStats.set(path, created);
+    return created;
+  };
+
+  for (const line of lines) {
+    if (line.startsWith("diff --git ")) {
+      const match = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
+      if (match) {
+        currentPath = match[2] ?? match[1] ?? null;
+      } else {
+        currentPath = null;
+      }
+      if (currentPath) {
+        touchedPaths.add(currentPath);
+        ensureFileStat(currentPath);
+      }
+      continue;
+    }
+
+    if (line.startsWith("rename from ")) {
+      renamedFiles += 1;
+      continue;
+    }
+    if (line.startsWith("new file mode ")) {
+      createdFiles += 1;
+      continue;
+    }
+    if (line.startsWith("deleted file mode ")) {
+      deletedFiles += 1;
+      continue;
+    }
+
+    if (line.startsWith("+++ ") || line.startsWith("--- ")) {
+      continue;
+    }
+
+    if (line.startsWith("+")) {
+      additions += 1;
+      if (currentPath) {
+        const stat = ensureFileStat(currentPath);
+        stat.additions += 1;
+      }
+      continue;
+    }
+    if (line.startsWith("-")) {
+      deletions += 1;
+      if (currentPath) {
+        const stat = ensureFileStat(currentPath);
+        stat.deletions += 1;
+      }
+    }
+  }
+
+  const filesChanged = Math.max(touchedPaths.size, perFileStats.size);
+  const topFiles = Array.from(perFileStats.values())
+    .filter((file) => file.additions > 0 || file.deletions > 0)
+    .toSorted((left, right) => {
+      const leftMagnitude = left.additions + left.deletions;
+      const rightMagnitude = right.additions + right.deletions;
+      if (leftMagnitude !== rightMagnitude) {
+        return rightMagnitude - leftMagnitude;
+      }
+      return left.path.localeCompare(right.path, undefined, { numeric: true, sensitivity: "base" });
+    })
+    .slice(0, 8);
+
+  return {
+    filesChanged,
+    additions,
+    deletions,
+    renamedFiles,
+    createdFiles,
+    deletedFiles,
+    topFiles,
+  };
+}
+
 interface DiffPanelProps {
   mode?: "inline" | "sheet" | "sidebar";
 }
@@ -169,6 +290,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
   const navigate = useNavigate();
   const usesDesktopAppChrome = isElectronRuntime();
   const { resolvedTheme } = useTheme();
+  const [surfaceMode, setSurfaceMode] = useState<DiffSurfaceMode>("review");
   const [diffRenderMode, setDiffRenderMode] = useState<DiffRenderMode>("stacked");
   const patchViewportRef = useRef<HTMLDivElement>(null);
   const turnStripRef = useRef<HTMLDivElement>(null);
@@ -238,54 +360,81 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     const latest = Math.max(...turnCounts);
     return latest > 0 ? latest : undefined;
   }, [inferredCheckpointTurnCountByTurnId, orderedTurnDiffSummaries]);
-  const conversationCheckpointRange = useMemo(
+  const fullThreadCheckpointRange = useMemo(
     () =>
-      !selectedTurn && typeof conversationCheckpointTurnCount === "number"
+      typeof conversationCheckpointTurnCount === "number"
         ? {
             fromTurnCount: 0,
             toTurnCount: conversationCheckpointTurnCount,
           }
         : null,
-    [conversationCheckpointTurnCount, selectedTurn],
+    [conversationCheckpointTurnCount],
   );
-  const activeCheckpointRange = selectedTurn
-    ? selectedCheckpointRange
-    : conversationCheckpointRange;
+  const reviewCheckpointRange = selectedTurn ? selectedCheckpointRange : fullThreadCheckpointRange;
   const conversationCacheScope = useMemo(() => {
-    if (selectedTurn || orderedTurnDiffSummaries.length === 0) {
+    if (orderedTurnDiffSummaries.length === 0) {
       return null;
     }
     return `conversation:${orderedTurnDiffSummaries.map((summary) => summary.turnId).join(",")}`;
-  }, [orderedTurnDiffSummaries, selectedTurn]);
-  const activeCheckpointDiffQuery = useQuery(
+  }, [orderedTurnDiffSummaries]);
+  const reviewCheckpointDiffQuery = useQuery(
     checkpointDiffQueryOptions({
       threadId: activeThreadId,
-      fromTurnCount: activeCheckpointRange?.fromTurnCount ?? null,
-      toTurnCount: activeCheckpointRange?.toTurnCount ?? null,
+      fromTurnCount: reviewCheckpointRange?.fromTurnCount ?? null,
+      toTurnCount: reviewCheckpointRange?.toTurnCount ?? null,
       cacheScope: selectedTurn ? `turn:${selectedTurn.turnId}` : conversationCacheScope,
     }),
   );
-  const selectedTurnCheckpointDiff = selectedTurn
-    ? activeCheckpointDiffQuery.data?.diff
-    : undefined;
-  const conversationCheckpointDiff = selectedTurn
-    ? undefined
-    : activeCheckpointDiffQuery.data?.diff;
-  const isLoadingCheckpointDiff = activeCheckpointDiffQuery.isLoading;
-  const checkpointDiffError =
-    activeCheckpointDiffQuery.error instanceof Error
-      ? activeCheckpointDiffQuery.error.message
-      : activeCheckpointDiffQuery.error
-        ? "Failed to load checkpoint diff."
-        : null;
-
-  const selectedPatch = selectedTurn ? selectedTurnCheckpointDiff : conversationCheckpointDiff;
-  const hasResolvedPatch = typeof selectedPatch === "string";
-  const hasNoNetChanges = hasResolvedPatch && selectedPatch.trim().length === 0;
-  const renderablePatch = useMemo(
-    () => getRenderablePatch(selectedPatch, `diff-panel:${resolvedTheme}`),
-    [resolvedTheme, selectedPatch],
+  const totalCheckpointDiffQuery = useQuery(
+    checkpointDiffQueryOptions({
+      threadId: activeThreadId,
+      fromTurnCount: fullThreadCheckpointRange?.fromTurnCount ?? null,
+      toTurnCount: fullThreadCheckpointRange?.toTurnCount ?? null,
+      cacheScope: conversationCacheScope ? `${conversationCacheScope}:total` : "conversation:total",
+    }),
   );
+
+  const reviewPatch = reviewCheckpointDiffQuery.data?.diff;
+  const totalPatch = totalCheckpointDiffQuery.data?.diff;
+  const activePatch = surfaceMode === "review" ? reviewPatch : totalPatch;
+  const activeDiffIsLoading =
+    surfaceMode === "review" ? reviewCheckpointDiffQuery.isLoading : totalCheckpointDiffQuery.isLoading;
+  const activeDiffError =
+    surfaceMode === "review"
+      ? reviewCheckpointDiffQuery.error instanceof Error
+        ? reviewCheckpointDiffQuery.error.message
+        : reviewCheckpointDiffQuery.error
+          ? "Failed to load checkpoint diff."
+          : null
+      : totalCheckpointDiffQuery.error instanceof Error
+        ? totalCheckpointDiffQuery.error.message
+        : totalCheckpointDiffQuery.error
+          ? "Failed to load total diff."
+          : null;
+  const canShowTotal = Boolean(activeThreadId && fullThreadCheckpointRange);
+  const canShowSummary = canShowTotal;
+
+  useEffect(() => {
+    if (!canShowTotal && (surfaceMode === "total" || surfaceMode === "summary")) {
+      setSurfaceMode("review");
+    }
+  }, [canShowTotal, surfaceMode]);
+
+  const hasResolvedPatch = typeof activePatch === "string";
+  const hasNoNetChanges = hasResolvedPatch && activePatch.trim().length === 0;
+  const renderablePatch = useMemo(
+    () => getRenderablePatch(activePatch, `diff-panel:${surfaceMode}:${resolvedTheme}`),
+    [activePatch, resolvedTheme, surfaceMode],
+  );
+  const patchSummary = useMemo(() => summarizePatch(totalPatch), [totalPatch]);
+  const hasResolvedSummaryPatch = typeof totalPatch === "string";
+  const hasNoSummaryChanges = hasResolvedSummaryPatch && totalPatch.trim().length === 0;
+  const summaryError =
+    totalCheckpointDiffQuery.error instanceof Error
+      ? totalCheckpointDiffQuery.error.message
+      : totalCheckpointDiffQuery.error
+        ? "Failed to load total diff."
+        : null;
   const renderableFiles = useMemo(() => {
     if (!renderablePatch || renderablePatch.kind !== "files") {
       return [];
@@ -322,6 +471,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
 
   const selectTurn = (turnId: TurnId) => {
     if (!activeThread) return;
+    setSurfaceMode("review");
     void navigate({
       to: "/$threadId",
       params: { threadId: activeThread.id },
@@ -333,6 +483,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
   };
   const selectWholeConversation = () => {
     if (!activeThread) return;
+    setSurfaceMode("review");
     void navigate({
       to: "/$threadId",
       params: { threadId: activeThread.id },
@@ -494,7 +645,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
         </div>
       </div>
       <div
-        className="desktop-top-edge-actions-safe shrink-0 [-webkit-app-region:no-drag]"
+        className="desktop-top-edge-actions-safe flex shrink-0 items-center gap-2 [-webkit-app-region:no-drag]"
         data-testid="diff-panel-header-actions"
       >
         <ToggleGroup
@@ -539,6 +690,57 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
         >
           {headerRow}
         </div>
+        <div
+          className="desktop-top-edge-actions-safe flex h-10 items-end gap-5 border-t border-border/60 px-4 [-webkit-app-region:no-drag]"
+          data-testid="diff-panel-surface-tabs"
+        >
+          <button
+            type="button"
+            className={cn(
+              "inline-flex h-9 items-center gap-1.5 border-b-2 px-0.5 text-[13px] font-semibold transition-colors",
+              surfaceMode === "summary"
+                ? "border-foreground text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground",
+              !canShowSummary && "cursor-not-allowed opacity-45 hover:text-muted-foreground",
+            )}
+            disabled={!canShowSummary}
+            onClick={() => setSurfaceMode("summary")}
+            aria-pressed={surfaceMode === "summary"}
+          >
+            <AlignLeftIcon className="size-3.5" />
+            <span>Summary</span>
+          </button>
+          <button
+            type="button"
+            className={cn(
+              "inline-flex h-9 items-center gap-1.5 border-b-2 px-0.5 text-[13px] font-semibold transition-colors",
+              surfaceMode === "review"
+                ? "border-foreground text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground",
+            )}
+            onClick={() => setSurfaceMode("review")}
+            aria-pressed={surfaceMode === "review"}
+          >
+            <FileDiffIcon className="size-3.5" />
+            <span>Review</span>
+          </button>
+          <button
+            type="button"
+            className={cn(
+              "inline-flex h-9 items-center gap-1.5 border-b-2 px-0.5 text-[13px] font-semibold transition-colors",
+              surfaceMode === "total"
+                ? "border-foreground text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground",
+              !canShowTotal && "cursor-not-allowed opacity-45 hover:text-muted-foreground",
+            )}
+            disabled={!canShowTotal}
+            onClick={() => setSurfaceMode("total")}
+            aria-pressed={surfaceMode === "total"}
+          >
+            <GitForkIcon className="size-3.5" />
+            <span>Total</span>
+          </button>
+        </div>
       </div>
 
       {!activeThread ? (
@@ -551,79 +753,168 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
         </div>
       ) : (
         <>
-          <div
-            ref={patchViewportRef}
-            className="diff-panel-viewport min-h-0 min-w-0 flex-1 overflow-hidden"
-          >
-            {checkpointDiffError && !renderablePatch && (
-              <div className="px-3">
-                <p className="mb-2 text-[11px] text-red-500/80">{checkpointDiffError}</p>
-              </div>
-            )}
-            {!renderablePatch ? (
-              <div className="flex h-full items-center justify-center px-3 py-2 text-xs text-muted-foreground/70">
-                <p>
-                  {isLoadingCheckpointDiff
-                    ? "Loading checkpoint diff..."
-                    : hasNoNetChanges
-                      ? "No net changes in this selection."
-                      : "No patch available for this selection."}
+          {surfaceMode === "summary" ? (
+            <div className="diff-panel-viewport min-h-0 min-w-0 flex-1 overflow-auto p-3">
+              <div className="rounded-md border border-border/70 bg-background/70 p-3">
+                <p className="text-xs font-semibold tracking-wide text-foreground">Summary</p>
+                <p className="mt-1 text-[11px] text-muted-foreground/75">
+                  Generated from the total thread diff.
                 </p>
-              </div>
-            ) : renderablePatch.kind === "files" ? (
-              <Virtualizer
-                className="diff-render-surface h-full min-h-0 overflow-auto px-2 pb-2"
-                config={{
-                  overscrollSize: 600,
-                  intersectionObserverMargin: 1200,
-                }}
-              >
-                {renderableFiles.map((fileDiff) => {
-                  const normalizedFileDiff = normalizeFileDiffLanguage(fileDiff);
-                  const filePath = resolveFileDiffPath(fileDiff);
-                  const fileKey = buildFileDiffRenderKey(fileDiff);
-                  const themedFileKey = `${fileKey}:${resolvedTheme}`;
-                  return (
-                    <div
-                      key={themedFileKey}
-                      data-diff-file-path={filePath}
-                      className="diff-render-file mb-2 rounded-md first:mt-2 last:mb-0"
-                      onClickCapture={(event) => {
-                        const nativeEvent = event.nativeEvent as MouseEvent;
-                        const composedPath = nativeEvent.composedPath?.() ?? [];
-                        const clickedHeader = composedPath.some((node) => {
-                          if (!(node instanceof Element)) return false;
-                          return node.hasAttribute("data-title");
-                        });
-                        if (!clickedHeader) return;
-                        openDiffFileInEditor(filePath);
-                      }}
-                    >
-                      <FileDiff
-                        fileDiff={normalizedFileDiff}
-                        options={{
-                          diffStyle: diffRenderMode === "split" ? "split" : "unified",
-                          lineDiffType: "none",
-                          theme: resolveDiffThemeName(resolvedTheme),
-                          themeType: resolvedTheme as DiffThemeType,
-                          unsafeCSS: DIFF_PANEL_UNSAFE_CSS,
-                        }}
-                      />
+                {summaryError ? (
+                  <p className="mt-3 text-[11px] text-red-500/80">{summaryError}</p>
+                ) : totalCheckpointDiffQuery.isLoading ? (
+                  <p className="mt-3 text-[11px] text-muted-foreground/80">Loading summary...</p>
+                ) : hasNoSummaryChanges ? (
+                  <p className="mt-3 text-[11px] text-muted-foreground/80">No changes to summarize.</p>
+                ) : !patchSummary ? (
+                  <p className="mt-3 text-[11px] text-muted-foreground/80">
+                    Summary unavailable for the current diff.
+                  </p>
+                ) : (
+                  <div className="mt-3 space-y-3 text-[11px]">
+                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                      <div className="rounded border border-border/70 bg-background px-2 py-1.5">
+                        <p className="text-[10px] uppercase tracking-wide text-muted-foreground/75">
+                          Files
+                        </p>
+                        <p className="text-sm font-medium text-foreground">{patchSummary.filesChanged}</p>
+                      </div>
+                      <div className="rounded border border-border/70 bg-background px-2 py-1.5">
+                        <p className="text-[10px] uppercase tracking-wide text-muted-foreground/75">Added</p>
+                        <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
+                          +{patchSummary.additions}
+                        </p>
+                      </div>
+                      <div className="rounded border border-border/70 bg-background px-2 py-1.5">
+                        <p className="text-[10px] uppercase tracking-wide text-muted-foreground/75">
+                          Deleted
+                        </p>
+                        <p className="text-sm font-medium text-rose-600 dark:text-rose-400">
+                          -{patchSummary.deletions}
+                        </p>
+                      </div>
                     </div>
-                  );
-                })}
-              </Virtualizer>
-            ) : (
-              <div className="h-full overflow-auto p-2">
-                <div className="space-y-2">
-                  <p className="text-[11px] text-muted-foreground/75">{renderablePatch.reason}</p>
-                  <pre className="max-h-[72vh] overflow-auto rounded-md border border-border/70 bg-background/70 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground/90">
-                    {renderablePatch.text}
-                  </pre>
-                </div>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                      <p className="rounded border border-border/70 bg-background px-2 py-1.5 text-muted-foreground/85">
+                        Renamed files: <span className="font-medium text-foreground">{patchSummary.renamedFiles}</span>
+                      </p>
+                      <p className="rounded border border-border/70 bg-background px-2 py-1.5 text-muted-foreground/85">
+                        Created files: <span className="font-medium text-foreground">{patchSummary.createdFiles}</span>
+                      </p>
+                      <p className="rounded border border-border/70 bg-background px-2 py-1.5 text-muted-foreground/85">
+                        Deleted files: <span className="font-medium text-foreground">{patchSummary.deletedFiles}</span>
+                      </p>
+                    </div>
+                    {patchSummary.topFiles.length > 0 && (
+                      <div className="space-y-1">
+                        <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/75">
+                          Most changed files
+                        </p>
+                        <ul className="space-y-1">
+                          {patchSummary.topFiles.map((file) => (
+                            <li
+                              key={file.path}
+                              className="flex items-center justify-between rounded border border-border/60 bg-background px-2 py-1"
+                            >
+                              <button
+                                type="button"
+                                className="truncate text-left text-foreground hover:text-primary hover:underline"
+                                title={file.path}
+                                onClick={() => openDiffFileInEditor(file.path)}
+                              >
+                                {file.path}
+                              </button>
+                              <span className="ml-2 shrink-0 text-[10px] text-muted-foreground/80">
+                                +{file.additions} / -{file.deletions}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            </div>
+          ) : (
+            <div
+              ref={patchViewportRef}
+              className="diff-panel-viewport min-h-0 min-w-0 flex-1 overflow-hidden"
+            >
+              {activeDiffError && !renderablePatch && (
+                <div className="px-3">
+                  <p className="mb-2 text-[11px] text-red-500/80">{activeDiffError}</p>
+                </div>
+              )}
+              {!renderablePatch ? (
+                <div className="flex h-full items-center justify-center px-3 py-2 text-xs text-muted-foreground/70">
+                  <p>
+                    {activeDiffIsLoading
+                      ? surfaceMode === "total"
+                        ? "Loading total diff..."
+                        : "Loading checkpoint diff..."
+                      : hasNoNetChanges
+                        ? surfaceMode === "total"
+                          ? "No total changes in this thread."
+                          : "No net changes in this selection."
+                        : "No patch available for this selection."}
+                  </p>
+                </div>
+              ) : renderablePatch.kind === "files" ? (
+                <Virtualizer
+                  className="diff-render-surface h-full min-h-0 overflow-auto px-2 pb-2"
+                  config={{
+                    overscrollSize: 600,
+                    intersectionObserverMargin: 1200,
+                  }}
+                >
+                  {renderableFiles.map((fileDiff) => {
+                    const normalizedFileDiff = normalizeFileDiffLanguage(fileDiff);
+                    const filePath = resolveFileDiffPath(fileDiff);
+                    const fileKey = buildFileDiffRenderKey(fileDiff);
+                    const themedFileKey = `${fileKey}:${resolvedTheme}`;
+                    return (
+                      <div
+                        key={themedFileKey}
+                        data-diff-file-path={filePath}
+                        className="diff-render-file mb-2 rounded-md first:mt-2 last:mb-0"
+                        onClickCapture={(event) => {
+                          const nativeEvent = event.nativeEvent as MouseEvent;
+                          const composedPath = nativeEvent.composedPath?.() ?? [];
+                          const clickedHeader = composedPath.some((node) => {
+                            if (!(node instanceof Element)) return false;
+                            return node.hasAttribute("data-title");
+                          });
+                          if (!clickedHeader) return;
+                          openDiffFileInEditor(filePath);
+                        }}
+                      >
+                        <FileDiff
+                          fileDiff={normalizedFileDiff}
+                          options={{
+                            diffStyle: diffRenderMode === "split" ? "split" : "unified",
+                            lineDiffType: "none",
+                            theme: resolveDiffThemeName(resolvedTheme),
+                            themeType: resolvedTheme as DiffThemeType,
+                            unsafeCSS: DIFF_PANEL_UNSAFE_CSS,
+                          }}
+                        />
+                      </div>
+                    );
+                  })}
+                </Virtualizer>
+              ) : (
+                <div className="h-full overflow-auto p-2">
+                  <div className="space-y-2">
+                    <p className="text-[11px] text-muted-foreground/75">{renderablePatch.reason}</p>
+                    <pre className="max-h-[72vh] overflow-auto rounded-md border border-border/70 bg-background/70 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground/90">
+                      {renderablePatch.text}
+                    </pre>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </>
       )}
     </div>

@@ -38,6 +38,13 @@
       "browser": "./src/branding.ts",
       "import": "./src/branding.ts",
       "default": "./src/branding.ts"
+    },
+    "./chatThreads": {
+      "types": "./src/chatThreads.ts",
+      "development": "./src/chatThreads.ts",
+      "browser": "./src/chatThreads.ts",
+      "import": "./src/chatThreads.ts",
+      "default": "./src/chatThreads.ts"
     }
   },
   "scripts": {

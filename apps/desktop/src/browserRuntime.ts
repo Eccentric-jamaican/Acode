@@ -237,6 +237,7 @@ const MAX_TEXT_LENGTH = 20_000;
 const WAIT_POLL_INTERVAL_MS = 100;
 const ATTACHED_BOUNDS_REAPPLY_DELAYS_MS = [0, 75, 200, 500] as const;
 const INTEGRATED_BROWSER_VIEWPORT_SELECTOR = '[data-integrated-browser-native-viewport="true"]';
+const DEFAULT_NEW_TAB_URL = "https://www.google.com";
 
 interface BrowserTabRuntimeRecord {
   tabId: BrowserTabId;
@@ -541,7 +542,9 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
   async newTab(projectId: ProjectId, url?: string): Promise<BrowserSessionSnapshot> {
     const projectRuntime = await this.ensureRuntime(projectId);
     const initialUrl =
-      typeof url === "string" && url.trim().length > 0 ? this.normalizeUrl(url) : "about:blank";
+      typeof url === "string" && url.trim().length > 0
+        ? this.normalizeUrl(url)
+        : DEFAULT_NEW_TAB_URL;
     await this.createTab(projectRuntime, { url: initialUrl, activate: true });
 
     if (this.window && this.paneOpen && this.paneProjectId === projectId && this.paneBounds) {
@@ -584,7 +587,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     tab.view.webContents.close({ waitForBeforeUnload: false });
 
     if (projectRuntime.tabOrder.length === 0) {
-      await this.createTab(projectRuntime, { url: "about:blank", activate: true });
+      await this.createTab(projectRuntime, { url: DEFAULT_NEW_TAB_URL, activate: true });
     } else if (
       projectRuntime.activeTabId === tabId ||
       !projectRuntime.activeTabId ||
@@ -886,7 +889,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
       activeTabId: null,
     };
     this.runtimes.set(projectId, projectRuntime);
-    await this.createTab(projectRuntime, { url: "about:blank", activate: true });
+    await this.createTab(projectRuntime, { url: DEFAULT_NEW_TAB_URL, activate: true });
     return projectRuntime;
   }
 
@@ -894,7 +897,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     const projectRuntime = await this.ensureRuntime(projectId);
     const activeTab = this.getActiveTab(projectRuntime);
     if (!activeTab) {
-      return this.createTab(projectRuntime, { url: "about:blank", activate: true });
+      return this.createTab(projectRuntime, { url: DEFAULT_NEW_TAB_URL, activate: true });
     }
     return activeTab;
   }

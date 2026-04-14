@@ -110,6 +110,7 @@ const CHAT_SELECTION_IGNORE_SELECTOR =
   "button, summary, [role='button'], [role='menuitem'], input, textarea, select, option, [data-chat-selection-ignore='true']";
 
 export interface MessagesTimelineProps {
+  isFocusedPane?: boolean;
   hasMessages: boolean;
   isWorking: boolean;
   activeTurnInProgress: boolean;
@@ -854,6 +855,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
 
 export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTimelineProps) {
   const {
+    isFocusedPane = true,
     hasMessages,
     isWorking,
     activeTurnInProgress,
@@ -904,14 +906,15 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
   }, []);
 
   const updatePinnedSelectionMarkers = useCallback(() => {
-    if (typeof document === "undefined" || isTimelineScrollingRef.current) {
+    const timelineRoot = timelineRootRef.current;
+    if (!timelineRoot || typeof document === "undefined" || isTimelineScrollingRef.current) {
       hidePinnedSelectionMarkers();
       return;
     }
 
     const nextMarkers = pinnedSelections.flatMap((selection) => {
       const selector = `[${CHAT_SELECTION_SOURCE_KIND_ATTRIBUTE}="${selection.sourceKind}"][${CHAT_SELECTION_SOURCE_ID_ATTRIBUTE}="${selection.sourceId}"]`;
-      const region = document.querySelector<HTMLElement>(selector);
+      const region = timelineRoot.querySelector<HTMLElement>(selector);
       if (!region || !region.isConnected) {
         return [];
       }
@@ -958,7 +961,9 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
   }, [hidePinnedSelectionMarkers, pinnedSelections]);
 
   const updateSelectionActionState = useCallback(() => {
-    if (selectionActionPointerDownRef.current) {
+    const timelineRoot = timelineRootRef.current;
+    if (!isFocusedPane || !timelineRoot || selectionActionPointerDownRef.current) {
+      clearSelectionAction();
       return;
     }
 
@@ -972,6 +977,10 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
     const startRegion = getSelectionRegionElement(range.startContainer);
     const endRegion = getSelectionRegionElement(range.endContainer);
     if (!startRegion || startRegion !== endRegion || !startRegion.isConnected) {
+      clearSelectionAction();
+      return;
+    }
+    if (!timelineRoot.contains(startRegion) || !timelineRoot.contains(endRegion)) {
       clearSelectionAction();
       return;
     }
@@ -1031,7 +1040,7 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
 
     selectionActionStateRef.current = nextState;
     setSelectionActionState(nextState);
-  }, [clearSelectionAction]);
+  }, [clearSelectionAction, isFocusedPane]);
 
   const scheduleSelectionActionUpdate = useCallback(() => {
     if (selectionActionFrameRef.current !== null) {
@@ -1143,6 +1152,22 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
     };
   }, [
     schedulePinnedSelectionMarkersAfterScroll,
+    schedulePinnedSelectionMarkersUpdate,
+    scheduleSelectionActionUpdate,
+  ]);
+
+  useEffect(() => {
+    if (!isFocusedPane) {
+      clearSelectionAction();
+      hidePinnedSelectionMarkers();
+      return;
+    }
+    scheduleSelectionActionUpdate();
+    schedulePinnedSelectionMarkersUpdate();
+  }, [
+    clearSelectionAction,
+    hidePinnedSelectionMarkers,
+    isFocusedPane,
     schedulePinnedSelectionMarkersUpdate,
     scheduleSelectionActionUpdate,
   ]);

@@ -57,9 +57,6 @@ import {
 import { projectSearchEntriesQueryOptions } from "~/lib/projectReactQuery";
 import { serverConfigQueryOptions, serverQueryKeys } from "~/lib/serverReactQuery";
 import {
-  buildCommandSearchBlob,
-  buildSkillSearchBlob,
-  normalizeProviderDiscoveryText,
   resolveProviderDiscoveryCwd,
 } from "~/lib/providerDiscovery";
 import {
@@ -78,19 +75,11 @@ import {
   withRightPanelMode,
 } from "../diffRouteSearch";
 import {
-  type ComposerSlashCommand,
   type ComposerTrigger,
-  type ComposerTriggerKind,
   detectComposerTrigger,
   expandCollapsedComposerCursor,
-  parseStandaloneComposerSlashCommand,
   replaceTextRange,
 } from "../composer-logic";
-import {
-  filterComposerSlashCommands,
-  getAvailableComposerSlashCommands,
-  getProviderNativeSlashCommandSearchTerms,
-} from "../composerSlashCommands";
 import {
   derivePendingApprovals,
   derivePendingUserInputs,
@@ -132,11 +121,12 @@ import {
   type Thread,
   type TurnDiffSummary,
 } from "../types";
-import { basenameOfPath, getVscodeIconUrlForEntry } from "../vscode-icons";
 import { useTheme } from "../hooks/useTheme";
 import { useThreadHandoff } from "../hooks/useThreadHandoff";
 import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { useIsDisposableThread } from "../hooks/useIsDisposableThread";
+import { useComposerCommandMenuItems } from "../hooks/useComposerCommandMenuItems";
+import { useComposerSlashCommands } from "../hooks/useComposerSlashCommands";
 import BranchToolbar from "./BranchToolbar";
 import GitActionsControl from "./GitActionsControl";
 import { ThreadWorktreeHandoffDialog } from "./ThreadWorktreeHandoffDialog";
@@ -152,12 +142,10 @@ import {
   EllipsisIcon,
   ChevronDownIcon,
   CircleAlertIcon,
-  FileIcon,
-  FolderIcon,
-  DiffIcon,
   FolderClosedIcon,
   GlobeIcon,
   KanbanSquareIcon,
+  PanelLeftIcon,
   PlusIcon,
   Maximize2Icon,
   ArrowLeftRight,
@@ -197,7 +185,6 @@ import {
 import { cn, isMacPlatform, isWindowsPlatform } from "~/lib/utils";
 import { Badge } from "./ui/badge";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
-import { Command, CommandItem, CommandList } from "./ui/command";
 import { toastManager } from "./ui/toast";
 import {
   canCreateThreadHandoff,
@@ -246,6 +233,11 @@ import {
   buildExpandedImagePreview,
   type ExpandedImagePreview,
 } from "./chat/ExpandedImagePreview";
+import {
+  ComposerCommandMenu,
+  type ComposerCommandItem,
+} from "./chat/ComposerCommandMenu";
+import { ComposerExtrasMenu } from "./chat/ComposerExtrasMenu";
 
 const LAST_EDITOR_KEY = "t3code:last-editor";
 const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by-project";
@@ -363,47 +355,6 @@ function collectUserMessageBlobPreviewUrls(message: ChatMessage): string[] {
   return previewUrls;
 }
 
-type ComposerCommandItem =
-  | {
-      id: string;
-      type: "path";
-      path: string;
-      pathKind: ProjectEntry["kind"];
-      label: string;
-      description: string;
-    }
-  | {
-      id: string;
-      type: "slash-command";
-      command: ComposerSlashCommand;
-      label: string;
-      description: string;
-    }
-  | {
-      id: string;
-      type: "provider-native-command";
-      provider: ProviderKind;
-      command: ProviderNativeCommandDescriptor["name"];
-      label: string;
-      description: string;
-    }
-  | {
-      id: string;
-      type: "skill";
-      skill: ProviderSkillDescriptor;
-      label: string;
-      description: string;
-    }
-  | {
-      id: string;
-      type: "model";
-      provider: ProviderKind;
-      model: ModelSlug;
-      label: string;
-      description: string;
-      showFastBadge: boolean;
-    };
-
 type SendPhase = "idle" | "preparing-worktree" | "sending-turn";
 
 type QueuedComposerChatTurn = {
@@ -508,139 +459,6 @@ function cloneComposerImageForRetry(image: ComposerImageAttachment): ComposerIma
   }
 }
 
-const VscodeEntryIcon = memo(function VscodeEntryIcon(props: {
-  pathValue: string;
-  kind: "file" | "directory";
-  theme: "light" | "dark";
-  className?: string;
-}) {
-  const [failedIconUrl, setFailedIconUrl] = useState<string | null>(null);
-  const iconUrl = useMemo(
-    () => getVscodeIconUrlForEntry(props.pathValue, props.kind, props.theme),
-    [props.kind, props.pathValue, props.theme],
-  );
-  const failed = failedIconUrl === iconUrl;
-
-  if (failed) {
-    return props.kind === "directory" ? (
-      <FolderIcon className={cn("size-4 text-muted-foreground/80", props.className)} />
-    ) : (
-      <FileIcon className={cn("size-4 text-muted-foreground/80", props.className)} />
-    );
-  }
-
-  return (
-    <img
-      src={iconUrl}
-      alt=""
-      aria-hidden="true"
-      className={cn("size-4 shrink-0", props.className)}
-      loading="lazy"
-      onError={() => setFailedIconUrl(iconUrl)}
-    />
-  );
-});
-
-const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
-  item: ComposerCommandItem;
-  resolvedTheme: "light" | "dark";
-  isActive: boolean;
-  onSelect: (item: ComposerCommandItem) => void;
-}) {
-  return (
-    <CommandItem
-      value={props.item.id}
-      className={cn(
-        "cursor-pointer select-none gap-2",
-        props.isActive && "bg-accent text-accent-foreground",
-      )}
-      onMouseDown={(event) => {
-        event.preventDefault();
-      }}
-      onClick={() => {
-        props.onSelect(props.item);
-      }}
-    >
-      {props.item.type === "path" ? (
-        <VscodeEntryIcon
-          pathValue={props.item.path}
-          kind={props.item.pathKind}
-          theme={props.resolvedTheme}
-        />
-      ) : null}
-      {props.item.type === "slash-command" ? (
-        <BotIcon className="size-4 text-muted-foreground/80" />
-      ) : null}
-      {props.item.type === "provider-native-command" ? (
-        <BotIcon className="size-4 text-muted-foreground/80" />
-      ) : null}
-      {props.item.type === "skill" ? <KanbanSquareIcon className="size-4 text-muted-foreground/80" /> : null}
-      {props.item.type === "model" ? (
-        <Badge variant="outline" className="px-1.5 py-0 text-[10px]">
-          model
-        </Badge>
-      ) : null}
-      <span className="flex min-w-0 items-center gap-1.5 truncate">
-        {props.item.type === "model" && props.item.showFastBadge ? (
-          <ZapIcon className="size-3.5 shrink-0 text-amber-500" />
-        ) : null}
-        <span className="truncate">{props.item.label}</span>
-      </span>
-      <span className="truncate text-muted-foreground/70 text-xs">{props.item.description}</span>
-    </CommandItem>
-  );
-});
-
-const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
-  items: ComposerCommandItem[];
-  resolvedTheme: "light" | "dark";
-  isLoading: boolean;
-  triggerKind: ComposerTriggerKind | null;
-  activeItemId: string | null;
-  onHighlightedItemChange: (itemId: string | null) => void;
-  onSelect: (item: ComposerCommandItem) => void;
-}) {
-  return (
-    <Command
-      mode="none"
-      onItemHighlighted={(highlightedValue) => {
-        props.onHighlightedItemChange(
-          typeof highlightedValue === "string" ? highlightedValue : null,
-        );
-      }}
-    >
-      <div className="relative overflow-hidden rounded-xl border border-border/80 bg-popover/96 shadow-lg/8 backdrop-blur-xs">
-        <CommandList className="max-h-64">
-          {props.items.map((item) => (
-            <ComposerCommandMenuItem
-              key={item.id}
-              item={item}
-              resolvedTheme={props.resolvedTheme}
-              isActive={props.activeItemId === item.id}
-              onSelect={props.onSelect}
-            />
-          ))}
-        </CommandList>
-        {props.items.length === 0 && (
-          <p className="px-3 py-2 text-muted-foreground/70 text-xs">
-            {props.isLoading
-              ? props.triggerKind === "path"
-                ? "Searching workspace files..."
-                : props.triggerKind === "skill"
-                  ? "Loading skills..."
-                  : "Loading commands..."
-              : props.triggerKind === "path"
-                ? "No matching files or folders."
-                : props.triggerKind === "skill"
-                  ? "No matching skill."
-                : "No matching command."}
-          </p>
-        )}
-      </div>
-    </Command>
-  );
-});
-
 interface ChatViewProps {
   threadId: ThreadId;
   paneScopeId?: string;
@@ -668,7 +486,7 @@ export default function ChatView({
   panelState,
   onToggleDiffPanel,
   onToggleBrowserPanel,
-  onOpenTurnDiffPanel,
+  onOpenTurnDiffPanel: _onOpenTurnDiffPanel,
   onMaximizeSurface,
   onSplitSurface,
 }: ChatViewProps) {
@@ -720,6 +538,7 @@ export default function ChatView({
   const syncComposerDraftPersistedAttachments = useComposerDraftStore(
     (store) => store.syncPersistedAttachments,
   );
+  const setProjectDraftThreadId = useComposerDraftStore((store) => store.setProjectDraftThreadId);
   const clearComposerDraftContent = useComposerDraftStore((store) => store.clearComposerContent);
   const clearDraftThread = useComposerDraftStore((store) => store.clearDraftThread);
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
@@ -902,6 +721,9 @@ export default function ChatView({
 
   const sessionProvider = activeThread?.session?.provider ?? null;
   const selectedProviderByThreadId = composerDraft.provider;
+  const inferredProviderFromThreadModel = activeThread
+    ? inferProviderFromModel(activeThread.model)
+    : null;
   const hasThreadStarted = Boolean(
     activeThread &&
     (activeThread.latestTurn !== null ||
@@ -911,9 +733,32 @@ export default function ChatView({
   const selectedServiceTierSetting = settings.codexServiceTier;
   const selectedServiceTier = resolveAppServiceTier(selectedServiceTierSetting);
   const lockedProvider: ProviderKind | null = hasThreadStarted
-    ? (sessionProvider ?? selectedProviderByThreadId ?? null)
+    ? (sessionProvider ?? inferredProviderFromThreadModel ?? selectedProviderByThreadId ?? null)
     : null;
-  const selectedProvider: ProviderKind = lockedProvider ?? selectedProviderByThreadId ?? "codex";
+  const selectedProvider: ProviderKind =
+    lockedProvider ?? selectedProviderByThreadId ?? inferredProviderFromThreadModel ?? "codex";
+
+  useEffect(() => {
+    if (!activeThread || !hasThreadStarted) {
+      return;
+    }
+    const fallbackProvider = sessionProvider ?? inferredProviderFromThreadModel;
+    if (
+      !fallbackProvider ||
+      fallbackProvider === "claudeAgent" ||
+      selectedProviderByThreadId === fallbackProvider
+    ) {
+      return;
+    }
+    setComposerDraftProvider(activeThread.id, fallbackProvider);
+  }, [
+    activeThread,
+    hasThreadStarted,
+    inferredProviderFromThreadModel,
+    selectedProviderByThreadId,
+    sessionProvider,
+    setComposerDraftProvider,
+  ]);
   const assistantDeliveryMode =
     selectedProvider === "opencode" || settings.enableAssistantStreaming
       ? "streaming"
@@ -1440,113 +1285,23 @@ export default function ChatView({
     () => providerNativeCommands.map((command) => command.name),
     [providerNativeCommands],
   );
+  const supportsFastSlashCommand = selectedProvider === "codex";
+  const canOfferReviewCommand = selectedProvider === "codex";
+  const canOfferForkCommand = selectedProvider === "codex";
   const providerSkills = providerSkillsQuery.data?.skills ?? EMPTY_PROVIDER_SKILLS;
-  const composerMenuItems = useMemo<ComposerCommandItem[]>(() => {
-    if (!composerTrigger) return [];
-    if (composerTrigger.kind === "path") {
-      return workspaceEntries.map((entry) => ({
-        id: `path:${entry.kind}:${entry.path}`,
-        type: "path",
-        path: entry.path,
-        pathKind: entry.kind,
-        label: basenameOfPath(entry.path),
-        description: entry.parentPath ?? "",
-      }));
-    }
-
-    if (composerTrigger.kind === "slash-command") {
-      const normalizedQuery = normalizeProviderDiscoveryText(composerTrigger.query);
-      const builtInItems = filterComposerSlashCommands(
-        composerTrigger.query,
-        getAvailableComposerSlashCommands({
-          provider: selectedProvider,
-          providerNativeCommandNames,
-        }),
-      ).map((definition) => ({
-        id: `slash:${definition.command}`,
-        type: "slash-command" as const,
-        command: definition.command,
-        label: definition.label,
-        description: definition.description,
-      }));
-      const providerCommandItems = providerNativeCommands
-        .filter((command) => {
-          if (!normalizedQuery) return true;
-          return (
-            buildCommandSearchBlob(command).includes(normalizedQuery) ||
-            getProviderNativeSlashCommandSearchTerms(selectedProvider, command.name).some((term) =>
-              term.includes(normalizedQuery),
-            )
-          );
-        })
-        .map((command) => ({
-          id: `provider-command:${selectedProvider}:${command.name}`,
-          type: "provider-native-command" as const,
-          provider: selectedProvider,
-          command: command.name,
-          label: `/${command.name}`,
-          description: command.description ?? `Run ${selectedProvider} native command`,
-        }));
-      const slashSkillItems: ComposerCommandItem[] =
-        selectedProvider === "claudeAgent"
-          ? providerSkills
-              .filter((skill) =>
-                normalizedQuery ? buildSkillSearchBlob(skill).includes(normalizedQuery) : true,
-              )
-              .map((skill) => ({
-                id: `skill:${skill.path}`,
-                type: "skill" as const,
-                skill,
-                label: skill.interface?.displayName ?? skill.name,
-                description: skill.interface?.shortDescription ?? skill.description ?? skill.path,
-              }))
-          : [];
-      return [...builtInItems, ...providerCommandItems, ...slashSkillItems];
-    }
-
-    if (composerTrigger.kind === "skill") {
-      const normalizedQuery = normalizeProviderDiscoveryText(composerTrigger.query);
-      return providerSkills
-        .filter((skill) =>
-          normalizedQuery ? buildSkillSearchBlob(skill).includes(normalizedQuery) : true,
-        )
-        .map((skill) => ({
-          id: `skill:${skill.path}`,
-          type: "skill",
-          skill,
-          label: skill.interface?.displayName ?? skill.name,
-          description: skill.interface?.shortDescription ?? skill.description ?? skill.path,
-        }));
-    }
-
-    return searchableModelOptions
-      .filter(({ searchSlug, searchName, searchProvider }) => {
-        const query = composerTrigger.query.trim().toLowerCase();
-        if (!query) return true;
-        return (
-          searchSlug.includes(query) || searchName.includes(query) || searchProvider.includes(query)
-        );
-      })
-      .map(({ provider, providerLabel, slug, name }) => ({
-        id: `model:${provider}:${slug}`,
-        type: "model",
-        provider,
-        model: slug,
-        label: name,
-        description: `${providerLabel} · ${slug}`,
-        showFastBadge:
-          provider === "codex" && shouldShowFastTierIcon(slug, selectedServiceTierSetting),
-      }));
-  }, [
+  const composerMenuItems = useComposerCommandMenuItems({
     composerTrigger,
-    providerNativeCommandNames,
+    provider: selectedProvider,
+    supportsFastSlashCommand,
+    canOfferReviewCommand,
+    canOfferForkCommand,
     providerNativeCommands,
+    providerNativeCommandNames,
     providerSkills,
-    searchableModelOptions,
-    selectedProvider,
-    selectedServiceTierSetting,
     workspaceEntries,
-  ]);
+    searchableModelOptions,
+    selectedServiceTierSetting,
+  });
   const composerMenuOpen = Boolean(composerTrigger);
   const activeComposerMenuItem = useMemo(
     () =>
@@ -2856,18 +2611,11 @@ export default function ChatView({
         dispatchMode,
       });
     }
-    const standaloneSlashCommand =
-      queuedChatTurn === null && composerImagesForSend.length === 0
-        ? parseStandaloneComposerSlashCommand(trimmed)
-        : null;
-    if (standaloneSlashCommand) {
-      await handleInteractionModeChange(standaloneSlashCommand);
-      promptRef.current = "";
-      setPrompt("");
-      setComposerHighlightedItemId(null);
-      setComposerCursor(0);
-      setComposerTrigger(null);
-      return true;
+    if (queuedChatTurn === null && composerImagesForSend.length === 0) {
+      const handledStandaloneSlashCommand = await handleStandaloneSlashCommand(trimmed);
+      if (handledStandaloneSlashCommand) {
+        return true;
+      }
     }
     if (!trimmed && composerImagesForSend.length === 0) {
       return false;
@@ -3999,6 +3747,93 @@ export default function ChatView({
     };
   }, [readComposerSnapshot]);
 
+  const setComposerPromptValue = useCallback(
+    (nextPrompt: string) => {
+      promptRef.current = nextPrompt;
+      setPrompt(nextPrompt);
+      const nextCursor = nextPrompt.length;
+      setComposerCursor(nextCursor);
+      setComposerTrigger(detectComposerTrigger(nextPrompt, nextCursor));
+      setComposerHighlightedItemId(null);
+      window.requestAnimationFrame(() => {
+        composerEditorRef.current?.focusAt(nextCursor);
+      });
+    },
+    [setPrompt],
+  );
+
+  const handleClearConversation = useCallback(async () => {
+    if (!activeProject) {
+      toastManager.add({
+        type: "warning",
+        title: "Clear is unavailable",
+        description: "Open a project before starting a fresh thread.",
+      });
+      return;
+    }
+    const nextThreadId = newThreadId();
+    const createdAt = new Date().toISOString();
+    setProjectDraftThreadId(activeProject.id, nextThreadId, {
+      createdAt,
+      branch: activeThread?.branch ?? null,
+      worktreePath: activeThread?.worktreePath ?? null,
+      envMode: activeThread?.worktreePath ? "worktree" : "local",
+      runtimeMode,
+      interactionMode,
+    });
+    await navigate({
+      to: "/$threadId",
+      params: { threadId: nextThreadId },
+    });
+  }, [
+    activeProject,
+    activeThread?.branch,
+    activeThread?.worktreePath,
+    interactionMode,
+    navigate,
+    runtimeMode,
+    setProjectDraftThreadId,
+  ]);
+
+  const handleStatusCommand = useCallback(() => {
+    const defaultMessage = `${selectedProvider} provider is ready.`;
+    toastManager.add({
+      type: activeProviderStatus?.status === "error" ? "error" : "info",
+      title: "Provider status",
+      description: activeProviderStatus?.message ?? defaultMessage,
+    });
+  }, [activeProviderStatus?.message, activeProviderStatus?.status, selectedProvider]);
+
+  const handleForkCommand = useCallback(async () => {
+    onHandoffToWorktree();
+  }, [onHandoffToWorktree]);
+
+  const { handleStandaloneSlashCommand, handleSlashCommandSelection } = useComposerSlashCommands({
+    selectedProvider,
+    providerNativeCommandNames,
+    supportsFastSlashCommand,
+    fastModeEnabled: selectedCodexFastModeEnabled,
+    handleInteractionModeChange,
+    handleClearConversation,
+    handleForkCommand,
+    handleStatusCommand,
+    setFastModeFromSlash: onCodexFastModeChange,
+    editorActions: {
+      resolveActiveComposerTrigger,
+      applyPromptReplacement,
+      clearComposerSlashDraft: () => {
+        promptRef.current = "";
+        setPrompt("");
+        setComposerHighlightedItemId(null);
+        setComposerCursor(0);
+        setComposerTrigger(null);
+      },
+      setComposerPromptValue,
+      scheduleComposerFocus,
+      setComposerHighlightedItemId,
+    },
+  });
+
   const onSelectComposerItem = useCallback(
     (item: ComposerCommandItem) => {
       if (composerSelectLockRef.current) return;
@@ -4022,22 +3857,7 @@ export default function ChatView({
         return;
       }
       if (item.type === "slash-command") {
-        if (item.command === "model") {
-          const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "/model ", {
-            expectedText: expectedToken,
-          });
-          if (applied) {
-            setComposerHighlightedItemId(null);
-          }
-          return;
-        }
-        void handleInteractionModeChange(item.command === "plan" ? "plan" : "default");
-        const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
-          expectedText: expectedToken,
-        });
-        if (applied) {
-          setComposerHighlightedItemId(null);
-        }
+        handleSlashCommandSelection(item);
         return;
       }
       if (item.type === "provider-native-command") {
@@ -4078,7 +3898,7 @@ export default function ChatView({
     },
     [
       applyPromptReplacement,
-      handleInteractionModeChange,
+      handleSlashCommandSelection,
       onProviderModelSelect,
       resolveActiveComposerTrigger,
       selectedProvider,
@@ -4334,6 +4154,7 @@ export default function ChatView({
         >
           <MessagesTimeline
             key={activeThread.id}
+            isFocusedPane={isFocusedPane}
             hasMessages={timelineEntries.length > 0}
             isWorking={isWorking}
             activeTurnInProgress={!latestTurnSettled}
@@ -4670,6 +4491,17 @@ export default function ChatView({
                       : "gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:min-w-max sm:overflow-visible",
                   )}
                 >
+                  <ComposerExtrasMenu
+                    interactionMode={interactionMode}
+                    supportsFastMode={selectedProvider === "codex"}
+                    fastModeEnabled={selectedCodexFastModeEnabled}
+                    onAddPhotos={addComposerImages}
+                    onSetFastMode={onCodexFastModeChange}
+                    onSetPlanMode={(enabled) => {
+                      handleInteractionModeChange(enabled ? "plan" : "default");
+                    }}
+                  />
+
                   {/* Provider/model picker */}
                   <ProviderModelPicker
                     compact={isComposerFooterCompact}
@@ -5404,7 +5236,6 @@ const ChatHeader = memo(function ChatHeader({
                 size="xs"
                 disabled={!isGitRepo}
               >
-                <DiffIcon className="size-3" />
                 {showDiffTotals ? (
                   <>
                     <span className="font-mono text-[12px] font-light tracking-normal tabular-nums text-success">
@@ -5413,8 +5244,15 @@ const ChatHeader = memo(function ChatHeader({
                     <span className="font-mono text-[12px] font-light tracking-normal tabular-nums text-destructive">
                       -{diffTotals?.deletions ?? 0}
                     </span>
+                    <span
+                      aria-hidden
+                      className="ml-0.5 h-3.5 w-px shrink-0 bg-border/80"
+                    />
+                    <PanelLeftIcon className="size-3.5 text-muted-foreground" />
                   </>
-                ) : null}
+                ) : (
+                  <PanelLeftIcon className="size-3.5 text-muted-foreground" />
+                )}
               </Toggle>
             }
           />

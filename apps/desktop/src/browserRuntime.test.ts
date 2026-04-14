@@ -513,7 +513,7 @@ describe("BrowserRuntimeRegistry", () => {
     expect(closed.activeTabId).not.toBe(firstTabId);
   });
 
-  it("recreates a blank replacement tab when closing the last tab", async () => {
+  it("recreates a default-start replacement tab when closing the last tab", async () => {
     const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
     const projectId = ProjectId.makeUnsafe("project-tabs-2");
 
@@ -528,6 +528,6 @@ describe("BrowserRuntimeRegistry", () => {
     expect(afterClose.tabs).toHaveLength(1);
     expect(afterClose.activeTabId).toBeTruthy();
     expect(afterClose.activeTabId).not.toBe(initialTabId);
-    expect(afterClose.session?.navigation.url).toBe("about:blank");
+    expect(afterClose.session?.navigation.url).toBe("https://www.google.com");
   });
 });

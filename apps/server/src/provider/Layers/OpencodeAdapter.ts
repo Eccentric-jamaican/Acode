@@ -1,15 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
 import net from "node:net";
-import path from "node:path";
 
+import { createOpencode, type OpencodeClient } from "@opencode-ai/sdk";
 import {
   EventId,
   OPENCODE_DEFAULT_MODEL_SLUG,
   type ProviderComposerCapabilities,
   type ProviderListCommandsInput,
   type ProviderListCommandsResult,
+  type ProviderNativeCommandDescriptor,
   type ProviderListSkillsInput,
   type ProviderListSkillsResult,
   RuntimeItemId,
@@ -45,17 +44,17 @@ const PROVIDER = "opencode" as const;
 const HOST = "127.0.0.1";
 const STARTUP_TIMEOUT_MS = 20_000;
 const RECONNECT_DELAY_MS = 700;
-const MAX_LOG_CHARS = 8_192;
 
 export interface OpencodeAdapterLiveOptions {
   readonly host?: string;
   readonly port?: number;
+  readonly createRuntime?: typeof createOpencode;
 }
 
 interface RuntimeHandle {
+  readonly client: OpencodeClient;
   readonly baseUrl: string;
-  readonly authHeader: string | null;
-  readonly process: ChildProcessWithoutNullStreams;
+  readonly close: () => void;
 }
 
 interface RuntimeSession {
@@ -85,6 +84,11 @@ interface OpencodeMessage {
   readonly parts?: ReadonlyArray<unknown>;
 }
 
+interface ParsedSlashInvocation {
+  readonly name: string;
+  readonly arguments: string;
+}
+
 class OpencodeRequestFailure extends Data.TaggedError("OpencodeRequestFailure")<{
   readonly message: string;
   readonly cause: unknown;
@@ -105,11 +109,6 @@ function asString(value: unknown): string | undefined {
 
 function asArray(value: unknown): ReadonlyArray<unknown> | undefined {
   return Array.isArray(value) ? value : undefined;
-}
-
-function appendLog(previous: string, chunk: string): string {
-  const next = `${previous}${chunk}`;
-  return next.length <= MAX_LOG_CHARS ? next : next.slice(next.length - MAX_LOG_CHARS);
 }
 
 function toMessage(cause: unknown, fallback: string): string {
@@ -137,13 +136,6 @@ function isConnectionRefused(cause: unknown): boolean {
   return message.includes("econnrefused") || message.includes("connect refused");
 }
 
-function authHeaderFromEnv(): string | null {
-  const password = process.env.OPENCODE_SERVER_PASSWORD?.trim();
-  if (!password) return null;
-  const username = process.env.OPENCODE_SERVER_USERNAME?.trim() || "opencode";
-  return `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
-}
-
 function resolveFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -160,105 +152,16 @@ function resolveFreePort(): Promise<number> {
   });
 }
 
-function resolveWindowsOpencodeEntrypoint(): string | null {
-  const baseDirs = new Set<string>();
-  const appData = process.env.APPDATA?.trim();
-  if (appData) {
-    baseDirs.add(path.join(appData, "npm"));
+function parsePathParams(
+  pathPattern: RegExp,
+  pathValue: string,
+  methodName: string,
+): ReadonlyArray<string> {
+  const match = pathPattern.exec(pathValue);
+  if (!match) {
+    throw new Error(`Invalid path for '${methodName}': ${pathValue}`);
   }
-  try {
-    const where = spawnSync("where", ["opencode.cmd"], {
-      encoding: "utf8",
-      windowsHide: true,
-    });
-    if (where.status === 0 && where.stdout) {
-      const first = String(where.stdout)
-        .split(/\r?\n/g)
-        .map((line) => line.trim())
-        .find((line) => line.length > 0);
-      if (first) {
-        baseDirs.add(path.dirname(first));
-      }
-    }
-  } catch {
-    // ignore where.exe lookup failures
-  }
-
-  for (const baseDir of baseDirs.values()) {
-    const entrypoint = path.join(baseDir, "node_modules", "opencode-ai", "bin", "opencode");
-    if (existsSync(entrypoint)) {
-      return entrypoint;
-    }
-  }
-  return null;
-}
-
-function resolveWindowsOpencodeExecutable(entrypoint: string): string | null {
-  const packageRoot = path.dirname(path.dirname(entrypoint));
-  const dependencyRoot = path.join(packageRoot, "node_modules");
-  if (!existsSync(dependencyRoot)) {
-    return null;
-  }
-  try {
-    for (const dependency of readdirSync(dependencyRoot)) {
-      if (!dependency.startsWith("opencode-windows-")) {
-        continue;
-      }
-      const executable = path.join(dependencyRoot, dependency, "bin", "opencode.exe");
-      if (existsSync(executable)) {
-        return executable;
-      }
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
-
-function spawnOpencodeServe(host: string, port: number): ChildProcessWithoutNullStreams {
-  const serveArgs = ["serve", "--hostname", host, "--port", String(port)];
-  const candidates =
-    process.platform === "win32"
-      ? (() => {
-          const entrypoint = resolveWindowsOpencodeEntrypoint();
-          const executable = entrypoint ? resolveWindowsOpencodeExecutable(entrypoint) : null;
-          return [
-            ...(executable
-              ? [{ command: executable, args: serveArgs, shell: false as const }]
-              : []),
-            ...(entrypoint
-              ? [
-                  {
-                    command: process.execPath,
-                    args: [entrypoint, ...serveArgs],
-                    shell: false as const,
-                  },
-                ]
-              : []),
-            { command: "opencode", args: serveArgs, shell: true as const },
-          ];
-        })()
-      : [{ command: "opencode", args: serveArgs, shell: false as const }];
-  let lastError: unknown;
-  for (const candidate of candidates) {
-    try {
-      return spawn(candidate.command, candidate.args, {
-        shell: candidate.shell,
-        windowsHide: true,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-    } catch (cause) {
-      lastError = cause;
-      const errorCode =
-        cause && typeof cause === "object" && "code" in cause
-          ? (cause as { code?: unknown }).code
-          : undefined;
-      if (errorCode !== "ENOENT" && errorCode !== "EINVAL") {
-        throw cause;
-      }
-    }
-  }
-  throw (lastError ?? new Error("Unable to spawn OpenCode runtime process."));
+  return match.slice(1).map((value) => decodeURIComponent(value));
 }
 
 function readResumeCursor(value: unknown): { sessionId: string; directory?: string } | undefined {
@@ -328,6 +231,25 @@ function extractAssistantTextFromParts(partsValue: unknown): string {
   return text.trim();
 }
 
+function parseLeadingSlashInvocation(input: string): ParsedSlashInvocation | null {
+  const trimmed = input.trim();
+  if (!trimmed.startsWith("/")) {
+    return null;
+  }
+  const body = trimmed.slice(1).trimStart();
+  if (body.length === 0) {
+    return { name: "", arguments: "" };
+  }
+  const firstWhitespaceIndex = body.search(/\s/);
+  if (firstWhitespaceIndex === -1) {
+    return { name: body, arguments: "" };
+  }
+  return {
+    name: body.slice(0, firstWhitespaceIndex).trim(),
+    arguments: body.slice(firstWhitespaceIndex + 1).trim(),
+  };
+}
+
 function eventBase(input: {
   readonly threadId: ThreadId;
   readonly type: ProviderRuntimeEvent["type"];
@@ -352,43 +274,6 @@ function eventBase(input: {
   } as ProviderRuntimeEvent;
 }
 
-async function parseSseResponse(
-  response: Response,
-  onEvent: (event: OpencodeEvent) => Promise<void>,
-): Promise<void> {
-  if (!response.body) throw new Error("OpenCode SSE stream returned no body.");
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    while (true) {
-      const idx = buffer.indexOf("\n\n");
-      if (idx < 0) break;
-      const block = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 2);
-      const data = block
-        .split(/\r?\n/g)
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trimStart())
-        .join("\n")
-        .trim();
-      if (!data) continue;
-      try {
-        const parsed = JSON.parse(data) as OpencodeEvent;
-        if (parsed && typeof parsed.type === "string") {
-          await onEvent(parsed);
-        }
-      } catch {
-        // ignore malformed events
-      }
-    }
-  }
-}
-
 const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -398,6 +283,8 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
     const runtimeRef = yield* Ref.make<RuntimeHandle | null>(null);
 
     const sessions = new Map<ThreadId, RuntimeSession>();
+    const commandCacheByCwd = new Map<string, ProviderListCommandsResult>();
+    const pendingCommandDiscoveryByCwd = new Map<string, Promise<ProviderListCommandsResult>>();
     const threadBySessionId = new Map<string, ThreadId>();
     const permissionTypeByRequest = new Map<string, CanonicalRequestType>();
     const questionIdsByRequest = new Map<string, ReadonlyArray<string>>();
@@ -463,8 +350,13 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
       controllersByDirectory.delete(directory);
     };
 
-    const clearRuntimeIfMatches = (processToClear: ChildProcessWithoutNullStreams) =>
-      Ref.update(runtimeRef, (runtime) => (runtime?.process === processToClear ? null : runtime));
+    const clearRuntimeIfMatches = (runtimeToClear: RuntimeHandle) =>
+      Ref.update(runtimeRef, (runtime) => (runtime === runtimeToClear ? null : runtime));
+
+    const closeRuntime = (runtime: RuntimeHandle) =>
+      Effect.sync(() => {
+        runtime.close();
+      });
 
     const ensureRuntime = (threadId: ThreadId): Effect.Effect<RuntimeHandle, ProviderAdapterProcessError> =>
       Effect.gen(function* () {
@@ -477,75 +369,25 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           catch: (cause) => processError(threadId, toMessage(cause, "Failed to resolve free TCP port."), cause),
         }));
 
-        let stdoutLog = "";
-        let stderrLog = "";
-        let exited = false;
-        let exitCode: number | null = null;
-        let exitSignal: NodeJS.Signals | null = null;
-        const authHeader = authHeaderFromEnv();
-        const child = yield* Effect.try({
-          try: () => spawnOpencodeServe(host, port),
+        const runtimeFromSdk = yield* Effect.tryPromise({
+          try: () =>
+            (options?.createRuntime ?? createOpencode)({
+              hostname: host,
+              port,
+              timeout: STARTUP_TIMEOUT_MS,
+            }),
           catch: (cause) =>
             processError(
               threadId,
-              toMessage(cause, "Failed to spawn OpenCode runtime process."),
+              toMessage(cause, "Failed to start OpenCode runtime via SDK."),
               cause,
             ),
         });
-        child.stdout.on("data", (chunk: Buffer | string) => {
-          stdoutLog = appendLog(stdoutLog, typeof chunk === "string" ? chunk : chunk.toString("utf8"));
-        });
-        child.stderr.on("data", (chunk: Buffer | string) => {
-          stderrLog = appendLog(stderrLog, typeof chunk === "string" ? chunk : chunk.toString("utf8"));
-        });
-        child.once("exit", (code, signal) => {
-          exited = true;
-          exitCode = code;
-          exitSignal = signal;
-          void clearRuntimeIfMatches(child).pipe(runWithServices).catch(() => undefined);
-        });
-
-        const baseUrl = `http://${host}:${port}`;
-        const startupHeaders = new Headers({ Accept: "application/json" });
-        if (authHeader) {
-          startupHeaders.set("Authorization", authHeader);
-        }
-        const startedAt = Date.now();
-        let ready = false;
-        while (!ready && Date.now() - startedAt < STARTUP_TIMEOUT_MS) {
-          if (exited) {
-            break;
-          }
-          ready = yield* Effect.promise(async () => {
-            try {
-              const response = await fetch(`${baseUrl}/provider`, {
-                method: "GET",
-                headers: startupHeaders,
-              });
-              return response.ok || response.status === 401 || response.status === 403;
-            } catch {
-              return false;
-            }
-          });
-          if (!ready) yield* Effect.sleep("250 millis");
-        }
-        if (!ready) {
-          if (!child.killed) {
-            child.kill();
-          }
-          const reason = exited
-            ? `OpenCode runtime exited before startup completed (code=${String(exitCode)}, signal=${String(exitSignal)}).`
-            : "Timed out waiting for OpenCode startup.";
-          return yield* processError(
-            threadId,
-            `${reason}\nstdout:\n${stdoutLog}\nstderr:\n${stderrLog}`,
-          );
-        }
 
         const runtime: RuntimeHandle = {
-          baseUrl,
-          authHeader,
-          process: child,
+          baseUrl: runtimeFromSdk.server.url,
+          client: runtimeFromSdk.client,
+          close: runtimeFromSdk.server.close,
         };
         yield* Ref.set(runtimeRef, runtime);
         return runtime;
@@ -563,23 +405,172 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         const executeRequest = (runtime: RuntimeHandle) =>
           Effect.tryPromise({
             try: async () => {
-              const url = new URL(input.path, runtime.baseUrl);
-              if (input.directory) url.searchParams.set("directory", input.directory);
-              const headers = new Headers({ Accept: "application/json" });
-              if (runtime.authHeader) headers.set("Authorization", runtime.authHeader);
-              if (input.body !== undefined) headers.set("Content-Type", "application/json");
-              const response = await fetch(url, {
-                method: input.httpMethod,
-                headers,
-                ...(input.body !== undefined ? { body: JSON.stringify(input.body) } : {}),
-              });
-              if (!response.ok) {
-                const detail = await response.text();
-                throw new Error(`HTTP ${response.status}: ${detail}`);
+              const query = input.directory ? { directory: input.directory } : undefined;
+              const bodyRecord = asObject(input.body);
+              const client: any = runtime.client;
+              switch (input.methodName) {
+                case "provider.list":
+                  return (await client.provider.list({
+                    query,
+                    throwOnError: true,
+                    responseStyle: "data",
+                  })) as T;
+                case "command.list":
+                  return (await client.command.list({
+                    query,
+                    throwOnError: true,
+                    responseStyle: "data",
+                  })) as T;
+                case "session.create":
+                  return (await client.session.create({
+                    query,
+                    body: bodyRecord ?? {},
+                    throwOnError: true,
+                    responseStyle: "data",
+                  })) as T;
+                case "session.get": {
+                  const [sessionId] = parsePathParams(
+                    /^\/session\/([^/]+)$/,
+                    input.path,
+                    input.methodName,
+                  );
+                  return (await client.session.get({
+                    path: { id: sessionId! },
+                    query,
+                    throwOnError: true,
+                    responseStyle: "data",
+                  })) as T;
+                }
+                case "session.message": {
+                  const [sessionId, messageId] = parsePathParams(
+                    /^\/session\/([^/]+)\/message\/([^/]+)$/,
+                    input.path,
+                    input.methodName,
+                  );
+                  return (await client.session.message({
+                    path: { id: sessionId!, messageID: messageId! },
+                    query,
+                    throwOnError: true,
+                    responseStyle: "data",
+                  })) as T;
+                }
+                case "session.messages": {
+                  const [sessionId] = parsePathParams(
+                    /^\/session\/([^/]+)\/message$/,
+                    input.path,
+                    input.methodName,
+                  );
+                  return (await client.session.messages({
+                    path: { id: sessionId! },
+                    query,
+                    throwOnError: true,
+                    responseStyle: "data",
+                  })) as T;
+                }
+                case "session.prompt_async": {
+                  const [sessionId] = parsePathParams(
+                    /^\/session\/([^/]+)\/prompt_async$/,
+                    input.path,
+                    input.methodName,
+                  );
+                  return (await client.session.promptAsync({
+                    path: { id: sessionId! },
+                    query,
+                    body: bodyRecord ?? {},
+                    throwOnError: true,
+                    responseStyle: "data",
+                  })) as T;
+                }
+                case "session.command": {
+                  const [sessionId] = parsePathParams(
+                    /^\/session\/([^/]+)\/command$/,
+                    input.path,
+                    input.methodName,
+                  );
+                  return (await client.session.command({
+                    path: { id: sessionId! },
+                    query,
+                    body: bodyRecord ?? {},
+                    throwOnError: true,
+                    responseStyle: "data",
+                  })) as T;
+                }
+                case "session.abort": {
+                  const [sessionId] = parsePathParams(
+                    /^\/session\/([^/]+)\/abort$/,
+                    input.path,
+                    input.methodName,
+                  );
+                  return (await client.session.abort({
+                    path: { id: sessionId! },
+                    query,
+                    throwOnError: true,
+                    responseStyle: "data",
+                  })) as T;
+                }
+                case "session.revert": {
+                  const [sessionId] = parsePathParams(
+                    /^\/session\/([^/]+)\/revert$/,
+                    input.path,
+                    input.methodName,
+                  );
+                  return (await client.session.revert({
+                    path: { id: sessionId! },
+                    query,
+                    body: bodyRecord ?? undefined,
+                    throwOnError: true,
+                    responseStyle: "data",
+                  })) as T;
+                }
+                case "permission.reply": {
+                  const [sessionId, permissionId] = parsePathParams(
+                    /^\/session\/([^/]+)\/permissions\/([^/]+)$/,
+                    input.path,
+                    input.methodName,
+                  );
+                  const response =
+                    asString(bodyRecord?.response) ?? asString(bodyRecord?.reply) ?? undefined;
+                  if (response !== "once" && response !== "always" && response !== "reject") {
+                    throw new Error(
+                      `Invalid permission response '${response ?? "undefined"}' for '${input.methodName}'.`,
+                    );
+                  }
+                  return (await client.postSessionIdPermissionsPermissionId({
+                    path: { id: sessionId!, permissionID: permissionId! },
+                    query,
+                    body: { response },
+                    throwOnError: true,
+                    responseStyle: "data",
+                  })) as T;
+                }
+                case "question.reply": {
+                  const [requestId] = parsePathParams(
+                    /^\/question\/([^/]+)\/reply$/,
+                    input.path,
+                    input.methodName,
+                  );
+                  const url = new URL(`/question/${encodeURIComponent(requestId!)}/reply`, runtime.baseUrl);
+                  if (input.directory) {
+                    url.searchParams.set("directory", input.directory);
+                  }
+                  const response = await fetch(url, {
+                    method: "POST",
+                    headers: {
+                      Accept: "application/json",
+                      "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify(bodyRecord ?? {}),
+                  });
+                  if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+                  }
+                  if (response.status === 204) return undefined as T;
+                  const text = await response.text();
+                  return (text.trim() ? JSON.parse(text) : undefined) as T;
+                }
+                default:
+                  throw new Error(`Unsupported OpenCode SDK method '${input.methodName}'.`);
               }
-              if (response.status === 204) return undefined as T;
-              const text = await response.text();
-              return text.trim() ? (JSON.parse(text) as T) : (undefined as T);
             },
             catch: (cause) =>
               new OpencodeRequestFailure({
@@ -592,7 +583,8 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         const result = yield* executeRequest(runtime).pipe(
           Effect.catchIf((error) => isConnectionRefused(error.cause), () =>
             Effect.gen(function* () {
-              yield* clearRuntimeIfMatches(runtime.process);
+              yield* clearRuntimeIfMatches(runtime);
+              yield* closeRuntime(runtime);
               const restarted = yield* ensureRuntime(input.threadId);
               return yield* executeRequest(restarted);
             }),
@@ -1187,26 +1179,35 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
 
       const runLoop = async () => {
         while (!controller.signal.aborted) {
+          let runtime: RuntimeHandle | null = null;
           try {
-            const runtime = await ensureRuntime(threadId).pipe(runWithServices);
-            const url = new URL("/event", runtime.baseUrl);
-            url.searchParams.set("directory", directory);
-            const headers = new Headers({ Accept: "text/event-stream" });
-            if (runtime.authHeader) {
-              headers.set("Authorization", runtime.authHeader);
-            }
-            const response = await fetch(url, {
-              method: "GET",
-              headers,
+            runtime = await ensureRuntime(threadId).pipe(runWithServices);
+            const eventStream = await runtime.client.event.subscribe({
+              query: { directory },
               signal: controller.signal,
+              throwOnError: true,
             });
-            if (!response.ok) {
-              const detail = await response.text();
-              throw new Error(`OpenCode SSE subscribe failed (${response.status}): ${detail}`);
+            for await (const streamEvent of eventStream.stream) {
+              if (controller.signal.aborted) {
+                break;
+              }
+              const eventRecord = asObject(streamEvent);
+              const eventType = asString(eventRecord?.type);
+              if (!eventType) {
+                continue;
+              }
+              const eventProperties = asObject(eventRecord?.properties);
+              await handleSseEvent({
+                type: eventType,
+                ...(eventProperties ? { properties: eventProperties } : {}),
+              });
             }
-            await parseSseResponse(response, handleSseEvent);
           } catch (cause) {
             if (controller.signal.aborted) break;
+            if (runtime && isConnectionRefused(cause)) {
+              await clearRuntimeIfMatches(runtime).pipe(runWithServices).catch(() => undefined);
+              await closeRuntime(runtime).pipe(runWithServices).catch(() => undefined);
+            }
             await emitAsync(
               eventBase({
                 threadId,
@@ -1251,6 +1252,81 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           return yield* requestError(threadId, "provider.list", "OpenCode default model resolution returned no usable provider/model pair.");
         }
         return { slug: `${providerID}/${modelID}`, providerID, modelID };
+      });
+
+    const mapOpencodeCommands = (value: unknown): ProviderListCommandsResult => {
+      const commands: ProviderNativeCommandDescriptor[] = [];
+      for (const entry of asArray(value) ?? []) {
+        const command = asObject(entry);
+        if (!command) {
+          continue;
+        }
+        const name = asString(command.name)?.trim();
+        if (!name) {
+          continue;
+        }
+        const description = asString(command.description)?.trim();
+        if (description) {
+          commands.push({ name, description });
+        } else {
+          commands.push({ name });
+        }
+      }
+
+      return {
+        commands,
+        source: "opencodeSdk",
+        cached: false,
+      } satisfies ProviderListCommandsResult;
+    };
+
+    const discoverCommandsForCwd = (input: {
+      readonly threadId: ThreadId;
+      readonly cwd: string;
+      readonly forceReload?: boolean;
+    }) =>
+      Effect.gen(function* () {
+        if (!input.forceReload) {
+          const cached = commandCacheByCwd.get(input.cwd);
+          if (cached) {
+            return { ...cached, cached: true } satisfies ProviderListCommandsResult;
+          }
+        }
+
+        let pending = pendingCommandDiscoveryByCwd.get(input.cwd);
+        if (!pending) {
+          pending = requestJson<unknown>({
+            threadId: input.threadId,
+            methodName: "command.list",
+            httpMethod: "GET",
+            path: "/command",
+            directory: input.cwd,
+            body: undefined,
+          })
+            .pipe(
+              Effect.map(mapOpencodeCommands),
+              runWithServices,
+            )
+            .then((result) => {
+              commandCacheByCwd.set(input.cwd, result);
+              return result;
+            })
+            .finally(() => {
+              pendingCommandDiscoveryByCwd.delete(input.cwd);
+            });
+          pendingCommandDiscoveryByCwd.set(input.cwd, pending);
+        }
+
+        return yield* Effect.tryPromise({
+          try: () => pending!,
+          catch: (cause) =>
+            new ProviderAdapterProcessError({
+              provider: PROVIDER,
+              threadId: input.threadId,
+              detail: toMessage(cause, "Failed to discover OpenCode commands."),
+              cause,
+            }),
+        });
       });
 
     const startSession: OpencodeAdapterShape["startSession"] = (input) =>
@@ -1350,6 +1426,94 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
 
         const resolvedModel = yield* resolveModel(input.threadId, session.cwd, input.model, session.model, "sendTurn");
         session.model = resolvedModel.slug;
+        const text = input.input?.trim() ?? "";
+        const slashInvocation = parseLeadingSlashInvocation(text);
+        const selectedAgent = opencodeAgentForInteractionMode(input.interactionMode);
+
+        if (slashInvocation !== null) {
+          if ((input.attachments?.length ?? 0) > 0) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "sendTurn",
+              issue: "OpenCode native slash commands do not support attachments.",
+            });
+          }
+          if (!slashInvocation.name) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "sendTurn",
+              issue: "Slash command name is required.",
+            });
+          }
+
+          const commandCatalog = yield* discoverCommandsForCwd({
+            threadId: input.threadId,
+            cwd: session.cwd,
+            forceReload: false,
+          });
+          const commandExists = commandCatalog.commands.some((command) => command.name === slashInvocation.name);
+          if (!commandExists) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "sendTurn",
+              issue: `Unknown OpenCode slash command '/${slashInvocation.name}'.`,
+            });
+          }
+
+          const turnId = TurnId.makeUnsafe(randomUUID());
+          session.activeTurnId = turnId;
+          session.status = "running";
+          session.updatedAt = nowIso();
+
+          yield* requestJson<void>({
+            threadId: input.threadId,
+            methodName: "session.command",
+            httpMethod: "POST",
+            path: `/session/${encodeURIComponent(session.sessionId)}/command`,
+            directory: session.cwd,
+            body: {
+              command: slashInvocation.name,
+              arguments: slashInvocation.arguments,
+              model: resolvedModel.slug,
+              ...(selectedAgent !== undefined ? { agent: selectedAgent } : {}),
+            },
+          });
+
+          const rawPayload = {
+            sessionId: session.sessionId,
+            model: resolvedModel.slug,
+            command: slashInvocation.name,
+            arguments: slashInvocation.arguments,
+            ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+            ...(selectedAgent !== undefined ? { agent: selectedAgent } : {}),
+          };
+          yield* emit(
+            eventBase({
+              threadId: input.threadId,
+              type: "session.state.changed",
+              payload: { state: "running" },
+              method: "session.command",
+              rawPayload,
+              turnId,
+            }),
+          );
+          yield* emit(
+            eventBase({
+              threadId: input.threadId,
+              type: "turn.started",
+              payload: { model: resolvedModel.slug },
+              method: "session.command",
+              rawPayload,
+              turnId,
+            }),
+          );
+
+          return {
+            threadId: input.threadId,
+            turnId,
+            resumeCursor: { sessionId: session.sessionId, directory: session.cwd },
+          };
+        }
 
         const imageParts = yield* Effect.forEach(input.attachments ?? [], (attachment) =>
           Effect.gen(function* () {
@@ -1363,7 +1527,6 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           { concurrency: 1 },
         );
 
-        const text = input.input?.trim() ?? "";
         const parts: Array<Record<string, unknown>> = [];
         if (text) parts.push({ type: "text", text });
         parts.push(...imageParts);
@@ -1381,7 +1544,6 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           parts,
           ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
         });
-        const selectedAgent = opencodeAgentForInteractionMode(input.interactionMode);
 
         yield* requestJson<void>({
           threadId: input.threadId,
@@ -1459,7 +1621,14 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         const session = sessions.get(threadId);
         if (!session) return yield* new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId });
         const reply = decision === "accept" ? "once" : decision === "acceptForSession" ? "always" : "reject";
-        yield* requestJson<void>({ threadId, methodName: "permission.reply", httpMethod: "POST", path: `/permission/${encodeURIComponent(requestId)}/reply`, directory: session.cwd, body: { reply } });
+        yield* requestJson<void>({
+          threadId,
+          methodName: "permission.reply",
+          httpMethod: "POST",
+          path: `/session/${encodeURIComponent(session.sessionId)}/permissions/${encodeURIComponent(requestId)}`,
+          directory: session.cwd,
+          body: { reply },
+        });
         yield* emit(
           eventBase({
             threadId,
@@ -1586,7 +1755,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
       provider: PROVIDER,
       supportsSkillMentions: true,
       supportsSkillDiscovery: true,
-      supportsNativeSlashCommandDiscovery: false,
+      supportsNativeSlashCommandDiscovery: true,
       supportsPluginMentions: false,
       supportsPluginDiscovery: false,
       supportsRuntimeModelList: false,
@@ -1605,13 +1774,25 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
       } satisfies ProviderListSkillsResult);
 
     const listCommands: NonNullable<OpencodeAdapterShape["listCommands"]> = (
-      _input: ProviderListCommandsInput,
+      input: ProviderListCommandsInput,
     ) =>
-      Effect.succeed({
-        commands: [],
-        source: "unsupported",
-        cached: false,
-      } satisfies ProviderListCommandsResult);
+      Effect.gen(function* () {
+        const discoveryThreadId =
+          input.threadId !== undefined
+            ? ThreadId.makeUnsafe(input.threadId)
+            : [...sessions.values()][0]?.threadId ?? ThreadId.makeUnsafe("discovery");
+        if (input.forceReload !== undefined) {
+          return yield* discoverCommandsForCwd({
+            threadId: discoveryThreadId,
+            cwd: input.cwd,
+            forceReload: input.forceReload,
+          });
+        }
+        return yield* discoverCommandsForCwd({
+          threadId: discoveryThreadId,
+          cwd: input.cwd,
+        });
+      });
 
     const stopAll: OpencodeAdapterShape["stopAll"] = () =>
       Effect.gen(function* () {
@@ -1622,15 +1803,13 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         partMetadataById.clear();
         messageRoleGate.clearAll();
         completedAssistantMessageSessionById.clear();
+        commandCacheByCwd.clear();
+        pendingCommandDiscoveryByCwd.clear();
         for (const controller of controllersByDirectory.values()) controller.abort();
         controllersByDirectory.clear();
         const runtime = yield* Ref.get(runtimeRef);
         if (runtime) {
-          yield* Effect.sync(() => {
-            if (!runtime.process.killed) {
-              runtime.process.kill();
-            }
-          });
+          yield* closeRuntime(runtime);
           yield* Ref.set(runtimeRef, null);
         }
       });
@@ -1648,7 +1827,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         sessionModelSwitch: "in-session",
         supportsSkillMentions: true,
         supportsSkillDiscovery: true,
-        supportsNativeSlashCommandDiscovery: false,
+        supportsNativeSlashCommandDiscovery: true,
         supportsPluginMentions: false,
         supportsPluginDiscovery: false,
         supportsRuntimeModelList: false,

@@ -52,12 +52,23 @@ export interface BranchNameGenerationResult {
   branch: string;
 }
 
+export interface ThreadTitleGenerationInput {
+  cwd: string;
+  message: string;
+  attachments?: ReadonlyArray<ChatAttachment> | undefined;
+}
+
+export interface ThreadTitleGenerationResult {
+  title: string;
+}
+
 export interface TextGenerationService {
   generateCommitMessage(
     input: CommitMessageGenerationInput,
   ): Promise<CommitMessageGenerationResult>;
   generatePrContent(input: PrContentGenerationInput): Promise<PrContentGenerationResult>;
   generateBranchName(input: BranchNameGenerationInput): Promise<BranchNameGenerationResult>;
+  generateThreadTitle(input: ThreadTitleGenerationInput): Promise<ThreadTitleGenerationResult>;
 }
 
 /**
@@ -84,6 +95,13 @@ export interface TextGenerationShape {
   readonly generateBranchName: (
     input: BranchNameGenerationInput,
   ) => Effect.Effect<BranchNameGenerationResult, TextGenerationError>;
+
+  /**
+   * Generate a concise chat-thread title from the first user message.
+   */
+  readonly generateThreadTitle: (
+    input: ThreadTitleGenerationInput,
+  ) => Effect.Effect<ThreadTitleGenerationResult, TextGenerationError>;
 }
 
 /**
