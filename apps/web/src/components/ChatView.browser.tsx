@@ -2,6 +2,7 @@
 import "../index.css";
 
 import {
+  type CheckpointRef,
   type BrowserPaneBounds,
   type BrowserSessionSnapshot,
   EventId,
@@ -159,12 +160,17 @@ function createUserMessage(options: {
   };
 }
 
-function createAssistantMessage(options: { id: MessageId; text: string; offsetSeconds: number }) {
+function createAssistantMessage(options: {
+  id: MessageId;
+  text: string;
+  offsetSeconds: number;
+  turnId?: TurnId | null;
+}) {
   return {
     id: options.id,
     role: "assistant" as const,
     text: options.text,
-    turnId: null,
+    turnId: options.turnId ?? null,
     streaming: false,
     createdAt: isoAt(options.offsetSeconds),
     updatedAt: isoAt(options.offsetSeconds + 1),
@@ -521,6 +527,123 @@ function createPlanFollowUpRegressionSnapshot(): OrchestrationReadModel {
         },
       },
     ],
+  };
+}
+
+function createCheckpointRevertSnapshot(): OrchestrationReadModel {
+  const firstTurnId = "turn-checkpoint-first" as TurnId;
+  const secondTurnId = "turn-checkpoint-second" as TurnId;
+  const firstUserId = "msg-user-revert-first" as MessageId;
+  const secondUserId = "msg-user-revert-second" as MessageId;
+  const firstAssistantId = "msg-assistant-revert-first" as MessageId;
+  const secondAssistantId = "msg-assistant-revert-second" as MessageId;
+
+  return {
+    snapshotSequence: 1,
+    projects: [
+      {
+        id: PROJECT_ID,
+        title: "Project",
+        workspaceRoot: "/repo/project",
+        defaultModel: "gpt-5",
+        scripts: [],
+        createdAt: NOW_ISO,
+        updatedAt: NOW_ISO,
+        deletedAt: null,
+      },
+    ],
+    tasks: [],
+    taskRuntimes: [],
+    projectRules: [],
+    threads: [
+      {
+        id: THREAD_ID,
+        projectId: PROJECT_ID,
+        origin: "user",
+        taskId: null,
+        title: "Checkpoint revert thread",
+        model: "gpt-5",
+        interactionMode: "default",
+        runtimeMode: "full-access",
+        branch: "main",
+        worktreePath: null,
+        isPinned: false,
+        latestTurn: null,
+        createdAt: NOW_ISO,
+        updatedAt: NOW_ISO,
+        deletedAt: null,
+        messages: [
+          createUserMessage({
+            id: firstUserId,
+            text: "Make the first change",
+            offsetSeconds: 0,
+          }),
+          createAssistantMessage({
+            id: firstAssistantId,
+            text: "Applied the first change",
+            turnId: firstTurnId,
+            offsetSeconds: 3,
+          }),
+          createUserMessage({
+            id: secondUserId,
+            text: "Now make a second change",
+            offsetSeconds: 6,
+          }),
+          createAssistantMessage({
+            id: secondAssistantId,
+            text: "Applied the second change",
+            turnId: secondTurnId,
+            offsetSeconds: 9,
+          }),
+        ],
+        activities: [],
+        proposedPlans: [],
+        checkpoints: [
+          {
+            turnId: firstTurnId,
+            checkpointTurnCount: 2,
+            checkpointRef: "checkpoint-first" as CheckpointRef,
+            status: "ready",
+            files: [
+              {
+                path: "apps/web/src/components/ChatView.tsx",
+                kind: "modified",
+                additions: 8,
+                deletions: 2,
+              },
+            ],
+            assistantMessageId: firstAssistantId,
+            completedAt: isoAt(4),
+          },
+          {
+            turnId: secondTurnId,
+            checkpointTurnCount: 3,
+            checkpointRef: "checkpoint-second" as CheckpointRef,
+            status: "ready",
+            files: [
+              {
+                path: "apps/web/src/components/chat/MessagesTimeline.tsx",
+                kind: "modified",
+                additions: 4,
+                deletions: 1,
+              },
+            ],
+            assistantMessageId: secondAssistantId,
+            completedAt: isoAt(10),
+          },
+        ],
+        session: {
+          threadId: THREAD_ID,
+          status: "ready",
+          providerName: "codex",
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: NOW_ISO,
+        },
+      },
+    ],
+    updatedAt: NOW_ISO,
   };
 }
 
@@ -1992,6 +2115,60 @@ describe("ChatView timeline estimator parity (full app)", () => {
       expect(bubble.contains(copyButton)).toBe(false);
       expect(footer.previousElementSibling).toBe(bubble);
       expect(footer.querySelector("p")?.textContent?.trim().length).toBeGreaterThan(0);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("dispatches checkpoint revert for the targeted user message undo control", async () => {
+    const targetMessageId = "msg-user-revert-first" as MessageId;
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createCheckpointRevertSnapshot(),
+    });
+
+    try {
+      const row = await waitForElement(
+        () =>
+          document.querySelector<HTMLElement>(
+            `[data-message-id="${targetMessageId}"][data-message-role="user"]`,
+          ),
+        "Unable to find the checkpoint revert target row.",
+      );
+      const revertButton = await waitForElement(
+        () => row.querySelector<HTMLButtonElement>('button[title="Revert to this message"]'),
+        "Unable to find the checkpoint revert button.",
+      );
+
+      revertButton.click();
+
+      await vi.waitFor(
+        () => {
+          const revertRequest = wsRequests.findLast(
+            (request) => {
+              const command = (request as { command?: { type?: string } }).command;
+              return (
+                request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+                command?.type === "thread.checkpoint.revert"
+              );
+            },
+          ) as
+            | {
+                command?: {
+                  type?: string;
+                  turnCount?: number;
+                  threadId?: ThreadId;
+                };
+              }
+            | undefined;
+          expect(revertRequest?.command).toMatchObject({
+            type: "thread.checkpoint.revert",
+            threadId: THREAD_ID,
+            turnCount: 1,
+          });
+        },
+        { timeout: 8_000, interval: 16 },
+      );
     } finally {
       await mounted.cleanup();
     }

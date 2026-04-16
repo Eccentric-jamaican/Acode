@@ -1,6 +1,7 @@
 import {
   ApprovalRequestId,
   isToolLifecycleItemType,
+  MessageId,
   type OrchestrationLatestTurn,
   type OrchestrationThreadActivity,
   type OrchestrationProposedPlanId,
@@ -32,10 +33,25 @@ export interface WorkLogEntry {
   detail?: string;
   command?: string;
   changedFiles?: ReadonlyArray<string>;
+  invocationDiffFiles?: ReadonlyArray<InvocationDiffFile>;
+  invocationDiffStat?: {
+    additions: number;
+    deletions: number;
+  };
   tone: "thinking" | "tool" | "info" | "error";
   toolTitle?: string;
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
+}
+
+export interface InvocationDiffFile {
+  path: string;
+  additions: number;
+  deletions: number;
+  status?: "added" | "deleted" | "modified";
+  patch?: string;
+  before?: string;
+  after?: string;
 }
 
 export interface PendingApproval {
@@ -412,6 +428,7 @@ export function deriveWorkLogEntries(
           : null;
       const command = extractToolCommand(payload);
       const changedFiles = extractChangedFiles(payload);
+      const invocationDiffFiles = extractInvocationDiffFiles(payload);
       const title = extractToolTitle(payload);
       const entry: WorkLogEntry = {
         id: activity.id,
@@ -432,6 +449,16 @@ export function deriveWorkLogEntries(
       }
       if (changedFiles.length > 0) {
         entry.changedFiles = changedFiles;
+      }
+      if (invocationDiffFiles.length > 0) {
+        entry.invocationDiffFiles = invocationDiffFiles;
+        entry.invocationDiffStat = invocationDiffFiles.reduce(
+          (acc, file) => ({
+            additions: acc.additions + file.additions,
+            deletions: acc.deletions + file.deletions,
+          }),
+          { additions: 0, deletions: 0 },
+        );
       }
       if (title) {
         entry.toolTitle = title;
@@ -599,6 +626,62 @@ function extractChangedFiles(payload: Record<string, unknown> | null): string[] 
   return changedFiles;
 }
 
+function normalizeInvocationDiffStatus(
+  value: unknown,
+): InvocationDiffFile["status"] | undefined {
+  if (value === "added" || value === "deleted" || value === "modified") {
+    return value;
+  }
+  return undefined;
+}
+
+function toInvocationDiffFile(value: unknown): InvocationDiffFile | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  const path =
+    asTrimmedString(record.path) ??
+    asTrimmedString(record.file) ??
+    asTrimmedString(record.filePath) ??
+    asTrimmedString(record.relativePath);
+  if (!path) return null;
+  const additions = typeof record.additions === "number" ? record.additions : null;
+  const deletions = typeof record.deletions === "number" ? record.deletions : null;
+  const status = normalizeInvocationDiffStatus(record.status);
+  const patch = asTrimmedString(record.patch) ?? asTrimmedString(record.diff) ?? undefined;
+  const before = typeof record.before === "string" ? record.before : undefined;
+  const after = typeof record.after === "string" ? record.after : undefined;
+  const hasStats = additions !== null || deletions !== null;
+  const hasRenderableDiff = Boolean(patch || before !== undefined || after !== undefined);
+  if (!hasStats && !hasRenderableDiff) return null;
+
+  return {
+    path,
+    additions: additions ?? 0,
+    deletions: deletions ?? 0,
+    ...(status ? { status } : {}),
+    ...(patch ? { patch } : {}),
+    ...(before !== undefined ? { before } : {}),
+    ...(after !== undefined ? { after } : {}),
+  };
+}
+
+function extractInvocationDiffFiles(payload: Record<string, unknown> | null): InvocationDiffFile[] {
+  const data = asRecord(payload?.data);
+  const diff = asRecord(data?.diff);
+  const files = Array.isArray(diff?.files) ? diff.files : [];
+  const normalized: InvocationDiffFile[] = [];
+  const seen = new Set<string>();
+  for (const fileCandidate of files) {
+    const file = toInvocationDiffFile(fileCandidate);
+    if (!file) continue;
+    const key = `${file.path}:${file.additions}:${file.deletions}:${file.patch ?? ""}:${file.before ?? ""}:${file.after ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(file);
+  }
+  return normalized;
+}
+
 function compareActivitiesByOrder(
   left: OrchestrationThreadActivity,
   right: OrchestrationThreadActivity,
@@ -663,6 +746,50 @@ export function inferCheckpointTurnCountByTurnId(
     result[summary.turnId] = index + 1;
   }
   return result;
+}
+
+export function deriveRevertTurnCountByUserMessageId(
+  timelineEntries: ReadonlyArray<TimelineEntry>,
+  turnDiffSummaryByAssistantMessageId: ReadonlyMap<MessageId, TurnDiffSummary>,
+  turnDiffSummaryByTurnId: ReadonlyMap<TurnId, TurnDiffSummary>,
+  inferredCheckpointTurnCountByTurnId: Readonly<Record<TurnId, number>>,
+): Map<MessageId, number> {
+  const byUserMessageId = new Map<MessageId, number>();
+
+  for (let index = 0; index < timelineEntries.length; index += 1) {
+    const entry = timelineEntries[index];
+    if (!entry || entry.kind !== "message" || entry.message.role !== "user") {
+      continue;
+    }
+
+    for (let nextIndex = index + 1; nextIndex < timelineEntries.length; nextIndex += 1) {
+      const nextEntry = timelineEntries[nextIndex];
+      if (!nextEntry || nextEntry.kind !== "message") {
+        continue;
+      }
+      if (nextEntry.message.role === "user") {
+        break;
+      }
+
+      const summary =
+        turnDiffSummaryByAssistantMessageId.get(nextEntry.message.id) ??
+        (nextEntry.message.turnId ? turnDiffSummaryByTurnId.get(nextEntry.message.turnId) : undefined);
+      if (!summary) {
+        continue;
+      }
+
+      const turnCount =
+        summary.checkpointTurnCount ?? inferredCheckpointTurnCountByTurnId[summary.turnId];
+      if (typeof turnCount !== "number") {
+        break;
+      }
+
+      byUserMessageId.set(entry.message.id, Math.max(0, turnCount - 1));
+      break;
+    }
+  }
+
+  return byUserMessageId;
 }
 
 export function derivePhase(session: ThreadSession | null): SessionPhase {

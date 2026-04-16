@@ -38,6 +38,7 @@ import {
 import { OpencodeMessageRoleGate } from "./OpencodeMessageRoleGate.ts";
 import { OpencodeAdapter, type OpencodeAdapterShape } from "../Services/OpencodeAdapter.ts";
 import { buildOpencodePromptAsyncBody, opencodeAgentForInteractionMode } from "./OpencodeTurnMapping.ts";
+import { normalizeInvocationDiffFiles } from "./InvocationDiffNormalization.ts";
 import { discoverSkillsForCwd } from "./SkillDiscovery.ts";
 
 const PROVIDER = "opencode" as const;
@@ -199,6 +200,36 @@ function streamKindFromPartType(
   }
 }
 
+function canonicalItemTypeFromToolName(value: string | undefined):
+  | "command_execution"
+  | "file_change"
+  | "mcp_tool_call"
+  | "web_search"
+  | "image_view"
+  | "dynamic_tool_call" {
+  const normalized = value?.toLowerCase() ?? "";
+  if (
+    normalized.includes("bash") ||
+    normalized.includes("command") ||
+    normalized.includes("shell") ||
+    normalized.includes("terminal")
+  ) {
+    return "command_execution";
+  }
+  if (
+    normalized.includes("edit") ||
+    normalized.includes("write") ||
+    normalized.includes("patch") ||
+    normalized.includes("file")
+  ) {
+    return "file_change";
+  }
+  if (normalized.includes("mcp")) return "mcp_tool_call";
+  if (normalized.includes("websearch") || normalized.includes("web search")) return "web_search";
+  if (normalized.includes("image")) return "image_view";
+  return "dynamic_tool_call";
+}
+
 function decisionFromPermissionReply(
   value: string | undefined,
 ): "accept" | "acceptForSession" | "decline" | "cancel" | undefined {
@@ -215,6 +246,10 @@ function decisionFromPermissionReply(
     default:
       return undefined;
   }
+}
+
+function isPendingPermissionStatus(status: string): boolean {
+  return status === "pending" || status === "open" || status === "requested";
 }
 
 function extractAssistantTextFromParts(partsValue: unknown): string {
@@ -295,6 +330,14 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         messageId: string;
         streamKind: "assistant_text" | "reasoning_text" | "unknown";
         text: string;
+      }
+    >();
+    const toolPartStatusById = new Map<
+      string,
+      {
+        sessionId: string;
+        messageId: string;
+        status: "pending" | "running" | "completed" | "error";
       }
     >();
     const messageRoleGate = new OpencodeMessageRoleGate();
@@ -773,6 +816,97 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           return;
         }
 
+        const partType = asString(part.type)?.toLowerCase();
+        if (partType === "tool") {
+          const toolName = asString(part.tool) ?? "tool";
+          const state = asObject(part.state);
+          const statusValue = asString(state?.status)?.toLowerCase();
+          const status =
+            statusValue === "pending" ||
+            statusValue === "running" ||
+            statusValue === "completed" ||
+            statusValue === "error"
+              ? statusValue
+              : "running";
+          const itemId = asString(part.callID) ?? partId;
+          const input = asObject(state?.input) ?? {};
+          const metadata = asObject(state?.metadata) ?? asObject(part.metadata) ?? {};
+          const output = asString(state?.output);
+          const data: Record<string, unknown> = {
+            toolName,
+            input,
+            metadata,
+            ...(output ? { output } : {}),
+          };
+          const diffFiles = normalizeInvocationDiffFiles(data);
+          if (diffFiles.length > 0) {
+            data.diff = { files: diffFiles };
+          }
+          const itemType = canonicalItemTypeFromToolName(toolName);
+          const title = asString(state?.title) ?? toolName;
+          const previous = toolPartStatusById.get(partId);
+          const shouldEmitStarted =
+            !previous || (previous.sessionId === sessionId && previous.status !== status);
+
+          if (shouldEmitStarted && (status === "pending" || status === "running")) {
+            await emitAsync(
+              eventBase({
+                threadId,
+                type: "item.started",
+                payload: {
+                  itemType,
+                  status: "inProgress",
+                  title,
+                  data,
+                },
+                method: event.type,
+                rawPayload: event,
+                turnId,
+                itemId,
+              }),
+            );
+          }
+
+          if (status === "pending" || status === "running") {
+            await emitAsync(
+              eventBase({
+                threadId,
+                type: "item.updated",
+                payload: {
+                  itemType,
+                  status: "inProgress",
+                  title,
+                  data,
+                },
+                method: event.type,
+                rawPayload: event,
+                turnId,
+                itemId,
+              }),
+            );
+          } else {
+            await emitAsync(
+              eventBase({
+                threadId,
+                type: "item.completed",
+                payload: {
+                  itemType,
+                  status: status === "completed" ? "completed" : "failed",
+                  title,
+                  data,
+                },
+                method: event.type,
+                rawPayload: event,
+                turnId,
+                itemId,
+              }),
+            );
+          }
+
+          toolPartStatusById.set(partId, { sessionId, messageId, status });
+          return;
+        }
+
         const streamKind = streamKindFromPartType(asString(part.type));
         const nextText = asString(part.text) ?? asString(asObject(part.content)?.text) ?? "";
         const previous = partMetadataById.get(partId);
@@ -940,25 +1074,49 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           asString(permission.permission) ?? asString(permission.type) ?? asString(permission.kind),
         );
 
-        if (event.type === "permission.asked") {
-          permissionTypeByRequest.set(requestId, requestType);
-          await emitAsync(
-            eventBase({
-              threadId,
-              type: "request.opened",
-              payload: { requestType, args: permission },
-              method: event.type,
-              rawPayload: event,
-              turnId,
-              requestId,
-            }),
-          );
-          return;
-        }
-
         const status = asString(permission.status)?.toLowerCase() ?? "";
-        if (status === "pending" || status === "open" || status === "requested") {
+        if (event.type === "permission.asked" || isPendingPermissionStatus(status)) {
           permissionTypeByRequest.set(requestId, requestType);
+          const session = sessions.get(threadId);
+          if (session?.runtimeMode === "full-access") {
+            try {
+              await requestJson<void>({
+                threadId,
+                methodName: "permission.reply",
+                httpMethod: "POST",
+                path: `/permission/${encodeURIComponent(requestId)}/reply`,
+                directory: session.cwd,
+                body: { reply: "always" },
+              }).pipe(runWithServices);
+              return;
+            } catch (cause) {
+              await emitAsync(
+                eventBase({
+                  threadId,
+                  type: "runtime.warning",
+                  payload: {
+                    message: toMessage(
+                      cause,
+                      "Failed to auto-approve OpenCode permission request in full-access mode.",
+                    ),
+                    detail: {
+                      requestId,
+                      requestType,
+                      runtimeMode: session.runtimeMode,
+                    },
+                  },
+                  method: "permission.reply",
+                  rawPayload: {
+                    requestId,
+                    requestType,
+                    reply: "always",
+                    error: toMessage(cause, "OpenCode permission auto-approval failed."),
+                  },
+                  turnId,
+                }),
+              );
+            }
+          }
           await emitAsync(
             eventBase({
               threadId,
@@ -1009,7 +1167,9 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           return;
         }
         const requestType = permissionTypeByRequest.get(requestId) ?? "unknown";
-        const decision = decisionFromPermissionReply(asString(properties.reply));
+        const decision = decisionFromPermissionReply(
+          asString(properties.reply) ?? asString(properties.response),
+        );
         await emitAsync(
           eventBase({
             threadId,
@@ -1726,6 +1886,11 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
             partMetadataById.delete(partId);
           }
         }
+        for (const [partId, metadata] of toolPartStatusById.entries()) {
+          if (metadata.sessionId === session.sessionId) {
+            toolPartStatusById.delete(partId);
+          }
+        }
         messageRoleGate.clearSession(session.sessionId);
         for (const [messageId, messageSessionId] of completedAssistantMessageSessionById.entries()) {
           if (messageSessionId === session.sessionId) {
@@ -1801,6 +1966,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         permissionTypeByRequest.clear();
         questionIdsByRequest.clear();
         partMetadataById.clear();
+        toolPartStatusById.clear();
         messageRoleGate.clearAll();
         completedAssistantMessageSessionById.clear();
         commandCacheByCwd.clear();

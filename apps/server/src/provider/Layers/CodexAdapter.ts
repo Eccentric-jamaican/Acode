@@ -39,6 +39,7 @@ import {
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import { normalizeInvocationDiffFiles } from "./InvocationDiffNormalization.ts";
 import { discoverSkillsForCwd } from "./SkillDiscovery.ts";
 
 const PROVIDER = "codex" as const;
@@ -496,6 +497,23 @@ function mapItemLifecycle(
   }
 
   const detail = itemDetail(source, payload ?? {});
+  const invocationDiffFiles = normalizeInvocationDiffFiles(event.payload);
+  const normalizedData =
+    event.payload !== undefined &&
+    typeof event.payload === "object" &&
+    event.payload !== null &&
+    !Array.isArray(event.payload)
+      ? (event.payload as Record<string, unknown>)
+      : {};
+  const data =
+    invocationDiffFiles.length > 0
+      ? {
+          ...normalizedData,
+          diff: {
+            files: invocationDiffFiles,
+          },
+        }
+      : (event.payload !== undefined ? event.payload : undefined);
   const status =
     lifecycle === "item.started"
       ? "inProgress"
@@ -511,7 +529,7 @@ function mapItemLifecycle(
       ...(status ? { status } : {}),
       ...(itemTitle(itemType) ? { title: itemTitle(itemType) } : {}),
       ...(detail ? { detail } : {}),
-      ...(event.payload !== undefined ? { data: event.payload } : {}),
+      ...(data !== undefined ? { data } : {}),
     },
   };
 }

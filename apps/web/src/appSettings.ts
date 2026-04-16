@@ -46,6 +46,7 @@ const AppSettingsSchema = Schema.Struct({
   keepInspectModeAfterCapture: Schema.Boolean.pipe(
     Schema.withConstructorDefault(() => Option.some(false)),
   ),
+  wrapTurnDiffLines: Schema.Boolean.pipe(Schema.withConstructorDefault(() => Option.some(true))),
   codexServiceTier: AppServiceTierSchema.pipe(Schema.withConstructorDefault(() => Option.some("auto"))),
   customCodexModels: Schema.Array(Schema.String).pipe(
     Schema.withConstructorDefault(() => Option.some([])),

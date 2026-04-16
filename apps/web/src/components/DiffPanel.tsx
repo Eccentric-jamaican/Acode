@@ -19,6 +19,7 @@ import { readNativeApi } from "../nativeApi";
 import { preferredTerminalEditor, resolvePathLinkTarget } from "../terminal-links";
 import { parseDiffRouteSearch, withDiffSelection, withRightPanelMode } from "../diffRouteSearch";
 import { isElectronRuntime } from "../env";
+import { useAppSettings } from "../appSettings";
 import { useTheme } from "../hooks/useTheme";
 import { buildPatchCacheKey } from "../lib/diffRendering";
 import { resolveDiffThemeName } from "../lib/diffRendering";
@@ -289,6 +290,7 @@ export { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
 export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
   const navigate = useNavigate();
   const usesDesktopAppChrome = isElectronRuntime();
+  const { settings } = useAppSettings();
   const { resolvedTheme } = useTheme();
   const [surfaceMode, setSurfaceMode] = useState<DiffSurfaceMode>("review");
   const [diffRenderMode, setDiffRenderMode] = useState<DiffRenderMode>("stacked");
@@ -894,6 +896,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                           options={{
                             diffStyle: diffRenderMode === "split" ? "split" : "unified",
                             lineDiffType: "none",
+                            overflow: settings.wrapTurnDiffLines ? "wrap" : "scroll",
                             theme: resolveDiffThemeName(resolvedTheme),
                             themeType: resolvedTheme as DiffThemeType,
                             unsafeCSS: DIFF_PANEL_UNSAFE_CSS,

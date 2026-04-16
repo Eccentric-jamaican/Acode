@@ -81,6 +81,7 @@ import {
 } from "../Errors.ts";
 import { ClaudeAdapter, type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import { normalizeInvocationDiffFiles } from "./InvocationDiffNormalization.ts";
 
 const PROVIDER = "claudeAgent" as const;
 type ClaudeTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
@@ -547,6 +548,21 @@ function titleForTool(itemType: CanonicalItemType): string {
     default:
       return "Item";
   }
+}
+
+function withInvocationDiffData(
+  input: Record<string, unknown>,
+): Record<string, unknown> {
+  const diffFiles = normalizeInvocationDiffFiles(input);
+  if (diffFiles.length === 0) {
+    return input;
+  }
+  return {
+    ...input,
+    diff: {
+      files: diffFiles,
+    },
+  };
 }
 
 const SUPPORTED_CLAUDE_IMAGE_MIME_TYPES = new Set([
@@ -1521,10 +1537,10 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
               status: status === "completed" ? "completed" : "failed",
               title: tool.title,
               ...(tool.detail ? { detail: tool.detail } : {}),
-              data: {
+              data: withInvocationDiffData({
                 toolName: tool.toolName,
                 input: tool.input,
-              },
+              }),
             },
             providerRefs: nativeProviderRefs(context, { providerItemId: tool.itemId }),
             raw: {
@@ -1717,10 +1733,10 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
                 status: "inProgress",
                 title: nextTool.title,
                 ...(nextTool.detail ? { detail: nextTool.detail } : {}),
-                data: {
+                data: withInvocationDiffData({
                   toolName: nextTool.toolName,
                   input: nextTool.input,
-                },
+                }),
               },
               providerRefs: nativeProviderRefs(context, { providerItemId: nextTool.itemId }),
               raw: {
@@ -1862,7 +1878,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
               status: toolResult.isError ? "failed" : "inProgress",
               title: tool.title,
               ...(tool.detail ? { detail: tool.detail } : {}),
-              data: toolData,
+              data: withInvocationDiffData(toolData),
             },
             providerRefs: nativeProviderRefs(context, { providerItemId: tool.itemId }),
             raw: {
@@ -1910,7 +1926,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
               status: itemStatus,
               title: tool.title,
               ...(tool.detail ? { detail: tool.detail } : {}),
-              data: toolData,
+              data: withInvocationDiffData(toolData),
             },
             providerRefs: nativeProviderRefs(context, { providerItemId: tool.itemId }),
             raw: {

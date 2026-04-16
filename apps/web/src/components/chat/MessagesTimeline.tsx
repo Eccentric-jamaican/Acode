@@ -17,6 +17,7 @@ import {
   type VirtualItem,
   useVirtualizer,
 } from "@tanstack/react-virtual";
+import { FileDiff } from "@pierre/diffs/react";
 import {
   BotIcon,
   CheckIcon,
@@ -55,6 +56,8 @@ import {
   summarizeTurnDiffStats,
   type TurnDiffTreeNode,
 } from "../../lib/turnDiffTree";
+import { resolveDiffThemeName } from "../../lib/diffRendering";
+import { toRenderableInvocationDiffFiles } from "../../lib/invocationDiffRendering";
 import {
   normalizeSelectedText,
   reconstructRangeFromOffsets,
@@ -412,6 +415,31 @@ function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
     return capitalizePhrase(normalizeCompactToolLabel(workEntry.label));
   }
   return capitalizePhrase(normalizeCompactToolLabel(workEntry.toolTitle));
+}
+
+function workEntryKindLabel(workEntry: TimelineWorkEntry): string | null {
+  if (workEntry.requestKind === "command") return "Approval";
+  if (workEntry.requestKind === "file-read") return "Read";
+  if (workEntry.requestKind === "file-change") return "Approval";
+
+  switch (workEntry.itemType) {
+    case "command_execution":
+      return "Command";
+    case "file_change":
+      return "Edit";
+    case "web_search":
+      return "Search";
+    case "image_view":
+      return "View";
+    case "mcp_tool_call":
+      return "MCP";
+    case "dynamic_tool_call":
+      return "Tool";
+    case "collab_agent_tool_call":
+      return "Agent";
+    default:
+      return workEntry.tone === "tool" ? "Tool" : null;
+  }
 }
 
 function estimateTimelineProposedPlanHeight(proposedPlan: TimelineProposedPlan): number {
@@ -797,46 +825,162 @@ const ProposedPlanCard = memo(function ProposedPlanCard(props: {
 
 const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   workEntry: WorkLogEntry;
+  resolvedTheme: "light" | "dark";
 }) {
-  const { workEntry } = props;
+  const { workEntry, resolvedTheme } = props;
   const iconConfig = workToneIcon(workEntry.tone);
   const EntryIcon = workEntryIcon(workEntry);
   const heading = toolWorkEntryHeading(workEntry);
   const preview = workEntryPreview(workEntry);
+  const detailPreview =
+    !workEntry.command && workEntry.detail
+      ? workEntry.detail.split(/\r?\n/, 1)[0]?.trim() ?? null
+      : null;
   const displayText = preview ? `${heading} - ${preview}` : heading;
   const hasChangedFiles = (workEntry.changedFiles?.length ?? 0) > 0;
-  const previewIsChangedFiles = hasChangedFiles && !workEntry.command && !workEntry.detail;
+  const kindLabel = workEntryKindLabel(workEntry);
+  const invocationDiffFiles = workEntry.invocationDiffFiles ?? [];
+  const renderableInvocationDiffFiles = useMemo(
+    () => toRenderableInvocationDiffFiles(invocationDiffFiles, `invocation:${workEntry.id}`),
+    [invocationDiffFiles, workEntry.id],
+  );
+  const canExpandInvocationDiff = renderableInvocationDiffFiles.length > 0;
+  const hasInvocationDiffStat = workEntry.invocationDiffStat
+    ? hasNonZeroStat(workEntry.invocationDiffStat)
+    : false;
+  const [isInvocationDiffExpanded, setIsInvocationDiffExpanded] = useState(false);
+  const [activeInvocationDiffPath, setActiveInvocationDiffPath] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (renderableInvocationDiffFiles.length === 0) {
+      setIsInvocationDiffExpanded(false);
+      setActiveInvocationDiffPath(null);
+      return;
+    }
+    if (!activeInvocationDiffPath) {
+      setActiveInvocationDiffPath(renderableInvocationDiffFiles[0]?.path ?? null);
+      return;
+    }
+    const matchesActive = renderableInvocationDiffFiles.some(
+      (file) => file.path === activeInvocationDiffPath,
+    );
+    if (!matchesActive) {
+      setActiveInvocationDiffPath(renderableInvocationDiffFiles[0]?.path ?? null);
+    }
+  }, [activeInvocationDiffPath, renderableInvocationDiffFiles]);
+
+  const activeInvocationDiff =
+    renderableInvocationDiffFiles.find((file) => file.path === activeInvocationDiffPath) ??
+    renderableInvocationDiffFiles[0];
+  const primaryInvocationPath = invocationDiffFiles[0]?.path ?? null;
 
   return (
-    <div className="rounded-lg px-1 py-1">
-      <div className="flex items-center gap-2 transition-[opacity,translate] duration-200">
-        <span
-          className={cn("flex size-5 shrink-0 items-center justify-center", iconConfig.className)}
-        >
-          <EntryIcon className="size-3" />
+    <div className="rounded-lg border border-border/45 bg-background/45 px-2.5 py-2">
+      <div className="flex items-start gap-2.5">
+        <span className={cn("mt-0.5 flex size-5 shrink-0 items-center justify-center", iconConfig.className)}>
+          <EntryIcon className="size-3.5" />
         </span>
-        <div className="min-w-0 flex-1 overflow-hidden">
-          <p
-            className={cn(
-              "truncate text-[11px] leading-5",
-              workToneClass(workEntry.tone),
-              preview ? "text-muted-foreground/70" : "",
-            )}
-            title={displayText}
-          >
-            <span className={cn("text-foreground/80", workToneClass(workEntry.tone))}>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <p
+              className={cn("min-w-0 truncate text-[11px] font-medium leading-5 text-foreground/85")}
+              title={displayText}
+            >
               {heading}
-            </span>
-            {preview && <span className="text-muted-foreground/55"> - {preview}</span>}
-          </p>
+            </p>
+            {primaryInvocationPath && (
+              <span
+                className="min-w-0 truncate font-mono text-[10px] leading-5 text-muted-foreground/80"
+                title={primaryInvocationPath}
+              >
+                {primaryInvocationPath}
+              </span>
+            )}
+            {hasInvocationDiffStat && workEntry.invocationDiffStat && (
+              <DiffStatLabel
+                additions={workEntry.invocationDiffStat.additions}
+                deletions={workEntry.invocationDiffStat.deletions}
+              />
+            )}
+            {canExpandInvocationDiff && (
+              <button
+                type="button"
+                className="rounded-sm p-0.5 text-muted-foreground/75 transition-colors duration-150 hover:text-foreground/85"
+                onClick={() => setIsInvocationDiffExpanded((current) => !current)}
+                aria-label={isInvocationDiffExpanded ? "Collapse invocation diff" : "Expand invocation diff"}
+              >
+                <ChevronRightIcon
+                  className={cn(
+                    "size-3 transition-transform duration-150",
+                    isInvocationDiffExpanded ? "rotate-90" : "",
+                  )}
+                />
+              </button>
+            )}
+            {kindLabel && (
+              <Badge variant="secondary" className="h-5 rounded-md px-1.5 text-[9px] uppercase tracking-[0.12em]">
+                {kindLabel}
+              </Badge>
+            )}
+          </div>
+          {workEntry.command && (
+            <p
+              className="mt-1 overflow-hidden rounded-md border border-border/55 bg-card/60 px-2 py-1 font-mono text-[10px] leading-4 text-muted-foreground/80"
+              title={workEntry.command}
+            >
+              {workEntry.command}
+            </p>
+          )}
+          {!workEntry.command && detailPreview && detailPreview !== heading && (
+            <p
+              className={cn("mt-1 truncate text-[10px] leading-4", workToneClass(workEntry.tone))}
+              title={workEntry.detail}
+            >
+              {detailPreview}
+            </p>
+          )}
         </div>
       </div>
-      {hasChangedFiles && !previewIsChangedFiles && (
-        <div className="mt-1 flex flex-wrap gap-1 pl-6">
+      {canExpandInvocationDiff && isInvocationDiffExpanded && activeInvocationDiff && (
+        <div className="mt-2 rounded-md border border-border/65 bg-card/60 p-2">
+          {renderableInvocationDiffFiles.length > 1 && (
+            <div className="mb-2 flex flex-wrap gap-1">
+              {renderableInvocationDiffFiles.map((file) => (
+                <button
+                  key={`${workEntry.id}:invocation-diff:${file.path}`}
+                  type="button"
+                  className={cn(
+                    "rounded-md border px-1.5 py-0.5 font-mono text-[10px] transition-colors duration-150",
+                    file.path === activeInvocationDiff.path
+                      ? "border-border bg-background/80 text-foreground/90"
+                      : "border-border/50 bg-background/50 text-muted-foreground/75 hover:text-foreground/80",
+                  )}
+                  onClick={() => setActiveInvocationDiffPath(file.path)}
+                >
+                  {file.path}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="overflow-hidden rounded-md border border-border/70 bg-background/75">
+            <FileDiff
+              fileDiff={activeInvocationDiff.fileDiff}
+              options={{
+                diffStyle: "unified",
+                lineDiffType: "none",
+                theme: resolveDiffThemeName(resolvedTheme),
+                themeType: resolvedTheme,
+              }}
+            />
+          </div>
+        </div>
+      )}
+      {hasChangedFiles && (
+        <div className="mt-2 flex flex-wrap gap-1 pl-7">
           {workEntry.changedFiles?.slice(0, 4).map((filePath) => (
             <span
               key={`${workEntry.id}:${filePath}`}
-              className="rounded-md border border-border/55 bg-background/75 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground/75"
+              className="rounded-md border border-border/55 bg-card/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground/80"
               title={filePath}
             >
               {filePath}
@@ -1550,30 +1694,31 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
               : groupedEntries;
           const hiddenCount = groupedEntries.length - visibleEntries.length;
           const onlyToolEntries = groupedEntries.every((entry) => entry.tone === "tool");
-          const showHeader = hasOverflow || !onlyToolEntries;
           const groupLabel = onlyToolEntries ? "Tool calls" : "Work log";
 
           return (
             <div className="rounded-xl border border-border/45 bg-card/25 px-2 py-1.5">
-              {showHeader && (
-                <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
-                  <p className="text-[9px] uppercase tracking-[0.16em] text-muted-foreground/55">
-                    {groupLabel} ({groupedEntries.length})
-                  </p>
-                  {hasOverflow && (
-                    <button
-                      type="button"
-                      className="text-[9px] uppercase tracking-[0.12em] text-muted-foreground/55 transition-colors duration-150 hover:text-foreground/75"
-                      onClick={() => onToggleWorkGroup(groupId)}
-                    >
-                      {isExpanded ? "Show less" : `Show ${hiddenCount} more`}
-                    </button>
-                  )}
-                </div>
-              )}
+              <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
+                <p className="text-[9px] uppercase tracking-[0.16em] text-muted-foreground/55">
+                  {groupLabel} ({groupedEntries.length})
+                </p>
+                {hasOverflow && (
+                  <button
+                    type="button"
+                    className="text-[9px] uppercase tracking-[0.12em] text-muted-foreground/55 transition-colors duration-150 hover:text-foreground/75"
+                    onClick={() => onToggleWorkGroup(groupId)}
+                  >
+                    {isExpanded ? "Show less" : `Show ${hiddenCount} more`}
+                  </button>
+                )}
+              </div>
               <div className="space-y-0.5">
                 {visibleEntries.map((workEntry) => (
-                  <SimpleWorkEntryRow key={`work-row:${workEntry.id}`} workEntry={workEntry} />
+                  <SimpleWorkEntryRow
+                    key={`work-row:${workEntry.id}`}
+                    workEntry={workEntry}
+                    resolvedTheme={resolvedTheme}
+                  />
                 ))}
               </div>
             </div>

@@ -583,6 +583,40 @@ function SettingsRouteView() {
                   </Button>
                 </div>
               ) : null}
+
+              <div className="flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
+                <div>
+                  <p className="text-sm font-medium text-foreground">Wrap lines in turn diffs</p>
+                  <p className="text-xs text-muted-foreground">
+                    Wrap long lines in the turn diff panel instead of requiring horizontal scrolling.
+                  </p>
+                </div>
+                <Switch
+                  checked={settings.wrapTurnDiffLines}
+                  onCheckedChange={(checked) =>
+                    updateSettings({
+                      wrapTurnDiffLines: Boolean(checked),
+                    })
+                  }
+                  aria-label="Wrap lines in turn diffs"
+                />
+              </div>
+
+              {settings.wrapTurnDiffLines !== defaults.wrapTurnDiffLines ? (
+                <div className="mt-3 flex justify-end">
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    onClick={() =>
+                      updateSettings({
+                        wrapTurnDiffLines: defaults.wrapTurnDiffLines,
+                      })
+                    }
+                  >
+                    Restore diff wrapping default
+                  </Button>
+                </div>
+              ) : null}
             </section>
 
             <section className="rounded-2xl border border-border bg-card p-5">

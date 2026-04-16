@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   deriveActivePlanState,
+  deriveRevertTurnCountByUserMessageId,
   PROVIDER_OPTIONS,
   derivePendingApprovals,
   derivePendingUserInputs,
@@ -561,6 +562,72 @@ describe("deriveWorkLogEntries", () => {
     );
   });
 
+  it("parses canonical invocation diff files from payload.data.diff.files", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "file-tool-with-diff",
+        kind: "tool.updated",
+        summary: "Edit file",
+        payload: {
+          itemType: "file_change",
+          data: {
+            diff: {
+              files: [
+                {
+                  path: "apps/web/src/components/chat/MessagesTimeline.tsx",
+                  additions: 4,
+                  deletions: 2,
+                  status: "modified",
+                  before: "before",
+                  after: "after",
+                },
+              ],
+            },
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities, undefined);
+    expect(entry?.invocationDiffFiles).toEqual([
+      {
+        path: "apps/web/src/components/chat/MessagesTimeline.tsx",
+        additions: 4,
+        deletions: 2,
+        status: "modified",
+        before: "before",
+        after: "after",
+      },
+    ]);
+    expect(entry?.invocationDiffStat).toEqual({ additions: 4, deletions: 2 });
+  });
+
+  it("does not infer invocation diff from non-canonical payload fields", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "file-tool-no-canonical-diff",
+        kind: "tool.completed",
+        summary: "Edit file",
+        payload: {
+          itemType: "file_change",
+          data: {
+            files: [
+              {
+                path: "apps/web/src/session-logic.ts",
+                additions: 9,
+                deletions: 3,
+              },
+            ],
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities, undefined);
+    expect(entry?.invocationDiffFiles).toBeUndefined();
+    expect(entry?.invocationDiffStat).toBeUndefined();
+  });
+
   it("orders work log by activity sequence when present", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
@@ -622,6 +689,220 @@ describe("deriveTimelineEntries", () => {
         planMarkdown: "# Ship it",
       },
     });
+  });
+});
+
+describe("deriveRevertTurnCountByUserMessageId", () => {
+  it("maps each user message to the first following assistant checkpoint in the same exchange", () => {
+    const userOneId = MessageId.makeUnsafe("message-user-1");
+    const assistantOneId = MessageId.makeUnsafe("message-assistant-1");
+    const assistantTwoId = MessageId.makeUnsafe("message-assistant-2");
+    const userTwoId = MessageId.makeUnsafe("message-user-2");
+    const assistantThreeId = MessageId.makeUnsafe("message-assistant-3");
+    const turnOneId = TurnId.makeUnsafe("turn-1");
+    const turnTwoId = TurnId.makeUnsafe("turn-2");
+    const turnThreeId = TurnId.makeUnsafe("turn-3");
+
+    const timelineEntries = deriveTimelineEntries(
+      [
+        {
+          id: userOneId,
+          role: "user",
+          text: "first prompt",
+          createdAt: "2026-02-23T00:00:01.000Z",
+          streaming: false,
+        },
+        {
+          id: assistantOneId,
+          role: "assistant",
+          text: "first reply",
+          turnId: turnOneId,
+          createdAt: "2026-02-23T00:00:02.000Z",
+          streaming: false,
+        },
+        {
+          id: assistantTwoId,
+          role: "assistant",
+          text: "follow up reply",
+          turnId: turnTwoId,
+          createdAt: "2026-02-23T00:00:03.000Z",
+          streaming: false,
+        },
+        {
+          id: userTwoId,
+          role: "user",
+          text: "second prompt",
+          createdAt: "2026-02-23T00:00:04.000Z",
+          streaming: false,
+        },
+        {
+          id: assistantThreeId,
+          role: "assistant",
+          text: "second reply",
+          turnId: turnThreeId,
+          createdAt: "2026-02-23T00:00:05.000Z",
+          streaming: false,
+        },
+      ],
+      [],
+      [],
+    );
+
+    const byAssistantMessageId = new Map([
+      [
+        assistantOneId,
+        {
+          turnId: turnOneId,
+          completedAt: "2026-02-23T00:00:02.500Z",
+          files: [],
+          checkpointTurnCount: 3,
+          assistantMessageId: assistantOneId,
+        },
+      ],
+      [
+        assistantThreeId,
+        {
+          turnId: turnThreeId,
+          completedAt: "2026-02-23T00:00:05.500Z",
+          files: [],
+          checkpointTurnCount: 1,
+          assistantMessageId: assistantThreeId,
+        },
+      ],
+    ]);
+
+    const result = deriveRevertTurnCountByUserMessageId(
+      timelineEntries,
+      byAssistantMessageId,
+      new Map([
+        [
+          turnTwoId,
+          {
+            turnId: turnTwoId,
+            completedAt: "2026-02-23T00:00:03.500Z",
+            files: [],
+            checkpointTurnCount: 4,
+            assistantMessageId: assistantTwoId,
+          },
+        ],
+      ]),
+      {},
+    );
+
+    expect(result).toEqual(
+      new Map([
+        [userOneId, 2],
+        [userTwoId, 0],
+      ]),
+    );
+  });
+
+  it("uses inferred checkpoint turn counts when explicit counts are missing", () => {
+    const userId = MessageId.makeUnsafe("message-user-inferred");
+    const assistantId = MessageId.makeUnsafe("message-assistant-inferred");
+    const turnId = TurnId.makeUnsafe("turn-inferred");
+    const timelineEntries = deriveTimelineEntries(
+      [
+        {
+          id: userId,
+          role: "user",
+          text: "prompt",
+          createdAt: "2026-02-23T00:00:01.000Z",
+          streaming: false,
+        },
+        {
+          id: assistantId,
+          role: "assistant",
+          text: "reply",
+          turnId,
+          createdAt: "2026-02-23T00:00:02.000Z",
+          streaming: false,
+        },
+      ],
+      [],
+      [],
+    );
+
+    const result = deriveRevertTurnCountByUserMessageId(
+      timelineEntries,
+      new Map(),
+      new Map([
+        [
+          turnId,
+          {
+            turnId,
+            completedAt: "2026-02-23T00:00:02.500Z",
+            files: [],
+          },
+        ],
+      ]),
+      { [turnId]: 2 },
+    );
+
+    expect(result).toEqual(new Map([[userId, 1]]));
+  });
+
+  it("does not cross into the next user exchange when no checkpoint exists yet", () => {
+    const userOneId = MessageId.makeUnsafe("message-user-no-checkpoint");
+    const assistantOneId = MessageId.makeUnsafe("message-assistant-no-checkpoint");
+    const userTwoId = MessageId.makeUnsafe("message-user-with-checkpoint");
+    const assistantTwoId = MessageId.makeUnsafe("message-assistant-with-checkpoint");
+    const turnTwoId = TurnId.makeUnsafe("turn-with-checkpoint");
+    const timelineEntries = deriveTimelineEntries(
+      [
+        {
+          id: userOneId,
+          role: "user",
+          text: "first prompt",
+          createdAt: "2026-02-23T00:00:01.000Z",
+          streaming: false,
+        },
+        {
+          id: assistantOneId,
+          role: "assistant",
+          text: "first reply",
+          createdAt: "2026-02-23T00:00:02.000Z",
+          streaming: false,
+        },
+        {
+          id: userTwoId,
+          role: "user",
+          text: "second prompt",
+          createdAt: "2026-02-23T00:00:03.000Z",
+          streaming: false,
+        },
+        {
+          id: assistantTwoId,
+          role: "assistant",
+          text: "second reply",
+          turnId: turnTwoId,
+          createdAt: "2026-02-23T00:00:04.000Z",
+          streaming: false,
+        },
+      ],
+      [],
+      [],
+    );
+
+    const result = deriveRevertTurnCountByUserMessageId(
+      timelineEntries,
+      new Map([
+        [
+          assistantTwoId,
+          {
+            turnId: turnTwoId,
+            completedAt: "2026-02-23T00:00:04.500Z",
+            files: [],
+            checkpointTurnCount: 2,
+            assistantMessageId: assistantTwoId,
+          },
+        ],
+      ]),
+      new Map(),
+      {},
+    );
+
+    expect(result).toEqual(new Map([[userTwoId, 1]]));
   });
 });
 
