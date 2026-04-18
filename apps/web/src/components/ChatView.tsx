@@ -66,6 +66,7 @@ import {
   supportsNativeSlashCommandDiscovery,
   supportsSkillDiscovery,
 } from "~/lib/providerDiscoveryReactQuery";
+import { refineNewThreadSuggestionsQueryOptions } from "~/lib/newThreadSuggestionsReactQuery";
 
 import { isElectron, isElectronRuntime } from "../env";
 import {
@@ -146,6 +147,7 @@ import {
   FolderClosedIcon,
   GlobeIcon,
   KanbanSquareIcon,
+  MessageSquareIcon,
   PanelLeftIcon,
   PlusIcon,
   Maximize2Icon,
@@ -204,7 +206,7 @@ import {
 } from "~/projectScripts";
 import { Toggle } from "./ui/toggle";
 import { SidebarInsetTrigger, SidebarTrigger, useSidebar } from "./ui/sidebar";
-import { newCommandId, newMessageId, newThreadId } from "~/lib/utils";
+import { newCommandId, newMessageId, newProjectId, newThreadId } from "~/lib/utils";
 import { readNativeApi } from "~/nativeApi";
 import {
   getAppModelOptions,
@@ -540,6 +542,7 @@ export default function ChatView({
     (store) => store.syncPersistedAttachments,
   );
   const setProjectDraftThreadId = useComposerDraftStore((store) => store.setProjectDraftThreadId);
+  const getDraftThreadByProjectId = useComposerDraftStore((store) => store.getDraftThreadByProjectId);
   const clearComposerDraftContent = useComposerDraftStore((store) => store.clearComposerContent);
   const clearDraftThread = useComposerDraftStore((store) => store.clearDraftThread);
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
@@ -731,6 +734,8 @@ export default function ChatView({
       activeThread.messages.length > 0 ||
       activeThread.session !== null),
   );
+  const shouldShowNewThreadLanding = isLocalDraftThread && !hasThreadStarted;
+  const isPromptEmpty = prompt.trim().length === 0;
   const selectedServiceTierSetting = settings.codexServiceTier;
   const selectedServiceTier = resolveAppServiceTier(selectedServiceTierSetting);
   const lockedProvider: ProviderKind | null = hasThreadStarted
@@ -781,6 +786,30 @@ export default function ChatView({
       draftModel,
     ) as ModelSlug;
   }, [baseThreadModel, composerDraft.model, customModelsForSelectedProvider, selectedProvider]);
+  const newThreadSuggestionsCwd = activeThread?.worktreePath ?? activeProject?.cwd ?? null;
+  const newThreadGitStatusQuery = useQuery(gitStatusQueryOptions(newThreadSuggestionsCwd));
+  const shouldShowNewThreadSuggestions =
+    shouldShowNewThreadLanding &&
+    activeProject !== undefined &&
+    settings.newThreadSuggestionsEnabled &&
+    isPromptEmpty;
+  const refinedNewThreadSuggestionsQuery = useQuery(
+    refineNewThreadSuggestionsQueryOptions({
+      provider: selectedProvider,
+      cwd: newThreadSuggestionsCwd,
+      projectName: activeProject?.name ?? null,
+      selectedModel: settings.newThreadSuggestionModel,
+      enabled: shouldShowNewThreadSuggestions,
+    }),
+  );
+  const visibleNewThreadSuggestions = refinedNewThreadSuggestionsQuery.data?.suggestions ?? [];
+  const newThreadSuggestionCount = visibleNewThreadSuggestions.length;
+  const showNewThreadSuggestionsLoading =
+    shouldShowNewThreadSuggestions &&
+    selectedProvider === "codex" &&
+    (newThreadGitStatusQuery.isLoading || newThreadGitStatusQuery.data?.hasWorkingTreeChanges === true) &&
+    refinedNewThreadSuggestionsQuery.isLoading &&
+    newThreadSuggestionCount === 0;
   const reasoningOptions = getReasoningEffortOptions(selectedProvider);
   const supportsReasoningEffort = reasoningOptions.length > 0;
   const selectedEffort = composerDraft.effort ?? getDefaultReasoningEffort(selectedProvider);
@@ -1395,6 +1424,13 @@ export default function ChatView({
       focusComposer();
     });
   }, [focusComposer]);
+  const applyNewThreadSuggestion = useCallback(
+    (nextPrompt: string) => {
+      setPrompt(nextPrompt);
+      scheduleComposerFocus();
+    },
+    [scheduleComposerFocus, setPrompt],
+  );
   const setTerminalOpen = useCallback(
     (open: boolean) => {
       if (!activeThreadId) return;
@@ -3768,6 +3804,113 @@ export default function ChatView({
     setProjectDraftThreadId,
   ]);
 
+  const onSelectNewThreadLandingProject = useCallback(
+    async (projectId: ProjectId) => {
+      if (projectId.length === 0) {
+        return;
+      }
+
+      const reusableDraft = getDraftThreadByProjectId(projectId);
+      const reusableThreadId =
+        reusableDraft &&
+        reusableDraft.isTemporary !== true &&
+        !threads.some((thread) => thread.id === reusableDraft.threadId)
+          ? reusableDraft.threadId
+          : null;
+
+      if (reusableThreadId) {
+        if (reusableThreadId === threadId) {
+          return;
+        }
+        await navigate({
+          to: "/$threadId",
+          params: { threadId: reusableThreadId },
+        });
+        return;
+      }
+
+      const nextThreadId = newThreadId();
+      setProjectDraftThreadId(projectId, nextThreadId, {
+        createdAt: new Date().toISOString(),
+        runtimeMode: draftThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE,
+        interactionMode: draftThread?.interactionMode ?? DEFAULT_INTERACTION_MODE,
+        envMode: "local",
+      });
+
+      if (nextThreadId === threadId) {
+        return;
+      }
+      await navigate({
+        to: "/$threadId",
+        params: { threadId: nextThreadId },
+      });
+    },
+    [
+      draftThread?.interactionMode,
+      draftThread?.runtimeMode,
+      getDraftThreadByProjectId,
+      navigate,
+      setProjectDraftThreadId,
+      threadId,
+      threads,
+    ],
+  );
+
+  const onAddProjectFromNewThreadLanding = useCallback(async () => {
+    const api = readNativeApi();
+    if (!api) {
+      toastManager.add({
+        type: "error",
+        title: "Unable to add project",
+        description: "Native API is unavailable.",
+      });
+      return;
+    }
+
+    const pickedPath = await api.dialogs.pickFolder().catch(() => null);
+    const cwd = pickedPath?.trim() ?? "";
+    if (!cwd) {
+      return;
+    }
+
+    const existingProject = projects.find((project) => project.cwd === cwd);
+    if (existingProject) {
+      await onSelectNewThreadLandingProject(existingProject.id);
+      return;
+    }
+
+    const projectId = newProjectId();
+    const createdAt = new Date().toISOString();
+    const title = cwd.split(/[/\\]/).findLast((segment) => segment.length > 0) ?? cwd;
+    try {
+      await api.orchestration.dispatchCommand({
+        type: "project.create",
+        commandId: newCommandId(),
+        projectId,
+        title,
+        workspaceRoot: cwd,
+        defaultModel: DEFAULT_MODEL_BY_PROVIDER.codex,
+        createdAt,
+      });
+
+      const snapshot = await api.orchestration.getSnapshot().catch(() => null);
+      if (snapshot) {
+        syncServerReadModel(snapshot);
+      }
+
+      await onSelectNewThreadLandingProject(projectId);
+    } catch (error) {
+      toastManager.add({
+        type: "error",
+        title: "Unable to add project",
+        description:
+          error instanceof Error
+            ? error.message
+            : "The project could not be created. Try again.",
+      });
+    }
+  }, [onSelectNewThreadLandingProject, projects, syncServerReadModel]);
+
   const handleStatusCommand = useCallback(() => {
     const defaultMessage = `${selectedProvider} provider is ready.`;
     toastManager.add({
@@ -4125,37 +4268,91 @@ export default function ChatView({
           onTouchEnd={onMessagesTouchEnd}
           onTouchCancel={onMessagesTouchEnd}
         >
-          <MessagesTimeline
-            key={activeThread.id}
-            isFocusedPane={isFocusedPane}
-            hasMessages={timelineEntries.length > 0}
-            isWorking={isWorking}
-            activeTurnInProgress={!latestTurnSettled}
-            activeTurnStartedAt={activeLatestTurn?.startedAt ?? null}
-            scrollContainer={messagesScrollElement}
-            timelineEntries={timelineEntries}
-            completionDividerBeforeEntryId={completionDividerBeforeEntryId}
-            completionSummary={completionSummary}
-            turnDiffSummaryByAssistantMessageId={turnDiffSummaryByAssistantMessageId}
-            turnDiffSummaryByTurnId={turnDiffSummaryByTurnId}
-            nowIso={nowIso}
-            expandedWorkGroups={expandedWorkGroups}
-            onToggleWorkGroup={onToggleWorkGroup}
-            onOpenTurnDiff={onOpenTurnDiff}
-            revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
-            onRevertUserMessage={onRevertUserMessage}
-            isRevertingCheckpoint={isRevertingCheckpoint}
-            onImageExpand={onExpandTimelineImage}
-            markdownCwd={gitCwd ?? undefined}
-            resolvedTheme={resolvedTheme}
-            workspaceRoot={activeProject?.cwd ?? undefined}
-            pinnedSelections={composerPinnedSelections}
-            onAskAboutSelectedText={onAskAboutSelectedText}
-            onPinSelectedText={onPinSelectedText}
-            onRemovePinnedSelection={onRemovePinnedSelection}
-            pendingPinnedSelectionJumpId={pendingPinnedSelectionJumpId}
-            onPinnedSelectionJumpHandled={onPinnedSelectionJumpHandled}
-          />
+          {shouldShowNewThreadLanding ? (
+            <div
+              data-testid="chat-new-thread-landing"
+              data-thread-id={activeThread.id}
+              className="flex h-full items-center justify-center"
+            >
+              <div className="flex w-full max-w-2xl flex-col items-center gap-3 text-center">
+                <h3 className="text-xl font-normal text-foreground/90">Let's build</h3>
+                {activeProject ? (
+                  <Menu>
+                    <MenuTrigger
+                      render={
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          className="h-8 max-w-full gap-1.5 rounded-md px-2 text-sm text-muted-foreground hover:text-foreground"
+                          data-testid="chat-new-thread-project-picker-trigger"
+                          aria-label="Choose project"
+                        />
+                      }
+                    >
+                      <FolderClosedIcon className="size-3.5 shrink-0" />
+                      <span className="max-w-64 truncate">{activeProject.name}</span>
+                      <ChevronDownIcon className="size-3.5 shrink-0" />
+                    </MenuTrigger>
+                    <MenuPopup align="center" side="bottom">
+                      {projects.map((project) => (
+                        <MenuItem
+                          key={project.id}
+                          data-testid={`chat-new-thread-project-option-${project.id}`}
+                          onClick={() => {
+                            void onSelectNewThreadLandingProject(project.id);
+                          }}
+                        >
+                          {project.name}
+                        </MenuItem>
+                      ))}
+                      <MenuDivider />
+                      <MenuItem
+                        data-testid="chat-new-thread-project-option-add"
+                        onClick={() => {
+                          void onAddProjectFromNewThreadLanding();
+                        }}
+                      >
+                        <PlusIcon className="size-3.5" />
+                        Add project
+                      </MenuItem>
+                    </MenuPopup>
+                  </Menu>
+                ) : null}
+              </div>
+            </div>
+          ) : (
+            <MessagesTimeline
+              key={activeThread.id}
+              isFocusedPane={isFocusedPane}
+              hasMessages={timelineEntries.length > 0}
+              isWorking={isWorking}
+              activeTurnInProgress={!latestTurnSettled}
+              activeTurnStartedAt={activeLatestTurn?.startedAt ?? null}
+              scrollContainer={messagesScrollElement}
+              timelineEntries={timelineEntries}
+              completionDividerBeforeEntryId={completionDividerBeforeEntryId}
+              completionSummary={completionSummary}
+              turnDiffSummaryByAssistantMessageId={turnDiffSummaryByAssistantMessageId}
+              turnDiffSummaryByTurnId={turnDiffSummaryByTurnId}
+              nowIso={nowIso}
+              expandedWorkGroups={expandedWorkGroups}
+              onToggleWorkGroup={onToggleWorkGroup}
+              onOpenTurnDiff={onOpenTurnDiff}
+              revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
+              onRevertUserMessage={onRevertUserMessage}
+              isRevertingCheckpoint={isRevertingCheckpoint}
+              onImageExpand={onExpandTimelineImage}
+              markdownCwd={gitCwd ?? undefined}
+              resolvedTheme={resolvedTheme}
+              workspaceRoot={activeProject?.cwd ?? undefined}
+              pinnedSelections={composerPinnedSelections}
+              onAskAboutSelectedText={onAskAboutSelectedText}
+              onPinSelectedText={onPinSelectedText}
+              onRemovePinnedSelection={onRemovePinnedSelection}
+              pendingPinnedSelectionJumpId={pendingPinnedSelectionJumpId}
+              onPinnedSelectionJumpHandled={onPinnedSelectionJumpHandled}
+            />
+          )}
         </div>
         {showScrollToBottomPill ? (
           <div className="pointer-events-none absolute inset-x-0 bottom-3 z-10 flex justify-center px-3 sm:bottom-4 sm:px-5">
@@ -4180,6 +4377,40 @@ export default function ChatView({
           isGitRepo ? "pb-1" : "pb-2.5 sm:pb-3",
         )}
       >
+        {showNewThreadSuggestionsLoading ? (
+          <div
+            className="mx-auto mb-3 w-full max-w-3xl rounded-xl border border-border/60 bg-card/60 px-3 py-3 text-sm text-muted-foreground"
+            data-testid="chat-new-thread-suggestions-loading"
+          >
+            Reviewing current changes for suggested tasks...
+          </div>
+        ) : null}
+        {shouldShowNewThreadSuggestions && newThreadSuggestionCount > 0 ? (
+          <div className="mx-auto mb-3 w-full max-w-3xl" data-testid="chat-new-thread-suggestions">
+            <div className="mb-1.5 px-1 text-[11px] font-medium uppercase tracking-[0.08em] text-muted-foreground/70">
+              Suggested tasks
+            </div>
+            <div className="overflow-hidden rounded-xl">
+              {visibleNewThreadSuggestions.map((suggestion, index) => (
+                <button
+                  key={suggestion.id}
+                  type="button"
+                  data-testid={`chat-new-thread-suggestion-${suggestion.id}`}
+                  className={cn(
+                    "flex w-full cursor-pointer items-start gap-2.5 px-3 py-3 text-left text-sm text-foreground/88 transition-colors hover:bg-accent/35",
+                    index < newThreadSuggestionCount - 1 && "mb-px",
+                  )}
+                  onClick={() => applyNewThreadSuggestion(suggestion.prompt)}
+                >
+                  <span className="mt-0.5 shrink-0 rounded-full p-1 text-muted-foreground/75">
+                    <MessageSquareIcon className="size-3.5" />
+                  </span>
+                  <span className="min-w-0 leading-5">{suggestion.prompt}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
         <form
           ref={composerFormRef}
           onSubmit={onSend}

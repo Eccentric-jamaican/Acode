@@ -1,7 +1,12 @@
 import { useCallback, useSyncExternalStore } from "react";
 import { Option, Schema } from "effect";
 import { type ProviderKind, type ProviderServiceTier } from "@t3tools/contracts";
-import { getDefaultModel, getModelOptions, normalizeModelSlug } from "@t3tools/shared/model";
+import {
+  getDefaultModel,
+  getModelOptions,
+  inferProviderFromModel,
+  normalizeModelSlug,
+} from "@t3tools/shared/model";
 
 const APP_SETTINGS_STORAGE_KEY = "t3code:app-settings:v1";
 const MAX_CUSTOM_MODEL_COUNT = 32;
@@ -63,12 +68,22 @@ const AppSettingsSchema = Schema.Struct({
   enableSystemTaskCompletionNotifications: Schema.Boolean.pipe(
     Schema.withConstructorDefault(() => Option.some(true)),
   ),
+  newThreadSuggestionsEnabled: Schema.Boolean.pipe(
+    Schema.withConstructorDefault(() => Option.some(true)),
+  ),
+  newThreadSuggestionModel: Schema.NullOr(Schema.String).pipe(
+    Schema.withConstructorDefault(() => Option.some(null)),
+  ),
 });
 export type AppSettings = typeof AppSettingsSchema.Type;
 export interface AppModelOption {
   slug: string;
   name: string;
   isCustom: boolean;
+}
+
+export interface SuggestionModelOption extends AppModelOption {
+  provider: ProviderKind;
 }
 
 export function resolveAppServiceTier(serviceTier: AppServiceTier): ProviderServiceTier | null {
@@ -127,7 +142,23 @@ function normalizeAppSettings(settings: AppSettings): AppSettings {
     ...settings,
     customCodexModels: normalizeCustomModelSlugs(settings.customCodexModels, "codex"),
     customOpencodeModels: normalizeCustomModelSlugs(settings.customOpencodeModels, "opencode"),
+    customClaudeModels: normalizeCustomModelSlugs(settings.customClaudeModels, "claudeAgent"),
+    newThreadSuggestionModel: normalizeSuggestionModelSlug(settings.newThreadSuggestionModel),
   };
+}
+
+export function normalizeSuggestionModelSlug(model: string | null | undefined): string | null {
+  if (typeof model !== "string") {
+    return null;
+  }
+
+  const trimmed = model.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const provider = inferProviderFromModel(trimmed);
+  return normalizeModelSlug(trimmed, provider);
 }
 
 export function getAppModelOptions(
@@ -165,6 +196,38 @@ export function getAppModelOptions(
   }
 
   return options;
+}
+
+export function getSuggestionModelOptions(input: {
+  customCodexModels: readonly string[];
+  customOpencodeModels: readonly string[];
+  customClaudeModels: readonly string[];
+  selectedModel?: string | null;
+}): SuggestionModelOption[] {
+  const selectedProvider =
+    typeof input.selectedModel === "string" && input.selectedModel.trim().length > 0
+      ? inferProviderFromModel(input.selectedModel)
+      : null;
+
+  return (["codex", "claudeAgent", "opencode"] as const).flatMap((provider) => {
+    const customModels =
+      provider === "codex"
+        ? input.customCodexModels
+        : provider === "claudeAgent"
+          ? input.customClaudeModels
+          : input.customOpencodeModels;
+
+    return getAppModelOptions(
+      provider,
+      customModels,
+      selectedProvider === provider ? input.selectedModel : null,
+    ).map((option) => ({
+      slug: option.slug,
+      name: option.name,
+      isCustom: option.isCustom,
+      provider,
+    }));
+  });
 }
 
 export function resolveAppModelSelection(

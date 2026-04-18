@@ -98,7 +98,9 @@ const LOG_FILE_MAX_FILES = 10;
 const APP_RUN_ID = Crypto.randomBytes(6).toString("hex");
 const AUTO_UPDATE_STARTUP_DELAY_MS = 15_000;
 const AUTO_UPDATE_POLL_INTERVAL_MS = 4 * 60 * 60 * 1000;
-const BACKEND_READY_TIMEOUT_MS = 45_000;
+// Cold starts can exceed 45s on larger local state stores; keep the renderer
+// gated longer so it doesn't spam connection-refused before backend is ready.
+const BACKEND_READY_TIMEOUT_MS = 90_000;
 const BACKEND_READY_POLL_INTERVAL_MS = 250;
 const BACKEND_READY_SOCKET_TIMEOUT_MS = 500;
 

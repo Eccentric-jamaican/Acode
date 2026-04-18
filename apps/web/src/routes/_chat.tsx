@@ -5,6 +5,7 @@ import { type CSSProperties, useEffect } from "react";
 
 import DesktopShellTitlebarBand from "../components/DesktopShellTitlebarBand";
 import { DiffWorkerPoolProvider } from "../components/DiffWorkerPoolProvider";
+import SettingsSidebar from "../components/SettingsSidebar";
 import ThreadSidebar from "../components/Sidebar";
 import { emitToggleSidebarSearchPalette } from "../lib/sidebarSearchPalette";
 import { isTerminalFocused } from "../lib/terminalFocus";
@@ -81,6 +82,7 @@ function ChatRouteLayout() {
     !pathname.startsWith("/settings") &&
     !pathname.startsWith("/orchestrate") &&
     pathname.split("/").filter(Boolean).length === 1;
+  const isSettingsRoute = pathname.startsWith("/settings");
   const hasDesktopShellChrome =
     typeof window !== "undefined" &&
     (window.desktopBridge !== undefined || window.nativeApi !== undefined);
@@ -102,7 +104,7 @@ function ChatRouteLayout() {
         collapsible="offcanvas"
         className="bg-[var(--app-sidebar-surface)] text-foreground"
       >
-        <ThreadSidebar />
+        {isSettingsRoute ? <SettingsSidebar /> : <ThreadSidebar />}
       </Sidebar>
       <DesktopShellTitlebarBand hasDesktopShellChrome={hasDesktopShellChrome} />
       <div

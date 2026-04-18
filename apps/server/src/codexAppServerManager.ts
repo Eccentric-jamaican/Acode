@@ -106,6 +106,26 @@ export interface CodexThreadSnapshot {
   turns: CodexThreadTurnSnapshot[];
 }
 
+export interface CodexStoredThreadSummary {
+  readonly id: string;
+  readonly preview: string | null;
+  readonly createdAt: number | null;
+  readonly updatedAt: number | null;
+  readonly status: string | null;
+}
+
+export interface CodexStoredSkillSummary {
+  readonly name: string;
+  readonly description: string | null;
+  readonly displayName: string | null;
+  readonly shortDescription: string | null;
+}
+
+export interface CodexReviewStartResult {
+  readonly reviewThreadId: string;
+  readonly turnId: TurnId | null;
+}
+
 const ANSI_ESCAPE_CHAR = String.fromCharCode(27);
 const ANSI_ESCAPE_REGEX = new RegExp(`${ANSI_ESCAPE_CHAR}\\[[0-9;]*m`, "g");
 const CODEX_STDERR_LOG_REGEX =
@@ -124,6 +144,8 @@ const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
 const CODEX_DEFAULT_MODEL = "gpt-5.4";
 const CODEX_SPARK_MODEL = "gpt-5.3-codex-spark";
 const CODEX_SPARK_DISABLED_PLAN_TYPES = new Set<CodexPlanType>(["free", "go", "plus"]);
+
+function noopListener() {}
 
 function asObject(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== "object") {
@@ -823,6 +845,143 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     return this.parseThreadSnapshot("thread/rollback", response);
   }
 
+  async listStoredThreads(input: {
+    readonly cwd: string;
+    readonly limit?: number;
+  }): Promise<ReadonlyArray<CodexStoredThreadSummary>> {
+    const response = await this.requestWithAnyContext(
+      "thread/list",
+      {
+        cursor: null,
+        limit: input.limit ?? 10,
+        archived: false,
+        cwd: input.cwd,
+      },
+      { cwd: input.cwd },
+    );
+    const responseRecord = this.readObject(response);
+    const data = this.readArray(responseRecord, "data") ?? [];
+    return data.flatMap((entry) => {
+      const thread = this.readObject(entry);
+      const id = this.readString(thread, "id");
+      if (!id) {
+        return [];
+      }
+      const statusRecord = this.readObject(thread, "status");
+      const status =
+        this.readString(statusRecord, "type") ??
+        this.readString(thread, "status") ??
+        null;
+      return [
+        {
+          id,
+          preview: this.readString(thread, "preview") ?? null,
+          createdAt: this.readNumber(thread, "createdAt") ?? null,
+          updatedAt: this.readNumber(thread, "updatedAt") ?? null,
+          status,
+        } satisfies CodexStoredThreadSummary,
+      ];
+    });
+  }
+
+  async listStoredSkills(input: {
+    readonly cwd: string;
+    readonly forceReload?: boolean;
+  }): Promise<ReadonlyArray<CodexStoredSkillSummary>> {
+    const response = await this.requestWithAnyContext(
+      "skills/list",
+      {
+        cwds: [input.cwd],
+        ...(input.forceReload ? { forceReload: true } : {}),
+      },
+      { cwd: input.cwd },
+    );
+    const responseRecord = this.readObject(response);
+    const data = this.readArray(responseRecord, "data") ?? [];
+    const matchingEntry = data.find((entry) => {
+      const record = this.readObject(entry);
+      return this.readString(record, "cwd") === input.cwd;
+    });
+    const resultRecord = this.readObject(matchingEntry);
+    const skills = this.readArray(resultRecord, "skills") ?? [];
+    return skills.flatMap((entry) => {
+      const skill = this.readObject(entry);
+      if (!skill) {
+        return [];
+      }
+      const interfaceRecord = this.readObject(skill, "interface");
+      const name = this.readString(skill, "name");
+      if (!name) {
+        return [];
+      }
+      return [
+        {
+          name,
+          description: this.readString(skill, "description") ?? null,
+          displayName: this.readString(interfaceRecord, "displayName") ?? null,
+          shortDescription: this.readString(interfaceRecord, "shortDescription") ?? null,
+        } satisfies CodexStoredSkillSummary,
+      ];
+    });
+  }
+
+  async readStoredThread(input: {
+    readonly providerThreadId: string;
+    readonly cwd: string;
+    readonly includeTurns?: boolean;
+  }): Promise<CodexThreadSnapshot> {
+    const response = await this.requestWithAnyContext(
+      "thread/read",
+      {
+        threadId: input.providerThreadId,
+        includeTurns: input.includeTurns ?? true,
+      },
+      { cwd: input.cwd },
+    );
+    return this.parseThreadSnapshot("thread/read", response);
+  }
+
+  async archiveStoredThread(input: {
+    readonly providerThreadId: string;
+    readonly cwd: string;
+  }): Promise<void> {
+    await this.requestWithAnyContext(
+      "thread/archive",
+      {
+        threadId: input.providerThreadId,
+      },
+      { cwd: input.cwd },
+    );
+  }
+
+  async startReview(input: {
+    readonly providerThreadId: string;
+    readonly cwd: string;
+    readonly target: {
+      readonly type: "uncommittedChanges";
+    };
+    readonly delivery?: "inline" | "detached";
+  }): Promise<CodexReviewStartResult> {
+    const response = await this.requestWithAnyContext(
+      "review/start",
+      {
+        threadId: input.providerThreadId,
+        target: input.target,
+        ...(input.delivery ? { delivery: input.delivery } : {}),
+      },
+      { cwd: input.cwd, preferredCwd: input.cwd },
+      120_000,
+    );
+    const responseRecord = this.readObject(response);
+    const reviewThreadId =
+      this.readString(responseRecord, "reviewThreadId") ?? input.providerThreadId;
+    const turn = this.readObject(responseRecord, "turn");
+    return {
+      reviewThreadId,
+      turnId: toTurnId(this.readString(turn, "id")) ?? null,
+    };
+  }
+
   async respondToRequest(
     threadId: ThreadId,
     requestId: ApprovalRequestId,
@@ -1124,6 +1283,71 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     return context.transport.request<TResponse>(method, params, timeoutMs);
   }
 
+  private findRequestContext(preferredCwd?: string): CodexSessionContext | undefined {
+    if (preferredCwd) {
+      const matchingContext = Array.from(this.sessions.values()).find(
+        (context) => context.session.cwd === preferredCwd,
+      );
+      if (matchingContext) {
+        return matchingContext;
+      }
+    }
+
+    return this.sessions.values().next().value;
+  }
+
+  private async requestWithAnyContext<TResponse>(
+    method: string,
+    params: unknown,
+    options: {
+      readonly cwd?: string;
+      readonly preferredCwd?: string;
+      readonly providerOptions?: ProviderSessionStartInput["providerOptions"];
+    } = {},
+    timeoutMs = 20_000,
+  ): Promise<TResponse> {
+    const existingContext = this.findRequestContext(options.preferredCwd);
+    if (existingContext) {
+      return this.sendRequest(existingContext, method, params, timeoutMs);
+    }
+
+    const cwd = options.cwd?.trim();
+    if (!cwd) {
+      throw new Error(`${method} requires an available Codex session or an explicit cwd.`);
+    }
+
+    const codexOptions = readCodexProviderOptions({
+      threadId: ThreadId.makeUnsafe(`codex-helper-${randomUUID()}`),
+      provider: "codex",
+      cwd,
+      providerOptions: options.providerOptions,
+      runtimeMode: "full-access",
+    });
+    const transport = new CodexAppServerTransport({
+      cwd,
+      ...(codexOptions.binaryPath ? { binaryPath: codexOptions.binaryPath } : {}),
+      ...(codexOptions.homePath ? { homePath: codexOptions.homePath } : {}),
+    });
+    transport.on("error", noopListener);
+    transport.on("exit", noopListener);
+    transport.on("notification", noopListener);
+    transport.on("request", noopListener);
+    transport.on("stderr", noopListener);
+
+    try {
+      await transport.request("initialize", buildCodexInitializeParams());
+      transport.notify("initialized");
+      return transport.request<TResponse>(method, params, timeoutMs);
+    } finally {
+      transport.off("error", noopListener);
+      transport.off("exit", noopListener);
+      transport.off("notification", noopListener);
+      transport.off("request", noopListener);
+      transport.off("stderr", noopListener);
+      transport.close();
+    }
+  }
+
   private emitLifecycleEvent(context: CodexSessionContext, method: string, message: string): void {
     this.emitEvent({
       id: EventId.makeUnsafe(randomUUID()),
@@ -1271,6 +1495,15 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
 
     const candidate = (value as Record<string, unknown>)[key];
     return typeof candidate === "boolean" ? candidate : undefined;
+  }
+
+  private readNumber(value: unknown, key: string): number | undefined {
+    if (!value || typeof value !== "object") {
+      return undefined;
+    }
+
+    const candidate = (value as Record<string, unknown>)[key];
+    return typeof candidate === "number" && Number.isFinite(candidate) ? candidate : undefined;
   }
 }
 

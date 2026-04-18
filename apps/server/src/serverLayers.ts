@@ -28,6 +28,7 @@ import { ProviderDiscoveryServiceLive } from "./provider/Layers/ProviderDiscover
 import { ProviderAdapterRegistryLive } from "./provider/Layers/ProviderAdapterRegistry";
 import { makeProviderServiceLive } from "./provider/Layers/ProviderService";
 import { ProviderSessionDirectoryLive } from "./provider/Layers/ProviderSessionDirectory";
+import { CodexAdapter } from "./provider/Services/CodexAdapter";
 import { ProviderDiscoveryService } from "./provider/Services/ProviderDiscoveryService";
 import { ProviderService } from "./provider/Services/ProviderService";
 import { makeEventNdjsonLogger } from "./provider/Layers/EventNdjsonLogger";
@@ -45,7 +46,7 @@ import { NodePtyAdapterLive } from "./terminal/Layers/NodePTY";
 import { AnalyticsService } from "./telemetry/Services/AnalyticsService";
 
 export function makeServerProviderLayer(): Layer.Layer<
-  ProviderService | ProviderDiscoveryService,
+  ProviderService | ProviderDiscoveryService | CodexAdapter,
   ProviderUnsupportedError,
   SqlClient.SqlClient | ServerConfig | FileSystem.FileSystem | AnalyticsService
 > {
@@ -81,7 +82,7 @@ export function makeServerProviderLayer(): Layer.Layer<
     const providerDiscoveryLayer = ProviderDiscoveryServiceLive.pipe(
       Layer.provide(adapterRegistryLayer),
     );
-    return Layer.mergeAll(providerServiceLayer, providerDiscoveryLayer);
+    return Layer.mergeAll(providerServiceLayer, providerDiscoveryLayer, codexAdapterLayer);
   }).pipe(Layer.unwrap);
 }
 

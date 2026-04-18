@@ -34,6 +34,8 @@ export function useDisposableThreadLifecycle(activeThreadId: ThreadId | null): v
   useEffect(() => {
     const previousThreadState = previousThreadStateRef.current;
     const draftThreadsByThreadId = useComposerDraftStore.getState().draftThreadsByThreadId;
+    const composerDraftsByThreadId = useComposerDraftStore.getState().draftsByThreadId;
+    const serverThreads = useStore.getState().threads;
     previousThreadStateRef.current = {
       threadId: activeThreadId,
       wasTemporary: activeThreadId
@@ -47,6 +49,10 @@ export function useDisposableThreadLifecycle(activeThreadId: ThreadId | null): v
       nextThreadId: activeThreadId,
       previousThreadWasTemporary: previousThreadState.wasTemporary,
       draftThreadsByThreadId,
+      composerDraftsByThreadId,
+      previousThreadHasServerThread:
+        previousThreadState.threadId !== null &&
+        serverThreads.some((thread) => thread.id === previousThreadState.threadId),
     });
     if (!disposableThreadId || disposingThreadIdsRef.current.has(disposableThreadId)) {
       return;

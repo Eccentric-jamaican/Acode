@@ -639,6 +639,26 @@ describe("wsNativeApi", () => {
     });
   });
 
+  it("forwards new-thread suggestion requests with provider-scoped context", async () => {
+    requestMock.mockResolvedValue({ suggestions: [] });
+    const { createWsNativeApi } = await import("./wsNativeApi");
+
+    const api = createWsNativeApi();
+    await api.server.suggestNewThreadTasks({
+      provider: "codex",
+      cwd: "/tmp/project",
+      projectName: "project",
+      selectedModel: "gpt-5.4",
+    });
+
+    expect(requestMock).toHaveBeenCalledWith(WS_METHODS.serverSuggestNewThreadTasks, {
+      provider: "codex",
+      cwd: "/tmp/project",
+      projectName: "project",
+      selectedModel: "gpt-5.4",
+    });
+  });
+
   it("forwards full-thread diff requests to the orchestration websocket method", async () => {
     requestMock.mockResolvedValue({ diff: "patch" });
     const { createWsNativeApi } = await import("./wsNativeApi");

@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   getAppModelOptions,
+  getSuggestionModelOptions,
   getSlashModelOptions,
   normalizeCustomModelSlugs,
+  normalizeSuggestionModelSlug,
   resolveAppServiceTier,
   shouldShowFastTierIcon,
   resolveAppModelSelection,
@@ -57,6 +59,45 @@ describe("getAppModelOptions", () => {
       name: "custom/selected-model",
       isCustom: true,
     });
+  });
+});
+
+describe("normalizeSuggestionModelSlug", () => {
+  it("preserves claude selections", () => {
+    expect(normalizeSuggestionModelSlug("claude-sonnet-4-6")).toBe("claude-sonnet-4-6");
+  });
+
+  it("preserves codex and gpt selections", () => {
+    expect(normalizeSuggestionModelSlug("gpt-5.4")).toBe("gpt-5.4");
+  });
+
+  it("preserves opencode provider/model selections", () => {
+    expect(normalizeSuggestionModelSlug("openai/gpt-4.1")).toBe("openai/gpt-4.1");
+  });
+});
+
+describe("getSuggestionModelOptions", () => {
+  it("includes built-in models from codex, claude, and opencode", () => {
+    const options = getSuggestionModelOptions({
+      customCodexModels: [],
+      customOpencodeModels: [],
+      customClaudeModels: [],
+      selectedModel: null,
+    });
+
+    expect(options.some((option) => option.provider === "codex" && option.slug === "gpt-5.4")).toBe(
+      true,
+    );
+    expect(
+      options.some(
+        (option) => option.provider === "claudeAgent" && option.slug === "claude-sonnet-4-6",
+      ),
+    ).toBe(true);
+    expect(
+      options.some(
+        (option) => option.provider === "opencode" && option.slug === "opencode/default",
+      ),
+    ).toBe(true);
   });
 });
 

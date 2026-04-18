@@ -737,6 +737,22 @@ function disableWelcomeBootstrap(targetFixture: TestFixture): void {
   };
 }
 
+function chatHomeVariantKey(): string | null {
+  return (
+    document
+      .querySelector<HTMLElement>("[data-testid='chat-home-surface']")
+      ?.getAttribute("data-home-variant") ?? null
+  );
+}
+
+function chatHomeVariantText(): string | null {
+  return (
+    document
+      .querySelector<HTMLElement>("[data-testid='chat-home-variant-copy']")
+      ?.textContent?.trim() ?? null
+  );
+}
+
 async function collapseDesktopSidebar(): Promise<void> {
   await expect.poll(() => visibleSidebarToggleCount("Collapse Sidebar")).toBe(1);
   await page.getByRole("button", { name: "Collapse Sidebar" }).click();
@@ -836,6 +852,7 @@ async function mountSidebarApp(
   await waitForProductionStyles();
 
   return {
+    router,
     cleanup: async () => {
       await screen.unmount();
       if (host.isConnected) {
@@ -970,6 +987,80 @@ describe("Sidebar browser", () => {
 
     await expect.element(page.getByRole("button", { name: "Add project" })).toBeVisible();
     await expect.element(page.getByRole("button", { name: "Filter threads" })).toBeVisible();
+
+    await mounted.cleanup();
+  });
+
+  it("uses a dedicated settings sidebar layout on the settings route", async () => {
+    const mounted = await mountSidebarApp({ initialEntries: ["/settings"] });
+
+    await expect.element(page.getByTestId("settings-sidebar")).toBeVisible();
+    await expect.element(page.getByTestId("settings-sidebar-item-appearance")).toBeVisible();
+    await expect.element(page.getByTestId("settings-sidebar-back-to-chat")).toBeVisible();
+    await expect
+      .poll(() => document.querySelector("[data-testid='sidebar-filter-threads']") !== null)
+      .toBe(false);
+
+    await mounted.cleanup();
+  });
+
+  it("renders the minimal home surface on / when no projects and no threads are available", async () => {
+    const mounted = await mountSidebarApp({
+      initialEntries: ["/"],
+      configureFixture: (targetFixture) => {
+        disableWelcomeBootstrap(targetFixture);
+        targetFixture.snapshot = {
+          ...targetFixture.snapshot,
+          projects: [],
+          threads: [],
+        };
+      },
+    });
+
+    await expect.element(page.getByTestId("chat-home-surface")).toBeVisible();
+    await expect.poll(() => chatHomeVariantKey()).toBe("no-projects");
+    await expect.poll(() => chatHomeVariantText()).toBe("Open or add a project to get started.");
+
+    await mounted.cleanup();
+  });
+
+  it("renders fallback content on stale thread URLs and then redirects home without a blank frame", async () => {
+    const staleThreadId = "thread-stale-route";
+    const mounted = await mountSidebarApp({
+      initialEntries: [`/${staleThreadId}`],
+      configureFixture: (targetFixture) => {
+        disableWelcomeBootstrap(targetFixture);
+        targetFixture.snapshot = {
+          ...targetFixture.snapshot,
+          threads: [],
+        };
+      },
+    });
+
+    await expect.element(page.getByTestId("chat-home-surface")).toBeVisible();
+    await expect.poll(() => chatHomeVariantKey()).toBe("no-thread");
+    await expect.poll(() => mounted.router.state.location.pathname).toBe("/");
+
+    await mounted.cleanup();
+  });
+
+  it("renders the no-thread home variant when projects exist but no active thread is selected", async () => {
+    const mounted = await mountSidebarApp({
+      initialEntries: ["/"],
+      configureFixture: (targetFixture) => {
+        disableWelcomeBootstrap(targetFixture);
+        targetFixture.snapshot = {
+          ...targetFixture.snapshot,
+          threads: [],
+        };
+      },
+    });
+
+    await expect.element(page.getByTestId("chat-home-surface")).toBeVisible();
+    await expect.poll(() => chatHomeVariantKey()).toBe("no-thread");
+    await expect.poll(() => chatHomeVariantText()).toBe(
+      "Select a thread or create a new one to get started.",
+    );
 
     await mounted.cleanup();
   });
@@ -1530,6 +1621,157 @@ describe("Sidebar browser", () => {
         return draftMap[projectAlpha] ?? null;
       })
       .not.toBeNull();
+
+    await mounted.cleanup();
+  });
+
+  it("disposes an empty primary new-thread draft when switching threads", async () => {
+    const projectAlpha = "project-alpha" as ProjectId;
+    const projectBeta = "project-beta" as ProjectId;
+    const threadBeta = "thread-beta" as ThreadId;
+    fixture = {
+      ...fixture,
+      snapshot: {
+        ...fixture.snapshot,
+        projects: [
+          makeProjectEntry(projectAlpha, "Alpha"),
+          makeProjectEntry(projectBeta, "Beta"),
+        ],
+        threads: [makeThreadEntry(threadBeta, projectBeta, "Beta thread")],
+      },
+      welcome: {
+        ...fixture.welcome,
+        bootstrapProjectId: projectBeta,
+        bootstrapThreadId: threadBeta,
+      },
+    };
+
+    const mounted = await mountSidebarApp({ initialEntries: [`/${threadBeta}`] });
+
+    await page.getByTestId(`sidebar-project-${projectAlpha}`).hover();
+    await page.getByTestId(`sidebar-project-new-thread-${projectAlpha}`).click();
+
+    await expect
+      .poll(() => useComposerDraftStore.getState().projectDraftThreadIdByProjectId[projectAlpha] ?? null)
+      .not.toBeNull();
+
+    const draftThreadId = useComposerDraftStore.getState().projectDraftThreadIdByProjectId[projectAlpha];
+    expect(draftThreadId).toBeTruthy();
+    if (!draftThreadId) {
+      await mounted.cleanup();
+      return;
+    }
+
+    await page.getByTestId(`sidebar-thread-${threadBeta}`).click();
+
+    await expect
+      .poll(() => useComposerDraftStore.getState().draftThreadsByThreadId[draftThreadId] ?? null)
+      .toBeNull();
+    await expect
+      .poll(() => useComposerDraftStore.getState().projectDraftThreadIdByProjectId[projectAlpha] ?? null)
+      .toBeNull();
+
+    await mounted.cleanup();
+  });
+
+  it("keeps a primary new-thread draft with typed prompt when switching threads", async () => {
+    const projectAlpha = "project-alpha" as ProjectId;
+    const projectBeta = "project-beta" as ProjectId;
+    const threadBeta = "thread-beta" as ThreadId;
+    fixture = {
+      ...fixture,
+      snapshot: {
+        ...fixture.snapshot,
+        projects: [
+          makeProjectEntry(projectAlpha, "Alpha"),
+          makeProjectEntry(projectBeta, "Beta"),
+        ],
+        threads: [makeThreadEntry(threadBeta, projectBeta, "Beta thread")],
+      },
+      welcome: {
+        ...fixture.welcome,
+        bootstrapProjectId: projectBeta,
+        bootstrapThreadId: threadBeta,
+      },
+    };
+
+    const mounted = await mountSidebarApp({ initialEntries: [`/${threadBeta}`] });
+
+    await page.getByTestId(`sidebar-project-${projectAlpha}`).hover();
+    await page.getByTestId(`sidebar-project-new-thread-${projectAlpha}`).click();
+
+    await expect
+      .poll(() => useComposerDraftStore.getState().projectDraftThreadIdByProjectId[projectAlpha] ?? null)
+      .not.toBeNull();
+
+    const draftThreadId = useComposerDraftStore.getState().projectDraftThreadIdByProjectId[projectAlpha];
+    expect(draftThreadId).toBeTruthy();
+    if (!draftThreadId) {
+      await mounted.cleanup();
+      return;
+    }
+
+    useComposerDraftStore.getState().setPrompt(draftThreadId, "Keep this draft");
+
+    await page.getByTestId(`sidebar-thread-${threadBeta}`).click();
+
+    await expect
+      .poll(() => useComposerDraftStore.getState().draftThreadsByThreadId[draftThreadId] ?? null)
+      .not.toBeNull();
+    await expect
+      .poll(() => useComposerDraftStore.getState().draftsByThreadId[draftThreadId]?.prompt ?? null)
+      .toBe("Keep this draft");
+
+    await mounted.cleanup();
+  });
+
+  it("keeps the dashed disposable thread flow behavior when switching threads", async () => {
+    const projectAlpha = "project-alpha" as ProjectId;
+    const projectBeta = "project-beta" as ProjectId;
+    const threadBeta = "thread-beta" as ThreadId;
+    fixture = {
+      ...fixture,
+      snapshot: {
+        ...fixture.snapshot,
+        projects: [
+          makeProjectEntry(projectAlpha, "Alpha"),
+          makeProjectEntry(projectBeta, "Beta"),
+        ],
+        threads: [makeThreadEntry(threadBeta, projectBeta, "Beta thread")],
+      },
+      welcome: {
+        ...fixture.welcome,
+        bootstrapProjectId: projectBeta,
+        bootstrapThreadId: threadBeta,
+      },
+    };
+
+    const mounted = await mountSidebarApp({ initialEntries: [`/${threadBeta}`] });
+
+    await page.getByTestId(`sidebar-project-${projectAlpha}`).hover();
+    await page.getByLabelText(`New disposable thread in Alpha`).click();
+
+    await expect
+      .poll(() => useComposerDraftStore.getState().projectDraftThreadIdByProjectId[projectAlpha] ?? null)
+      .not.toBeNull();
+
+    const draftThreadId = useComposerDraftStore.getState().projectDraftThreadIdByProjectId[projectAlpha];
+    expect(draftThreadId).toBeTruthy();
+    if (!draftThreadId) {
+      await mounted.cleanup();
+      return;
+    }
+
+    await expect
+      .poll(() => useComposerDraftStore.getState().draftThreadsByThreadId[draftThreadId]?.isTemporary ?? false)
+      .toBe(true);
+
+    useComposerDraftStore.getState().setPrompt(draftThreadId, "Temporary chat should still dispose");
+    await page.getByTestId(`sidebar-thread-${threadBeta}`).click();
+
+    await expect
+      .poll(() => useComposerDraftStore.getState().draftThreadsByThreadId[draftThreadId] ?? null)
+      .toBeNull();
 
     await mounted.cleanup();
   });

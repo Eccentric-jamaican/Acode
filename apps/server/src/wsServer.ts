@@ -82,6 +82,8 @@ import { AnalyticsService } from "./telemetry/Services/AnalyticsService.ts";
 import { ErrorInboxService } from "./errorInbox/Services/ErrorInbox.ts";
 import { OrchestrationCommandReceiptRepository } from "./persistence/Services/OrchestrationCommandReceipts.ts";
 import { ServerRuntimeStartup } from "./serverRuntimeStartup";
+import { suggestNewThreadTasks } from "./newThreadSuggestions";
+import { CodexAdapter } from "./provider/Services/CodexAdapter.ts";
 
 /**
  * ServerShape - Service API for server lifecycle control.
@@ -267,6 +269,7 @@ export type ServerCoreRuntimeServices =
 
 export type ServerRuntimeServices =
   | ServerCoreRuntimeServices
+  | CodexAdapter
   | CodexAccountService
   | GitManager
   | GitCore
@@ -312,6 +315,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const providerHealth = yield* ProviderHealth;
   const providerDiscovery = yield* ProviderDiscoveryService;
   const codexAccountService = yield* CodexAccountService;
+  const codexAdapter = yield* CodexAdapter;
   const git = yield* GitCore;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -1102,6 +1106,52 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         }
         yield* codexAccountService.logout();
         return {};
+      }
+
+      case WS_METHODS.serverSuggestNewThreadTasks: {
+        const body = stripRequestTag(request.body);
+        const [snapshot, errorInboxEntries, gitStatus] = yield* Effect.all([
+          projectionReadModelQuery.getSnapshot(),
+          errorInbox.listEntries(),
+          gitManager.status({ cwd: body.cwd }),
+        ]);
+        return yield* Effect.tryPromise({
+          try: () =>
+            suggestNewThreadTasks({
+              request: body,
+              snapshot,
+              errorInboxEntries,
+              gitStatus,
+              codexAdapter: {
+                listSessions: async () =>
+                  (await Effect.runPromise(codexAdapter.listSessions())).map((session) => {
+                    const result: { cwd?: string; resumeCursor?: unknown } = {};
+                    if (session.cwd) {
+                      result.cwd = session.cwd;
+                    }
+                    if (session.resumeCursor !== undefined) {
+                      result.resumeCursor = session.resumeCursor;
+                    }
+                    return result;
+                  }),
+                listStoredThreads: (input) =>
+                  Effect.runPromise(codexAdapter.listStoredThreads(input)),
+                listStoredSkills: (input) =>
+                  Effect.runPromise(codexAdapter.listStoredSkills(input)),
+                readStoredThread: (input) =>
+                  Effect.runPromise(codexAdapter.readStoredThread(input)),
+                archiveStoredThread: (input) =>
+                  Effect.runPromise(codexAdapter.archiveStoredThread(input)),
+                startReview: (input) => Effect.runPromise(codexAdapter.startReview(input)),
+                startSession: (input) => Effect.runPromise(codexAdapter.startSession(input)),
+                stopSession: (threadId) => Effect.runPromise(codexAdapter.stopSession(threadId)),
+              },
+            }),
+          catch: (cause) =>
+            new RouteRequestError({
+              message: `Failed to suggest new thread tasks: ${String(cause)}`,
+            }),
+        });
       }
 
       case WS_METHODS.providerGetComposerCapabilities: {

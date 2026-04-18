@@ -47,6 +47,7 @@ import { TerminalManager, type TerminalManagerShape } from "./terminal/Services/
 import { makeSqlitePersistenceLive, SqlitePersistenceMemory } from "./persistence/Layers/Sqlite";
 import { SqlClient, SqlError } from "effect/unstable/sql";
 import { ProviderService, type ProviderServiceShape } from "./provider/Services/ProviderService";
+import { CodexAdapter, type CodexAdapterShape } from "./provider/Services/CodexAdapter";
 import {
   ProviderDiscoveryService,
   type ProviderDiscoveryServiceShape,
@@ -173,6 +174,32 @@ const defaultProviderDiscoveryService: ProviderDiscoveryServiceShape = {
       cached: false,
     }),
   listModels: () => Effect.succeed({ models: [], source: "unsupported", cached: false }),
+};
+
+const defaultCodexAdapter: CodexAdapterShape = {
+  provider: "codex",
+  capabilities: {
+    sessionModelSwitch: "in-session",
+    supportsSkillMentions: true,
+    supportsSkillDiscovery: true,
+  },
+  startSession: vi.fn(),
+  sendTurn: vi.fn(),
+  interruptTurn: vi.fn(),
+  respondToRequest: vi.fn(),
+  respondToUserInput: vi.fn(),
+  stopSession: vi.fn(),
+  listSessions: () => Effect.succeed([]),
+  hasSession: () => Effect.succeed(false),
+  readThread: vi.fn(),
+  rollbackThread: vi.fn(),
+  stopAll: () => Effect.void,
+  listStoredThreads: vi.fn(),
+  listStoredSkills: vi.fn(),
+  readStoredThread: vi.fn(),
+  archiveStoredThread: vi.fn(),
+  startReview: vi.fn(),
+  streamEvents: Stream.empty,
 };
 
 class MockTerminalManager implements TerminalManagerShape {
@@ -562,7 +589,11 @@ describe("WebSocket Server", () => {
 
     try {
       const runtime = await Effect.runPromise(
-        createServer().pipe(Effect.provide(runtimeServices), Scope.provide(scope)),
+        createServer().pipe(
+          Effect.provide(runtimeServices),
+          Effect.provideService(CodexAdapter, defaultCodexAdapter),
+          Scope.provide(scope),
+        ),
       );
       serverScope = scope;
       return runtime;

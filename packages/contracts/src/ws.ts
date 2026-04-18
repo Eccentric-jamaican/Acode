@@ -51,6 +51,7 @@ import {
   ServerCancelProviderLoginInput,
   ServerLogoutProviderInput,
   ServerStartProviderLoginInput,
+  ServerSuggestNewThreadTasksInput,
 } from "./server";
 
 // ── WebSocket RPC Method Names ───────────────────────────────────────
@@ -96,6 +97,7 @@ export const WS_METHODS = {
   serverStartProviderLogin: "server.startProviderLogin",
   serverCancelProviderLogin: "server.cancelProviderLogin",
   serverLogoutProvider: "server.logoutProvider",
+  serverSuggestNewThreadTasks: "server.suggestNewThreadTasks",
 
   // Provider discovery
   providerGetComposerCapabilities: "provider.getComposerCapabilities",
@@ -183,6 +185,7 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.serverStartProviderLogin, ServerStartProviderLoginInput),
   tagRequestBody(WS_METHODS.serverCancelProviderLogin, ServerCancelProviderLoginInput),
   tagRequestBody(WS_METHODS.serverLogoutProvider, ServerLogoutProviderInput),
+  tagRequestBody(WS_METHODS.serverSuggestNewThreadTasks, ServerSuggestNewThreadTasksInput),
 
   // Provider discovery
   tagRequestBody(WS_METHODS.providerGetComposerCapabilities, ProviderGetComposerCapabilitiesInput),

@@ -1475,6 +1475,51 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         manager.stopAll();
       });
 
+    const listStoredThreads: CodexAdapterShape["listStoredThreads"] = (input) =>
+      Effect.tryPromise({
+        try: () => manager.listStoredThreads(input),
+        catch: (cause) => {
+          const helperThreadId = ThreadId.makeUnsafe(`codex-helper-${Date.now()}`);
+          return toRequestError(helperThreadId, "thread/list", cause);
+        },
+      });
+
+    const listStoredSkills: CodexAdapterShape["listStoredSkills"] = (input) =>
+      Effect.tryPromise({
+        try: () => manager.listStoredSkills(input),
+        catch: (cause) => {
+          const helperThreadId = ThreadId.makeUnsafe(`codex-helper-${Date.now()}`);
+          return toRequestError(helperThreadId, "skills/list", cause);
+        },
+      });
+
+    const readStoredThread: CodexAdapterShape["readStoredThread"] = (input) =>
+      Effect.tryPromise({
+        try: () => manager.readStoredThread(input),
+        catch: (cause) => {
+          const helperThreadId = ThreadId.makeUnsafe(`codex-helper-${Date.now()}`);
+          return toRequestError(helperThreadId, "thread/read", cause);
+        },
+      });
+
+    const archiveStoredThread: CodexAdapterShape["archiveStoredThread"] = (input) =>
+      Effect.tryPromise({
+        try: () => manager.archiveStoredThread(input),
+        catch: (cause) => {
+          const helperThreadId = ThreadId.makeUnsafe(`codex-helper-${Date.now()}`);
+          return toRequestError(helperThreadId, "thread/archive", cause);
+        },
+      });
+
+    const startReview: CodexAdapterShape["startReview"] = (input) =>
+      Effect.tryPromise({
+        try: () => manager.startReview(input),
+        catch: (cause) => {
+          const helperThreadId = ThreadId.makeUnsafe(`codex-helper-${Date.now()}`);
+          return toRequestError(helperThreadId, "review/start", cause);
+        },
+      });
+
     const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
 
     yield* Effect.acquireRelease(
@@ -1559,6 +1604,11 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
           source: "unsupported",
           cached: false,
         }),
+      listStoredThreads,
+      listStoredSkills,
+      readStoredThread,
+      archiveStoredThread,
+      startReview,
       streamEvents: Stream.fromQueue(runtimeEventQueue),
     } satisfies CodexAdapterShape;
   });

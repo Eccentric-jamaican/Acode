@@ -10,6 +10,8 @@ export interface RenderableInvocationDiffFile {
   fileDiff: FileDiffMetadata;
 }
 
+const renderableInvocationDiffCache = new Map<string, RenderableInvocationDiffFile | null>();
+
 function normalizeFileDiffPath(fileDiff: FileDiffMetadata): string {
   const raw = fileDiff.name ?? fileDiff.prevName ?? "";
   if (raw.startsWith("a/") || raw.startsWith("b/")) {
@@ -38,21 +40,44 @@ function parseFromText(file: InvocationDiffFile): FileDiffMetadata | null {
   );
 }
 
+function buildInvocationDiffFileCacheKey(
+  file: InvocationDiffFile,
+  cacheScope: string,
+): string {
+  return `${cacheScope}:${file.path}:${file.additions}:${file.deletions}:${file.status ?? ""}:${file.patch ?? ""}:${file.before ?? ""}:${file.after ?? ""}`;
+}
+
+export function toRenderableInvocationDiffFile(
+  file: InvocationDiffFile,
+  cacheScope = "invocation-diff",
+): RenderableInvocationDiffFile | null {
+  const cacheKey = buildInvocationDiffFileCacheKey(file, cacheScope);
+  const cached = renderableInvocationDiffCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  const fileDiff = parseFromPatch(file, cacheScope) ?? parseFromText(file);
+  if (!fileDiff) {
+    renderableInvocationDiffCache.set(cacheKey, null);
+    return null;
+  }
+
+  const renderable: RenderableInvocationDiffFile = {
+    path: file.path,
+    additions: file.additions,
+    deletions: file.deletions,
+    fileDiff,
+  };
+  renderableInvocationDiffCache.set(cacheKey, renderable);
+  return renderable;
+}
+
 export function toRenderableInvocationDiffFiles(
   files: ReadonlyArray<InvocationDiffFile>,
   cacheScope = "invocation-diff",
 ): RenderableInvocationDiffFile[] {
   return files
-    .map((file) => {
-      const fileDiff = parseFromPatch(file, cacheScope) ?? parseFromText(file);
-      if (!fileDiff) return null;
-      return {
-        path: file.path,
-        additions: file.additions,
-        deletions: file.deletions,
-        fileDiff,
-      };
-    })
+    .map((file) => toRenderableInvocationDiffFile(file, cacheScope))
     .filter((entry): entry is RenderableInvocationDiffFile => entry !== null);
 }
-

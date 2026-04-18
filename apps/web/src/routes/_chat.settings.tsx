@@ -1,12 +1,13 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
-import { type ProviderKind } from "@t3tools/contracts";
+import { PROVIDER_DISPLAY_NAMES, type ProviderKind } from "@t3tools/contracts";
 import { getModelOptions, normalizeModelSlug } from "@t3tools/shared/model";
 import { ZapIcon } from "lucide-react";
 
 import {
   APP_SERVICE_TIER_OPTIONS,
+  getSuggestionModelOptions,
   MAX_CUSTOM_MODEL_LENGTH,
   shouldShowFastTierIcon,
   useAppSettings,
@@ -17,6 +18,7 @@ import { useTheme } from "../hooks/useTheme";
 import { cn } from "../lib/utils";
 import { serverConfigQueryOptions } from "../lib/serverReactQuery";
 import { ensureNativeApi } from "../nativeApi";
+import { SETTINGS_SECTION_IDS } from "../settingsSections";
 import { preferredTerminalEditor } from "../terminal-links";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -64,6 +66,13 @@ const MODEL_PROVIDER_SETTINGS: Array<{
     placeholder: "provider/model",
     example: "openai/gpt-4.1",
   },
+  {
+    provider: "claudeAgent",
+    title: "Claude",
+    description: "Save additional Claude model slugs for the picker and `/model` command.",
+    placeholder: "claude-model-slug",
+    example: "claude-sonnet-4-6-latest",
+  },
 ] as const;
 
 function getCustomModelsForProvider(
@@ -75,6 +84,8 @@ function getCustomModelsForProvider(
       return settings.customCodexModels;
     case "opencode":
       return settings.customOpencodeModels;
+    case "claudeAgent":
+      return settings.customClaudeModels;
     default:
       return [];
   }
@@ -89,6 +100,8 @@ function getDefaultCustomModelsForProvider(
       return defaults.customCodexModels;
     case "opencode":
       return defaults.customOpencodeModels;
+    case "claudeAgent":
+      return defaults.customClaudeModels;
     default:
       return [];
   }
@@ -100,6 +113,8 @@ function patchCustomModels(provider: ProviderKind, models: string[]) {
       return { customCodexModels: models };
     case "opencode":
       return { customOpencodeModels: models };
+    case "claudeAgent":
+      return { customClaudeModels: models };
     default:
       return {};
   }
@@ -126,7 +141,15 @@ function SettingsRouteView() {
   const codexBinaryPath = settings.codexBinaryPath;
   const codexHomePath = settings.codexHomePath;
   const codexServiceTier = settings.codexServiceTier;
+  const newThreadSuggestionsEnabled = settings.newThreadSuggestionsEnabled;
+  const newThreadSuggestionModel = settings.newThreadSuggestionModel;
   const keybindingsConfigPath = serverConfigQuery.data?.keybindingsConfigPath ?? null;
+  const suggestionModelOptions = getSuggestionModelOptions({
+    customCodexModels: settings.customCodexModels,
+    customOpencodeModels: settings.customOpencodeModels,
+    customClaudeModels: settings.customClaudeModels,
+    selectedModel: settings.newThreadSuggestionModel,
+  });
 
   const openKeybindingsFile = useCallback(() => {
     if (!keybindingsConfigPath) return;
@@ -231,7 +254,10 @@ function SettingsRouteView() {
               </p>
             </header>
 
-            <section className="rounded-2xl border border-border bg-card p-5">
+            <section
+              id={SETTINGS_SECTION_IDS.appearance}
+              className="scroll-mt-4 rounded-2xl border border-border bg-card p-5"
+            >
               <div className="mb-4">
                 <h2 className="text-sm font-medium text-foreground">Appearance</h2>
                 <p className="mt-1 text-xs text-muted-foreground">
@@ -274,7 +300,10 @@ function SettingsRouteView() {
               </p>
             </section>
 
-            <section className="rounded-2xl border border-border bg-card p-5">
+            <section
+              id={SETTINGS_SECTION_IDS.codexAppServer}
+              className="scroll-mt-4 rounded-2xl border border-border bg-card p-5"
+            >
               <div className="mb-4">
                 <h2 className="text-sm font-medium text-foreground">Codex App Server</h2>
                 <p className="mt-1 text-xs text-muted-foreground">
@@ -332,7 +361,10 @@ function SettingsRouteView() {
               </div>
             </section>
 
-            <section className="rounded-2xl border border-border bg-card p-5">
+            <section
+              id={SETTINGS_SECTION_IDS.models}
+              className="scroll-mt-4 rounded-2xl border border-border bg-card p-5"
+            >
               <div className="mb-4">
                 <h2 className="text-sm font-medium text-foreground">Models</h2>
                 <p className="mt-1 text-xs text-muted-foreground">
@@ -505,10 +537,103 @@ function SettingsRouteView() {
                     </div>
                   );
                 })}
+
+                <div className="rounded-xl border border-border bg-background/50 p-4">
+                  <div className="mb-4">
+                    <h3 className="text-sm font-medium text-foreground">New-thread suggestions</h3>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      Show subtle task suggestions on the new-thread landing. When you choose an
+                      optional model here, we use it only to lightly rewrite or rank the
+                      heuristically derived suggestions.
+                    </p>
+                  </div>
+
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
+                      <div>
+                        <p className="text-sm font-medium text-foreground">
+                          Enable suggested tasks
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          Suggestions appear only on an empty new-thread landing and disappear as
+                          soon as you start typing.
+                        </p>
+                      </div>
+                      <Switch
+                        checked={newThreadSuggestionsEnabled}
+                        onCheckedChange={(checked) =>
+                          updateSettings({
+                            newThreadSuggestionsEnabled: Boolean(checked),
+                          })
+                        }
+                        aria-label="Enable new-thread suggested tasks"
+                      />
+                    </div>
+
+                    <label className="block space-y-1">
+                      <span className="text-xs font-medium text-foreground">
+                        Suggestion model
+                      </span>
+                      <Select
+                        items={[
+                          { label: "Heuristics only", value: "__none__" },
+                          ...suggestionModelOptions.map((option) => ({
+                            label: `${PROVIDER_DISPLAY_NAMES[option.provider]} - ${option.name}`,
+                            value: option.slug,
+                          })),
+                        ]}
+                        value={newThreadSuggestionModel ?? "__none__"}
+                        onValueChange={(value) => {
+                          updateSettings({
+                            newThreadSuggestionModel:
+                              !value || value === "__none__" ? null : value,
+                          });
+                        }}
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectPopup alignItemWithTrigger={false}>
+                          <SelectItem value="__none__">Heuristics only</SelectItem>
+                          {suggestionModelOptions.map((option) => (
+                          <SelectItem key={option.slug} value={option.slug}>
+                            {PROVIDER_DISPLAY_NAMES[option.provider]} - {option.name}
+                          </SelectItem>
+                        ))}
+                      </SelectPopup>
+                      </Select>
+                      <span className="text-xs text-muted-foreground">
+                        Optional. If unset, the landing uses deterministic project signals only.
+                      </span>
+                    </label>
+
+                    {(newThreadSuggestionsEnabled !== defaults.newThreadSuggestionsEnabled ||
+                      newThreadSuggestionModel !== defaults.newThreadSuggestionModel) && (
+                      <div className="flex justify-end">
+                        <Button
+                          size="xs"
+                          variant="outline"
+                          onClick={() =>
+                            updateSettings({
+                              newThreadSuggestionsEnabled:
+                                defaults.newThreadSuggestionsEnabled,
+                              newThreadSuggestionModel: defaults.newThreadSuggestionModel,
+                            })
+                          }
+                        >
+                          Restore suggestion defaults
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                </div>
               </div>
             </section>
 
-            <section className="rounded-2xl border border-border bg-card p-5">
+            <section
+              id={SETTINGS_SECTION_IDS.responses}
+              className="scroll-mt-4 rounded-2xl border border-border bg-card p-5"
+            >
               <div className="mb-4">
                 <h2 className="text-sm font-medium text-foreground">Responses</h2>
                 <p className="mt-1 text-xs text-muted-foreground">
@@ -619,7 +744,10 @@ function SettingsRouteView() {
               ) : null}
             </section>
 
-            <section className="rounded-2xl border border-border bg-card p-5">
+            <section
+              id={SETTINGS_SECTION_IDS.keybindings}
+              className="scroll-mt-4 rounded-2xl border border-border bg-card p-5"
+            >
               <div className="mb-4">
                 <h2 className="text-sm font-medium text-foreground">Keybindings</h2>
                 <p className="mt-1 text-xs text-muted-foreground">
@@ -655,7 +783,10 @@ function SettingsRouteView() {
               </div>
             </section>
 
-            <section className="rounded-2xl border border-border bg-card p-5">
+            <section
+              id={SETTINGS_SECTION_IDS.safety}
+              className="scroll-mt-4 rounded-2xl border border-border bg-card p-5"
+            >
               <div className="mb-4">
                 <h2 className="text-sm font-medium text-foreground">Safety</h2>
                 <p className="mt-1 text-xs text-muted-foreground">

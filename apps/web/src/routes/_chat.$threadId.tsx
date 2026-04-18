@@ -3,6 +3,9 @@ import { createFileRoute, useNavigate, useRouterState } from "@tanstack/react-ro
 import { Suspense, lazy, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import ChatView from "../components/ChatView";
+import ChatHomeSurface, {
+  resolveChatHomeSurfaceVariant,
+} from "../components/ChatHomeSurface";
 import IntegratedBrowserPane from "../components/IntegratedBrowserPane";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useDisposableThreadLifecycle } from "../hooks/useDisposableThreadLifecycle";
@@ -1060,6 +1063,7 @@ function ChatThreadRouteView() {
   const locationSearch = useRouterState({
     select: (state) => state.location.search,
   });
+  const projects = useStore((store) => store.projects);
   const threads = useStore((store) => store.threads);
   const draftThreadsByThreadId = useComposerDraftStore((store) => store.draftThreadsByThreadId);
   const previousProjectIdRef = useRef<ProjectId | null>(null);
@@ -1072,6 +1076,10 @@ function ChatThreadRouteView() {
     draftThreadsByThreadId,
   });
   const routeThreadExists = threadExists || draftThreadExists;
+  const homeVariant = resolveChatHomeSurfaceVariant({
+    projectsCount: projects.length,
+    threadsCount: threads.length,
+  });
   const panelMode = resolveRightPanelMode(search);
   const splitView = useSplitViewStore(selectSplitView(search.splitViewId ?? null));
   const activeProjectId = threadBrowserContext.projectId;
@@ -1174,7 +1182,7 @@ function ChatThreadRouteView() {
   }, [panelMode]);
 
   if (!threadsHydrated) {
-    return null;
+    return <ChatHomeSurface variant="hydrating" />;
   }
 
   if (splitView && search.splitViewId) {
@@ -1182,7 +1190,7 @@ function ChatThreadRouteView() {
   }
 
   if (!routeThreadExists) {
-    return null;
+    return <ChatHomeSurface variant={homeVariant} />;
   }
 
   return (

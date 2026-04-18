@@ -30,7 +30,14 @@ const MODE_ARGS = {
   ],
   "dev:server": ["run", "dev", "--filter=t3"],
   "dev:web": ["run", "dev", "--filter=@t3tools/web"],
-  "dev:desktop": ["run", "dev", "--filter=@t3tools/desktop", "--filter=@t3tools/web", "--parallel"],
+  "dev:desktop": [
+    "run",
+    "dev",
+    "--filter=@t3tools/desktop",
+    "--filter=@t3tools/web",
+    "--filter=t3",
+    "--parallel",
+  ],
 } as const satisfies Record<string, ReadonlyArray<string>>;
 
 type DevMode = keyof typeof MODE_ARGS;
@@ -202,6 +209,9 @@ export function createDevRunnerEnv({
       // (T3CODE_PORT) for the WebSocket connection. The desktop app will serve both
       // the HTTP API and WebSocket on this port.
       output.VITE_WS_URL = `ws://localhost:${serverPort}`;
+      output.T3CODE_DESKTOP_SERVER_WATCH = "1";
+    } else {
+      delete output.T3CODE_DESKTOP_SERVER_WATCH;
     }
 
     return output;

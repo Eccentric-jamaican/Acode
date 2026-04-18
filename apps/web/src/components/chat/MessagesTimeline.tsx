@@ -44,6 +44,7 @@ import {
   deriveTimelineEntries,
   formatElapsed,
   formatTimestamp,
+  type InvocationDiffFile,
   type WorkLogEntry,
 } from "../../session-logic";
 import { AUTO_SCROLL_BOTTOM_THRESHOLD_PX } from "../../chat-scroll";
@@ -57,7 +58,10 @@ import {
   type TurnDiffTreeNode,
 } from "../../lib/turnDiffTree";
 import { resolveDiffThemeName } from "../../lib/diffRendering";
-import { toRenderableInvocationDiffFiles } from "../../lib/invocationDiffRendering";
+import {
+  type RenderableInvocationDiffFile,
+  toRenderableInvocationDiffFile,
+} from "../../lib/invocationDiffRendering";
 import {
   normalizeSelectedText,
   reconstructRangeFromOffsets,
@@ -111,6 +115,7 @@ const CHAT_PIN_MARKER_SIZE_PX = 24;
 const CHAT_PIN_MARKER_SCROLL_SETTLE_MS = 96;
 const CHAT_SELECTION_IGNORE_SELECTOR =
   "button, summary, [role='button'], [role='menuitem'], input, textarea, select, option, [data-chat-selection-ignore='true']";
+const EMPTY_INVOCATION_DIFF_FILES: ReadonlyArray<InvocationDiffFile> = [];
 
 export interface MessagesTimelineProps {
   isFocusedPane?: boolean;
@@ -363,18 +368,6 @@ function workToneIcon(tone: TimelineWorkEntry["tone"]): {
     icon: ZapIcon,
     className: "text-foreground/92",
   };
-}
-
-function workEntryPreview(
-  workEntry: Pick<TimelineWorkEntry, "detail" | "command" | "changedFiles">,
-): string | null {
-  if (workEntry.command) return workEntry.command;
-  if (workEntry.detail) return workEntry.detail;
-  const changedFiles = workEntry.changedFiles ?? [];
-  if (changedFiles.length === 0) return null;
-  const [firstPath] = changedFiles;
-  if (!firstPath) return null;
-  return changedFiles.length === 1 ? firstPath : `${firstPath} +${changedFiles.length - 1} more`;
 }
 
 function workEntryIcon(workEntry: TimelineWorkEntry): LucideIcon {
@@ -831,168 +824,187 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   const iconConfig = workToneIcon(workEntry.tone);
   const EntryIcon = workEntryIcon(workEntry);
   const heading = toolWorkEntryHeading(workEntry);
-  const preview = workEntryPreview(workEntry);
   const detailPreview =
     !workEntry.command && workEntry.detail
       ? workEntry.detail.split(/\r?\n/, 1)[0]?.trim() ?? null
       : null;
-  const displayText = preview ? `${heading} - ${preview}` : heading;
+  const displayText = detailPreview ? `${heading} - ${detailPreview}` : heading;
   const hasChangedFiles = (workEntry.changedFiles?.length ?? 0) > 0;
   const kindLabel = workEntryKindLabel(workEntry);
-  const invocationDiffFiles = workEntry.invocationDiffFiles ?? [];
-  const renderableInvocationDiffFiles = useMemo(
-    () => toRenderableInvocationDiffFiles(invocationDiffFiles, `invocation:${workEntry.id}`),
-    [invocationDiffFiles, workEntry.id],
-  );
-  const canExpandInvocationDiff = renderableInvocationDiffFiles.length > 0;
   const hasInvocationDiffStat = workEntry.invocationDiffStat
     ? hasNonZeroStat(workEntry.invocationDiffStat)
     : false;
+  const invocationDiffFiles = workEntry.invocationDiffFiles ?? EMPTY_INVOCATION_DIFF_FILES;
+  const canExpandInvocationDiff = invocationDiffFiles.length > 0;
+  const primaryInvocationPath = invocationDiffFiles[0]?.path ?? null;
+  const changedFilesLabel = hasChangedFiles
+    ? (() => {
+        const visible = workEntry.changedFiles?.slice(0, 2) ?? [];
+        const hiddenCount = Math.max(0, (workEntry.changedFiles?.length ?? 0) - visible.length);
+        return hiddenCount > 0 ? `${visible.join(", ")}, +${hiddenCount} more` : visible.join(", ");
+      })()
+    : null;
   const [isInvocationDiffExpanded, setIsInvocationDiffExpanded] = useState(false);
-  const [activeInvocationDiffPath, setActiveInvocationDiffPath] = useState<string | null>(null);
+  const [activeInvocationDiffPath, setActiveInvocationDiffPath] = useState<string | null>(
+    primaryInvocationPath,
+  );
+  const [parsedByPath, setParsedByPath] = useState<Record<string, RenderableInvocationDiffFile | null>>(
+    {},
+  );
 
   useEffect(() => {
-    if (renderableInvocationDiffFiles.length === 0) {
+    if (!canExpandInvocationDiff) {
       setIsInvocationDiffExpanded(false);
       setActiveInvocationDiffPath(null);
+      setParsedByPath({});
       return;
     }
+    const nextPrimary = invocationDiffFiles[0]?.path ?? null;
     if (!activeInvocationDiffPath) {
-      setActiveInvocationDiffPath(renderableInvocationDiffFiles[0]?.path ?? null);
+      setActiveInvocationDiffPath(nextPrimary);
       return;
     }
-    const matchesActive = renderableInvocationDiffFiles.some(
-      (file) => file.path === activeInvocationDiffPath,
-    );
-    if (!matchesActive) {
-      setActiveInvocationDiffPath(renderableInvocationDiffFiles[0]?.path ?? null);
+    const activeExists = invocationDiffFiles.some((file) => file.path === activeInvocationDiffPath);
+    if (!activeExists) {
+      setActiveInvocationDiffPath(nextPrimary);
     }
-  }, [activeInvocationDiffPath, renderableInvocationDiffFiles]);
+  }, [activeInvocationDiffPath, canExpandInvocationDiff, invocationDiffFiles]);
+
+  const ensureInvocationDiffParsed = useCallback(
+    (path: string | null) => {
+      if (!path) return;
+      const target = invocationDiffFiles.find((file) => file.path === path);
+      if (!target) return;
+      setParsedByPath((current) => {
+        if (Object.prototype.hasOwnProperty.call(current, path)) {
+          return current;
+        }
+        const parsed = toRenderableInvocationDiffFile(target, `invocation:${workEntry.id}:${path}`);
+        return {
+          ...current,
+          [path]: parsed,
+        };
+      });
+    },
+    [invocationDiffFiles, workEntry.id],
+  );
+
+  const onToggleInvocationDiff = useCallback(() => {
+    setIsInvocationDiffExpanded((current) => {
+      const next = !current;
+      if (next) {
+        ensureInvocationDiffParsed(activeInvocationDiffPath);
+      }
+      return next;
+    });
+  }, [activeInvocationDiffPath, ensureInvocationDiffParsed]);
+
+  const onSelectInvocationDiffPath = useCallback(
+    (path: string) => {
+      setActiveInvocationDiffPath(path);
+      ensureInvocationDiffParsed(path);
+    },
+    [ensureInvocationDiffParsed],
+  );
 
   const activeInvocationDiff =
-    renderableInvocationDiffFiles.find((file) => file.path === activeInvocationDiffPath) ??
-    renderableInvocationDiffFiles[0];
-  const primaryInvocationPath = invocationDiffFiles[0]?.path ?? null;
+    (activeInvocationDiffPath ? parsedByPath[activeInvocationDiffPath] : null) ?? null;
 
   return (
-    <div className="rounded-lg border border-border/45 bg-background/45 px-2.5 py-2">
-      <div className="flex items-start gap-2.5">
-        <span className={cn("mt-0.5 flex size-5 shrink-0 items-center justify-center", iconConfig.className)}>
-          <EntryIcon className="size-3.5" />
+    <div className="rounded-md border border-border/35 bg-background/35 px-2 py-1.5">
+      <div className="flex min-w-0 items-start gap-2">
+        <span className={cn("mt-0.5 flex size-4.5 shrink-0 items-center justify-center", iconConfig.className)}>
+          <EntryIcon className="size-3" />
         </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <p
-              className={cn("min-w-0 truncate text-[11px] font-medium leading-5 text-foreground/85")}
-              title={displayText}
-            >
+        <div className="min-w-0 flex-1 space-y-0.5">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <p className="min-w-0 truncate text-[11px] font-medium leading-4.5 text-foreground/85" title={displayText}>
               {heading}
             </p>
-            {primaryInvocationPath && (
-              <span
-                className="min-w-0 truncate font-mono text-[10px] leading-5 text-muted-foreground/80"
-                title={primaryInvocationPath}
-              >
-                {primaryInvocationPath}
+            {kindLabel && (
+              <span className="shrink-0 rounded border border-border/50 px-1 py-0.5 text-[9px] leading-none text-muted-foreground/80">
+                {kindLabel}
               </span>
             )}
             {hasInvocationDiffStat && workEntry.invocationDiffStat && (
-              <DiffStatLabel
-                additions={workEntry.invocationDiffStat.additions}
-                deletions={workEntry.invocationDiffStat.deletions}
-              />
+              <span className="shrink-0 rounded border border-border/50 px-1 py-0.5 font-mono text-[9px] leading-none text-muted-foreground/80">
+                +{workEntry.invocationDiffStat.additions} -{workEntry.invocationDiffStat.deletions}
+              </span>
             )}
             {canExpandInvocationDiff && (
               <button
                 type="button"
-                className="rounded-sm p-0.5 text-muted-foreground/75 transition-colors duration-150 hover:text-foreground/85"
-                onClick={() => setIsInvocationDiffExpanded((current) => !current)}
+                className="inline-flex shrink-0 items-center gap-1 rounded border border-border/50 px-1 py-0.5 text-[9px] leading-none text-muted-foreground/80 transition-colors duration-150 hover:text-foreground/85"
+                onClick={onToggleInvocationDiff}
                 aria-label={isInvocationDiffExpanded ? "Collapse invocation diff" : "Expand invocation diff"}
               >
                 <ChevronRightIcon
-                  className={cn(
-                    "size-3 transition-transform duration-150",
-                    isInvocationDiffExpanded ? "rotate-90" : "",
-                  )}
+                  className={cn("size-2.5 transition-transform duration-150", isInvocationDiffExpanded ? "rotate-90" : "")}
                 />
+                <span>{isInvocationDiffExpanded ? "Hide diff" : "Show diff"}</span>
               </button>
             )}
-            {kindLabel && (
-              <Badge variant="secondary" className="h-5 rounded-md px-1.5 text-[9px] uppercase tracking-[0.12em]">
-                {kindLabel}
-              </Badge>
-            )}
           </div>
-          {workEntry.command && (
-            <p
-              className="mt-1 overflow-hidden rounded-md border border-border/55 bg-card/60 px-2 py-1 font-mono text-[10px] leading-4 text-muted-foreground/80"
-              title={workEntry.command}
-            >
+          {workEntry.command ? (
+            <p className="truncate font-mono text-[10px] leading-4 text-muted-foreground/80" title={workEntry.command}>
               {workEntry.command}
             </p>
-          )}
+          ) : null}
           {!workEntry.command && detailPreview && detailPreview !== heading && (
-            <p
-              className={cn("mt-1 truncate text-[10px] leading-4", workToneClass(workEntry.tone))}
-              title={workEntry.detail}
-            >
+            <p className={cn("truncate text-[10px] leading-4", workToneClass(workEntry.tone))} title={workEntry.detail}>
               {detailPreview}
             </p>
           )}
-        </div>
-      </div>
-      {canExpandInvocationDiff && isInvocationDiffExpanded && activeInvocationDiff && (
-        <div className="mt-2 rounded-md border border-border/65 bg-card/60 p-2">
-          {renderableInvocationDiffFiles.length > 1 && (
-            <div className="mb-2 flex flex-wrap gap-1">
-              {renderableInvocationDiffFiles.map((file) => (
-                <button
-                  key={`${workEntry.id}:invocation-diff:${file.path}`}
-                  type="button"
-                  className={cn(
-                    "rounded-md border px-1.5 py-0.5 font-mono text-[10px] transition-colors duration-150",
-                    file.path === activeInvocationDiff.path
-                      ? "border-border bg-background/80 text-foreground/90"
-                      : "border-border/50 bg-background/50 text-muted-foreground/75 hover:text-foreground/80",
-                  )}
-                  onClick={() => setActiveInvocationDiffPath(file.path)}
-                >
-                  {file.path}
-                </button>
-              ))}
+          {primaryInvocationPath && (
+            <span className="block truncate font-mono text-[10px] leading-4 text-muted-foreground/75" title={primaryInvocationPath}>
+              {primaryInvocationPath}
+            </span>
+          )}
+          {changedFilesLabel && (
+            <span className="block truncate font-mono text-[10px] leading-4 text-muted-foreground/75" title={changedFilesLabel}>
+              {changedFilesLabel}
+            </span>
+          )}
+          {canExpandInvocationDiff && isInvocationDiffExpanded && (
+            <div className="mt-1.5 rounded border border-border/55 bg-background/50 p-1.5">
+              {invocationDiffFiles.length > 1 && (
+                <div className="mb-1.5 flex flex-wrap gap-1">
+                  {invocationDiffFiles.map((file) => (
+                    <button
+                      key={`${workEntry.id}:invocation-diff:${file.path}`}
+                      type="button"
+                      className={cn(
+                        "rounded border px-1 py-0.5 font-mono text-[9px] text-muted-foreground/80 transition-colors duration-150",
+                        file.path === activeInvocationDiffPath
+                          ? "border-border bg-background/80 text-foreground/90"
+                          : "border-border/55 bg-background/50 hover:text-foreground/85",
+                      )}
+                      onClick={() => onSelectInvocationDiffPath(file.path)}
+                    >
+                      {file.path}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {activeInvocationDiff ? (
+                <div className="overflow-hidden rounded border border-border/60 bg-background/65">
+                  <FileDiff
+                    fileDiff={activeInvocationDiff.fileDiff}
+                    options={{
+                      diffStyle: "unified",
+                      lineDiffType: "none",
+                      theme: resolveDiffThemeName(resolvedTheme),
+                      themeType: resolvedTheme,
+                    }}
+                  />
+                </div>
+              ) : (
+                <p className="text-[10px] text-muted-foreground/70">No invocation diff available for this file.</p>
+              )}
             </div>
           )}
-          <div className="overflow-hidden rounded-md border border-border/70 bg-background/75">
-            <FileDiff
-              fileDiff={activeInvocationDiff.fileDiff}
-              options={{
-                diffStyle: "unified",
-                lineDiffType: "none",
-                theme: resolveDiffThemeName(resolvedTheme),
-                themeType: resolvedTheme,
-              }}
-            />
-          </div>
         </div>
-      )}
-      {hasChangedFiles && (
-        <div className="mt-2 flex flex-wrap gap-1 pl-7">
-          {workEntry.changedFiles?.slice(0, 4).map((filePath) => (
-            <span
-              key={`${workEntry.id}:${filePath}`}
-              className="rounded-md border border-border/55 bg-card/60 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground/80"
-              title={filePath}
-            >
-              {filePath}
-            </span>
-          ))}
-          {(workEntry.changedFiles?.length ?? 0) > 4 && (
-            <span className="px-1 text-[10px] text-muted-foreground/55">
-              +{(workEntry.changedFiles?.length ?? 0) - 4}
-            </span>
-          )}
-        </div>
-      )}
+      </div>
     </div>
   );
 });

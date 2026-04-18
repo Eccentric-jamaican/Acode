@@ -704,7 +704,7 @@ const worker = setupWorker(
         data: fixture.welcome,
       }),
     );
-    client.addEventListener("message", (event) => {
+    client.addEventListener("message", async (event) => {
       const rawData = event.data;
       if (typeof rawData !== "string") return;
       let request: WsRequestEnvelope;
@@ -716,10 +716,11 @@ const worker = setupWorker(
       const method = request.body?._tag;
       if (typeof method !== "string") return;
       wsRequests.push(request.body);
+      const result = await Promise.resolve(resolveWsRpc(method));
       client.send(
         JSON.stringify({
           id: request.id,
-          result: resolveWsRpc(method),
+          result,
         }),
       );
     });
@@ -2441,6 +2442,388 @@ describe("ChatView timeline estimator parity (full app)", () => {
         },
         { timeout: 8_000, interval: 16 },
       );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("shows the minimal new-thread landing for local drafts without started thread state", async () => {
+    useComposerDraftStore.setState({
+      draftThreadsByThreadId: {
+        [THREAD_ID]: {
+          projectId: PROJECT_ID,
+          createdAt: NOW_ISO,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          envMode: "local",
+        },
+      },
+      projectDraftThreadIdByProjectId: {
+        [PROJECT_ID]: THREAD_ID,
+      },
+    });
+
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createDraftOnlySnapshot(),
+    });
+
+    try {
+      await expect
+        .poll(
+          () => document.querySelector<HTMLElement>("[data-testid='chat-new-thread-landing']") ?? null,
+        )
+        .not.toBeNull();
+      await expect.element(page.getByTestId("chat-new-thread-project-picker-trigger")).toBeVisible();
+      await expect
+        .poll(
+          () =>
+            document.querySelector<HTMLElement>("[data-testid='chat-new-thread-landing'] h3")
+              ?.textContent ?? null,
+        )
+        .toBe("Let's build");
+      await expect
+        .poll(
+          () =>
+            document.querySelector<HTMLElement>("[data-testid='chat-new-thread-project-picker-trigger']")
+              ?.textContent ?? "",
+        )
+        .toContain("Project");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("renders server-owned new-thread suggestions on the landing surface", async () => {
+    useComposerDraftStore.setState({
+      draftThreadsByThreadId: {
+        [THREAD_ID]: {
+          projectId: PROJECT_ID,
+          createdAt: NOW_ISO,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          envMode: "local",
+        },
+      },
+      projectDraftThreadIdByProjectId: {
+        [PROJECT_ID]: THREAD_ID,
+      },
+    });
+
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createDraftOnlySnapshot(),
+      configureFixture: (nextFixture) => {
+        nextFixture.wsRpcResults = {
+          ...nextFixture.wsRpcResults,
+          [WS_METHODS.serverSuggestNewThreadTasks]: {
+            suggestions: [
+              { id: "review-1", prompt: "Fix the failing auth cleanup path" },
+              { id: "review-2", prompt: "Add a safe stale-session recovery path" },
+            ],
+          },
+        };
+      },
+    });
+
+    try {
+      await expect
+        .poll(
+          () =>
+            document.querySelector<HTMLElement>("[data-testid='chat-new-thread-suggestions']") ?? null,
+        )
+        .not.toBeNull();
+      await expect
+        .poll(
+          () =>
+            document.querySelector<HTMLElement>("[data-testid='chat-new-thread-suggestion-review-1']")
+              ?.textContent ?? "",
+        )
+        .toContain("Fix the failing auth cleanup path");
+      await expect
+        .poll(
+          () =>
+            wsRequests.find(
+              (request) => request._tag === WS_METHODS.serverSuggestNewThreadTasks,
+            ) as Record<string, unknown> | undefined,
+        )
+        .toMatchObject({
+          _tag: WS_METHODS.serverSuggestNewThreadTasks,
+          provider: "codex",
+          cwd: "/repo/project",
+          projectName: "Project",
+        });
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("shows a loading state for dirty codex projects before review-backed suggestions resolve", async () => {
+    useComposerDraftStore.setState({
+      draftThreadsByThreadId: {
+        [THREAD_ID]: {
+          projectId: PROJECT_ID,
+          createdAt: NOW_ISO,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          envMode: "local",
+        },
+      },
+      projectDraftThreadIdByProjectId: {
+        [PROJECT_ID]: THREAD_ID,
+      },
+    });
+
+    const pendingSuggestions: {
+      resolve?: (value: { suggestions: Array<{ id: string; prompt: string }> }) => void;
+    } = {};
+    const suggestionsPromise = new Promise<{ suggestions: Array<{ id: string; prompt: string }> }>(
+      (resolve) => {
+        pendingSuggestions.resolve = resolve;
+      },
+    );
+
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createDraftOnlySnapshot(),
+      configureFixture: (nextFixture) => {
+        nextFixture.wsRpcResults = {
+          ...nextFixture.wsRpcResults,
+          [WS_METHODS.gitStatus]: {
+            branch: "main",
+            hasWorkingTreeChanges: true,
+            workingTree: {
+              files: [{ path: "src/auth.ts", insertions: 2, deletions: 1 }],
+              insertions: 2,
+              deletions: 1,
+            },
+            hasUpstream: true,
+            aheadCount: 0,
+            behindCount: 0,
+            pr: null,
+          },
+          [WS_METHODS.serverSuggestNewThreadTasks]: suggestionsPromise,
+        };
+      },
+    });
+
+    try {
+      await expect
+        .poll(
+          () =>
+            document.querySelector<HTMLElement>("[data-testid='chat-new-thread-suggestions-loading']")
+              ?.textContent ?? "",
+        )
+        .toContain("Reviewing current changes");
+
+      pendingSuggestions.resolve?.({
+        suggestions: [{ id: "review-1", prompt: "Fix the failing auth cleanup path" }],
+      });
+
+      await expect
+        .poll(
+          () =>
+            document.querySelector<HTMLElement>("[data-testid='chat-new-thread-suggestion-review-1']")
+              ?.textContent ?? "",
+        )
+        .toContain("Fix the failing auth cleanup path");
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("reuses existing project drafts from the new-thread picker and creates one when missing", async () => {
+    const projectBeta = "project-2" as ProjectId;
+    const projectGamma = "project-3" as ProjectId;
+    const betaDraftThreadId = "thread-project-2-draft" as ThreadId;
+    const baseSnapshot = createDraftOnlySnapshot();
+    const snapshot: OrchestrationReadModel = {
+      ...baseSnapshot,
+      projects: [
+        ...baseSnapshot.projects,
+        {
+          id: projectBeta,
+          title: "Beta",
+          workspaceRoot: "/repo/beta",
+          defaultModel: "gpt-5",
+          scripts: [],
+          createdAt: NOW_ISO,
+          updatedAt: NOW_ISO,
+          deletedAt: null,
+        },
+        {
+          id: projectGamma,
+          title: "Gamma",
+          workspaceRoot: "/repo/gamma",
+          defaultModel: "gpt-5",
+          scripts: [],
+          createdAt: NOW_ISO,
+          updatedAt: NOW_ISO,
+          deletedAt: null,
+        },
+      ],
+    };
+
+    useComposerDraftStore.setState({
+      draftThreadsByThreadId: {
+        [THREAD_ID]: {
+          projectId: PROJECT_ID,
+          createdAt: NOW_ISO,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          envMode: "local",
+        },
+        [betaDraftThreadId]: {
+          projectId: projectBeta,
+          createdAt: NOW_ISO,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          envMode: "local",
+        },
+      },
+      projectDraftThreadIdByProjectId: {
+        [PROJECT_ID]: THREAD_ID,
+        [projectBeta]: betaDraftThreadId,
+      },
+    });
+
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot,
+    });
+
+    try {
+      await expect
+        .poll(
+          () =>
+            document
+              .querySelector<HTMLElement>("[data-testid='chat-new-thread-landing']")
+              ?.getAttribute("data-thread-id") ?? null,
+        )
+        .toBe(THREAD_ID);
+
+      await page.getByTestId("chat-new-thread-project-picker-trigger").click();
+      await page.getByTestId(`chat-new-thread-project-option-${projectBeta}`).click();
+
+      await expect
+        .poll(
+          () =>
+            document
+              .querySelector<HTMLElement>("[data-testid='chat-new-thread-landing']")
+              ?.getAttribute("data-thread-id") ?? null,
+        )
+        .toBe(betaDraftThreadId);
+
+      await page.getByTestId("chat-new-thread-project-picker-trigger").click();
+      await page.getByTestId(`chat-new-thread-project-option-${projectGamma}`).click();
+
+      await expect
+        .poll(() => useComposerDraftStore.getState().projectDraftThreadIdByProjectId[projectGamma] ?? null)
+        .not.toBeNull();
+
+      const gammaDraftThreadId =
+        useComposerDraftStore.getState().projectDraftThreadIdByProjectId[projectGamma] ?? null;
+      expect(gammaDraftThreadId).toBeTruthy();
+
+      await expect
+        .poll(
+          () =>
+            document
+              .querySelector<HTMLElement>("[data-testid='chat-new-thread-landing']")
+              ?.getAttribute("data-thread-id") ?? null,
+        )
+        .toBe(gammaDraftThreadId);
+      expect(gammaDraftThreadId).not.toBe(THREAD_ID);
+      expect(gammaDraftThreadId).not.toBe(betaDraftThreadId);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("offers add project in the new-thread picker and switches to that project's draft thread", async () => {
+    const projectBeta = "project-2" as ProjectId;
+    const betaDraftThreadId = "thread-project-2-draft" as ThreadId;
+    const betaCwd = "/repo/beta";
+    const baseSnapshot = createDraftOnlySnapshot();
+    const snapshot: OrchestrationReadModel = {
+      ...baseSnapshot,
+      projects: [
+        ...baseSnapshot.projects,
+        {
+          id: projectBeta,
+          title: "Beta",
+          workspaceRoot: betaCwd,
+          defaultModel: "gpt-5",
+          scripts: [],
+          createdAt: NOW_ISO,
+          updatedAt: NOW_ISO,
+          deletedAt: null,
+        },
+      ],
+    };
+
+    useComposerDraftStore.setState({
+      draftThreadsByThreadId: {
+        [THREAD_ID]: {
+          projectId: PROJECT_ID,
+          createdAt: NOW_ISO,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          envMode: "local",
+        },
+        [betaDraftThreadId]: {
+          projectId: projectBeta,
+          createdAt: NOW_ISO,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: null,
+          worktreePath: null,
+          envMode: "local",
+        },
+      },
+      projectDraftThreadIdByProjectId: {
+        [PROJECT_ID]: THREAD_ID,
+        [projectBeta]: betaDraftThreadId,
+      },
+    });
+
+    const pickFolderSpy = vi.fn(async () => betaCwd);
+    window.desktopBridge = {
+      ...(window.desktopBridge as DesktopBridge),
+      pickFolder: pickFolderSpy,
+    } as DesktopBridge;
+
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot,
+    });
+
+    try {
+      await page.getByTestId("chat-new-thread-project-picker-trigger").click();
+      await expect.element(page.getByTestId("chat-new-thread-project-option-add")).toBeVisible();
+      await page.getByTestId("chat-new-thread-project-option-add").click();
+
+      await expect.poll(() => pickFolderSpy.mock.calls.length).toBe(1);
+      await expect
+        .poll(
+          () =>
+            document
+              .querySelector<HTMLElement>("[data-testid='chat-new-thread-landing']")
+              ?.getAttribute("data-thread-id") ?? null,
+        )
+        .toBe(betaDraftThreadId);
     } finally {
       await mounted.cleanup();
     }

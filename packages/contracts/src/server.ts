@@ -182,6 +182,26 @@ export type ServerLogoutProviderInput = typeof ServerLogoutProviderInput.Type;
 export const ServerLogoutProviderResult = Schema.Struct({});
 export type ServerLogoutProviderResult = typeof ServerLogoutProviderResult.Type;
 
+export const ServerNewThreadSuggestionCandidate = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  prompt: TrimmedNonEmptyString,
+});
+export type ServerNewThreadSuggestionCandidate = typeof ServerNewThreadSuggestionCandidate.Type;
+
+export const ServerSuggestNewThreadTasksInput = Schema.Struct({
+  provider: ProviderKind,
+  cwd: TrimmedNonEmptyString,
+  projectName: TrimmedNonEmptyString,
+  selectedModel: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
+});
+export type ServerSuggestNewThreadTasksInput = typeof ServerSuggestNewThreadTasksInput.Type;
+
+export const ServerSuggestNewThreadTasksResult = Schema.Struct({
+  suggestions: Schema.Array(ServerNewThreadSuggestionCandidate),
+});
+export type ServerSuggestNewThreadTasksResult =
+  typeof ServerSuggestNewThreadTasksResult.Type;
+
 export const ServerUpsertKeybindingResult = Schema.Struct({
   keybindings: ResolvedKeybindingsConfig,
   issues: ServerConfigIssues,

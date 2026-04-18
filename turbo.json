@@ -11,7 +11,8 @@
     "T3CODE_NO_BROWSER",
     "T3CODE_STATE_DIR",
     "T3CODE_AUTH_TOKEN",
-    "T3CODE_DESKTOP_WS_URL"
+    "T3CODE_DESKTOP_WS_URL",
+    "T3CODE_DESKTOP_SERVER_WATCH"
   ],
   "tasks": {
     "build": {

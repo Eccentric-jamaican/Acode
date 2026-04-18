@@ -25,6 +25,11 @@ const fakeCodexAdapter: CodexAdapterShape = {
   hasSession: vi.fn(),
   readThread: vi.fn(),
   rollbackThread: vi.fn(),
+  listStoredThreads: vi.fn(),
+  listStoredSkills: vi.fn(),
+  readStoredThread: vi.fn(),
+  archiveStoredThread: vi.fn(),
+  startReview: vi.fn(),
   stopAll: vi.fn(),
   streamEvents: Stream.empty,
 };

@@ -149,6 +149,17 @@ export function resolveModelSlugForProvider(
   return resolveModelSlug(model, provider);
 }
 
+export function inferProviderFromModel(model: string): ProviderKind {
+  const normalized = model.trim().toLowerCase();
+  if (normalized.includes("claude")) {
+    return "claudeAgent";
+  }
+  if (normalized === OPENCODE_DEFAULT_MODEL_SLUG || /^[^/\s]+\/[^/\s]+$/.test(normalized)) {
+    return "opencode";
+  }
+  return "codex";
+}
+
 /** Trim a string, returning null for empty/missing values. */
 export function trimOrNull<T extends string>(value: T | null | undefined): T | null {
   if (typeof value !== "string") return null;

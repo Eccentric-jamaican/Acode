@@ -298,6 +298,8 @@ export function createWsNativeApi(): NativeApi {
       cancelProviderLogin: (input) =>
         transport.request(WS_METHODS.serverCancelProviderLogin, input),
       logoutProvider: (input) => transport.request(WS_METHODS.serverLogoutProvider, input),
+      suggestNewThreadTasks: (input) =>
+        transport.request(WS_METHODS.serverSuggestNewThreadTasks, input),
       onErrorInboxUpdated: (callback) => onServerErrorInboxUpdated(callback),
     },
     provider: {

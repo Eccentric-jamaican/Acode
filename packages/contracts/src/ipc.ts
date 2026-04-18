@@ -42,6 +42,8 @@ import type {
   ServerGetErrorInboxResult,
   ServerLogoutProviderInput,
   ServerLogoutProviderResult,
+  ServerSuggestNewThreadTasksInput,
+  ServerSuggestNewThreadTasksResult,
   ServerPromoteErrorInboxEntryToTaskInput,
   ServerPromoteErrorInboxEntryToTaskResult,
   ServerReportClientDiagnosticInput,
@@ -234,6 +236,9 @@ export interface NativeApi {
       input: ServerCancelProviderLoginInput,
     ) => Promise<ServerCancelProviderLoginResult>;
     logoutProvider: (input: ServerLogoutProviderInput) => Promise<ServerLogoutProviderResult>;
+    suggestNewThreadTasks: (
+      input: ServerSuggestNewThreadTasksInput,
+    ) => Promise<ServerSuggestNewThreadTasksResult>;
     onErrorInboxUpdated: (callback: (payload: ServerErrorInboxUpdatedPayload) => void) => () => void;
   };
   provider: {
