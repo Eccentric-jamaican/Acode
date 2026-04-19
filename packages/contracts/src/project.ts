@@ -26,6 +26,50 @@ export const ProjectSearchEntriesResult = Schema.Struct({
 });
 export type ProjectSearchEntriesResult = typeof ProjectSearchEntriesResult.Type;
 
+export const ProjectListDirectoryInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  relativePath: Schema.NullOr(TrimmedNonEmptyString),
+});
+export type ProjectListDirectoryInput = typeof ProjectListDirectoryInput.Type;
+
+export const ProjectDirectoryEntry = Schema.Struct({
+  path: TrimmedNonEmptyString,
+  name: TrimmedNonEmptyString,
+  kind: ProjectEntryKind,
+  parentPath: Schema.optional(TrimmedNonEmptyString),
+});
+export type ProjectDirectoryEntry = typeof ProjectDirectoryEntry.Type;
+
+export const ProjectListDirectoryResult = Schema.Struct({
+  relativePath: Schema.NullOr(TrimmedNonEmptyString),
+  entries: Schema.Array(ProjectDirectoryEntry),
+});
+export type ProjectListDirectoryResult = typeof ProjectListDirectoryResult.Type;
+
+export const ProjectReadFileInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  relativePath: TrimmedNonEmptyString,
+});
+export type ProjectReadFileInput = typeof ProjectReadFileInput.Type;
+
+const ProjectReadFileTextResult = Schema.Struct({
+  relativePath: TrimmedNonEmptyString,
+  status: Schema.Literal("text"),
+  contents: Schema.String,
+});
+
+const ProjectReadFileUnavailableResult = Schema.Struct({
+  relativePath: TrimmedNonEmptyString,
+  status: Schema.Literals(["binary", "too-large", "missing", "unreadable"]),
+  message: Schema.String,
+});
+
+export const ProjectReadFileResult = Schema.Union([
+  ProjectReadFileTextResult,
+  ProjectReadFileUnavailableResult,
+]);
+export type ProjectReadFileResult = typeof ProjectReadFileResult.Type;
+
 export const ProjectWriteFileInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   relativePath: TrimmedNonEmptyString.check(

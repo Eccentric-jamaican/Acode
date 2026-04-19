@@ -142,6 +142,7 @@ export interface MessagesTimelineProps {
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenThread?: ((threadId: ThreadId) => void) | undefined;
+  onOpenFilePath?: ((path: string) => void) | undefined;
   markdownCwd: string | undefined;
   resolvedTheme: "light" | "dark";
   workspaceRoot: string | undefined;
@@ -783,7 +784,12 @@ const ProposedPlanCard = memo(function ProposedPlanCard(props: {
               [CHAT_SELECTION_SOURCE_ID_ATTRIBUTE]: sourceId,
             }}
           >
-            <ChatMarkdown text={planMarkdown} cwd={cwd} isStreaming={false} />
+            <ChatMarkdown
+              text={planMarkdown}
+              cwd={cwd}
+              isStreaming={false}
+              onOpenFilePath={props.onOpenFilePath}
+            />
           </div>
           {canCollapse && !expanded ? (
             <div className="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-linear-to-t from-card/95 via-card/80 to-transparent" />
@@ -1967,6 +1973,7 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
                       cwd={markdownCwd}
                       isStreaming={false}
                       variant="user"
+                      onOpenFilePath={props.onOpenFilePath}
                     />
                   )}
                 </div>
@@ -2025,6 +2032,7 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
                     text={messageText}
                     cwd={markdownCwd}
                     isStreaming={Boolean(row.message.streaming)}
+                    onOpenFilePath={props.onOpenFilePath}
                   />
                 </div>
                 {(() => {

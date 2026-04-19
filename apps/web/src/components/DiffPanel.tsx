@@ -1,285 +1,34 @@
-import { parsePatchFiles, setLanguageOverride, type SupportedLanguages } from "@pierre/diffs";
-import { FileDiff, type FileDiffMetadata, Virtualizer } from "@pierre/diffs/react";
-import { useQuery } from "@tanstack/react-query";
-import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
-import { ThreadId, type TurnId } from "@t3tools/contracts";
 import {
-  AlignLeftIcon,
-  ChevronLeftIcon,
+  getSharedHighlighter,
+  type DiffsHighlighter,
+  type SupportedLanguages,
+} from "@pierre/diffs";
+import { useQuery } from "@tanstack/react-query";
+import { useParams, useSearch } from "@tanstack/react-router";
+import { ThreadId } from "@t3tools/contracts";
+import {
+  EllipsisIcon,
+  MessageSquareIcon,
+  XIcon,
   ChevronRightIcon,
-  Columns2Icon,
-  FileDiffIcon,
-  GitForkIcon,
-  Rows3Icon,
+  FileIcon,
 } from "lucide-react";
-import { type WheelEvent as ReactWheelEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { checkpointDiffQueryOptions } from "~/lib/providerReactQuery";
-import { cn } from "~/lib/utils";
-import { readNativeApi } from "../nativeApi";
-import { preferredTerminalEditor, resolvePathLinkTarget } from "../terminal-links";
-import { parseDiffRouteSearch, withDiffSelection, withRightPanelMode } from "../diffRouteSearch";
+import { Suspense, use, useEffect, useMemo, useState } from "react";
+
+import { parseDiffRouteSearch } from "../diffRouteSearch";
 import { isElectronRuntime } from "../env";
-import { useAppSettings } from "../appSettings";
+import { useFilePanelStore, getFilePanelThreadState, type FilePanelComment } from "../filePanelStore";
 import { useTheme } from "../hooks/useTheme";
-import { buildPatchCacheKey } from "../lib/diffRendering";
 import { resolveDiffThemeName } from "../lib/diffRendering";
+import { projectReadFileQueryOptions } from "../lib/projectReactQuery";
 import { normalizeSyntaxLanguage } from "../lib/syntaxLanguage";
-import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
+import { cn } from "../lib/utils";
+import { readNativeApi } from "../nativeApi";
 import { useStore } from "../store";
-import { ToggleGroup, Toggle } from "./ui/toggle-group";
-
-type DiffRenderMode = "stacked" | "split";
-type DiffThemeType = "light" | "dark";
-type DiffSurfaceMode = "review" | "summary" | "total";
-
-interface PatchSummaryFileStat {
-  path: string;
-  additions: number;
-  deletions: number;
-}
-
-interface PatchSummary {
-  filesChanged: number;
-  additions: number;
-  deletions: number;
-  renamedFiles: number;
-  createdFiles: number;
-  deletedFiles: number;
-  topFiles: PatchSummaryFileStat[];
-}
-
-const DIFF_PANEL_UNSAFE_CSS = `
-[data-diffs-header],
-[data-diff],
-[data-file],
-[data-error-wrapper],
-[data-virtualizer-buffer] {
-  --diffs-bg: color-mix(in srgb, var(--card) 90%, var(--background)) !important;
-  --diffs-light-bg: color-mix(in srgb, var(--card) 90%, var(--background)) !important;
-  --diffs-dark-bg: color-mix(in srgb, var(--card) 90%, var(--background)) !important;
-  --diffs-token-light-bg: transparent;
-  --diffs-token-dark-bg: transparent;
-
-  --diffs-bg-context-override: color-mix(in srgb, var(--background) 97%, var(--foreground));
-  --diffs-bg-hover-override: color-mix(in srgb, var(--background) 94%, var(--foreground));
-  --diffs-bg-separator-override: color-mix(in srgb, var(--background) 95%, var(--foreground));
-  --diffs-bg-buffer-override: color-mix(in srgb, var(--background) 90%, var(--foreground));
-
-  --diffs-bg-addition-override: color-mix(in srgb, var(--background) 92%, var(--success));
-  --diffs-bg-addition-number-override: color-mix(in srgb, var(--background) 88%, var(--success));
-  --diffs-bg-addition-hover-override: color-mix(in srgb, var(--background) 85%, var(--success));
-  --diffs-bg-addition-emphasis-override: color-mix(in srgb, var(--background) 80%, var(--success));
-
-  --diffs-bg-deletion-override: color-mix(in srgb, var(--background) 92%, var(--destructive));
-  --diffs-bg-deletion-number-override: color-mix(in srgb, var(--background) 88%, var(--destructive));
-  --diffs-bg-deletion-hover-override: color-mix(in srgb, var(--background) 85%, var(--destructive));
-  --diffs-bg-deletion-emphasis-override: color-mix(
-    in srgb,
-    var(--background) 80%,
-    var(--destructive)
-  );
-
-  background-color: var(--diffs-bg) !important;
-}
-
-[data-file-info] {
-  background-color: color-mix(in srgb, var(--card) 94%, var(--foreground)) !important;
-  border-block-color: var(--border) !important;
-  color: var(--foreground) !important;
-}
-
-[data-diffs-header] {
-  position: sticky !important;
-  top: 0;
-  z-index: 4;
-  background-color: color-mix(in srgb, var(--card) 94%, var(--foreground)) !important;
-  border-bottom: 1px solid var(--border) !important;
-}
-
-[data-title] {
-  cursor: pointer;
-  transition:
-    color 120ms ease,
-    text-decoration-color 120ms ease;
-  text-decoration: underline;
-  text-decoration-color: transparent;
-  text-underline-offset: 2px;
-}
-
-[data-title]:hover {
-  color: color-mix(in srgb, var(--foreground) 84%, var(--primary)) !important;
-  text-decoration-color: currentColor;
-}
-`;
-
-type RenderablePatch =
-  | {
-      kind: "files";
-      files: FileDiffMetadata[];
-    }
-  | {
-      kind: "raw";
-      text: string;
-      reason: string;
-    };
-
-function getRenderablePatch(
-  patch: string | undefined,
-  cacheScope = "diff-panel",
-): RenderablePatch | null {
-  if (!patch) return null;
-  const normalizedPatch = patch.trim();
-  if (normalizedPatch.length === 0) return null;
-
-  try {
-    const parsedPatches = parsePatchFiles(
-      normalizedPatch,
-      buildPatchCacheKey(normalizedPatch, cacheScope),
-    );
-    const files = parsedPatches.flatMap((parsedPatch) => parsedPatch.files);
-    if (files.length > 0) {
-      return { kind: "files", files };
-    }
-
-    return {
-      kind: "raw",
-      text: normalizedPatch,
-      reason: "Unsupported diff format. Showing raw patch.",
-    };
-  } catch {
-    return {
-      kind: "raw",
-      text: normalizedPatch,
-      reason: "Failed to parse patch. Showing raw patch.",
-    };
-  }
-}
-
-function resolveFileDiffPath(fileDiff: FileDiffMetadata): string {
-  const raw = fileDiff.name ?? fileDiff.prevName ?? "";
-  if (raw.startsWith("a/") || raw.startsWith("b/")) {
-    return raw.slice(2);
-  }
-  return raw;
-}
-
-function normalizeFileDiffLanguage(fileDiff: FileDiffMetadata): FileDiffMetadata {
-  if (!fileDiff.lang) {
-    return fileDiff;
-  }
-  const normalized = normalizeSyntaxLanguage(fileDiff.lang);
-  if (normalized === fileDiff.lang) {
-    return fileDiff;
-  }
-  return setLanguageOverride(fileDiff, normalized as SupportedLanguages);
-}
-
-function buildFileDiffRenderKey(fileDiff: FileDiffMetadata): string {
-  return fileDiff.cacheKey ?? `${fileDiff.prevName ?? "none"}:${fileDiff.name}`;
-}
-
-function formatTurnChipTimestamp(isoDate: string): string {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(new Date(isoDate));
-}
-
-function summarizePatch(patch: string | undefined): PatchSummary | null {
-  if (!patch || patch.trim().length === 0) {
-    return null;
-  }
-
-  const lines = patch.split(/\r?\n/);
-  const touchedPaths = new Set<string>();
-  const perFileStats = new Map<string, PatchSummaryFileStat>();
-  let currentPath: string | null = null;
-  let additions = 0;
-  let deletions = 0;
-  let renamedFiles = 0;
-  let createdFiles = 0;
-  let deletedFiles = 0;
-
-  const ensureFileStat = (path: string): PatchSummaryFileStat => {
-    const existing = perFileStats.get(path);
-    if (existing) return existing;
-    const created: PatchSummaryFileStat = { path, additions: 0, deletions: 0 };
-    perFileStats.set(path, created);
-    return created;
-  };
-
-  for (const line of lines) {
-    if (line.startsWith("diff --git ")) {
-      const match = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
-      if (match) {
-        currentPath = match[2] ?? match[1] ?? null;
-      } else {
-        currentPath = null;
-      }
-      if (currentPath) {
-        touchedPaths.add(currentPath);
-        ensureFileStat(currentPath);
-      }
-      continue;
-    }
-
-    if (line.startsWith("rename from ")) {
-      renamedFiles += 1;
-      continue;
-    }
-    if (line.startsWith("new file mode ")) {
-      createdFiles += 1;
-      continue;
-    }
-    if (line.startsWith("deleted file mode ")) {
-      deletedFiles += 1;
-      continue;
-    }
-
-    if (line.startsWith("+++ ") || line.startsWith("--- ")) {
-      continue;
-    }
-
-    if (line.startsWith("+")) {
-      additions += 1;
-      if (currentPath) {
-        const stat = ensureFileStat(currentPath);
-        stat.additions += 1;
-      }
-      continue;
-    }
-    if (line.startsWith("-")) {
-      deletions += 1;
-      if (currentPath) {
-        const stat = ensureFileStat(currentPath);
-        stat.deletions += 1;
-      }
-    }
-  }
-
-  const filesChanged = Math.max(touchedPaths.size, perFileStats.size);
-  const topFiles = Array.from(perFileStats.values())
-    .filter((file) => file.additions > 0 || file.deletions > 0)
-    .toSorted((left, right) => {
-      const leftMagnitude = left.additions + left.deletions;
-      const rightMagnitude = right.additions + right.deletions;
-      if (leftMagnitude !== rightMagnitude) {
-        return rightMagnitude - leftMagnitude;
-      }
-      return left.path.localeCompare(right.path, undefined, { numeric: true, sensitivity: "base" });
-    })
-    .slice(0, 8);
-
-  return {
-    filesChanged,
-    additions,
-    deletions,
-    renamedFiles,
-    createdFiles,
-    deletedFiles,
-    topFiles,
-  };
-}
+import { preferredTerminalEditor, resolvePathLinkTarget } from "../terminal-links";
+import { Button } from "./ui/button";
+import ChatMarkdown from "./ChatMarkdown";
+import { Menu, MenuItem, MenuPopup, MenuTrigger } from "./ui/menu";
 
 interface DiffPanelProps {
   mode?: "inline" | "sheet" | "sidebar";
@@ -287,17 +36,79 @@ interface DiffPanelProps {
 
 export { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
 
+type ResolvedHighlighter = {
+  highlighter: DiffsHighlighter;
+  language: string;
+};
+
+const fileViewerHighlighterPromiseCache = new Map<string, Promise<ResolvedHighlighter>>();
+
+function inferFileViewerLanguage(filePath: string): string {
+  const extension = filePath.split(".").pop()?.toLowerCase() ?? "";
+  if (!extension) {
+    return "text";
+  }
+  if (extension === "md") {
+    return "markdown";
+  }
+  if (extension === "yml") {
+    return "yaml";
+  }
+  if (extension === "mts" || extension === "cts") {
+    return "ts";
+  }
+  return normalizeSyntaxLanguage(extension);
+}
+
+function isMarkdownFile(filePath: string): boolean {
+  const extension = filePath.split(".").pop()?.toLowerCase() ?? "";
+  return extension === "md" || extension === "mdx" || extension === "markdown";
+}
+
+function getFileViewerHighlighterPromise(language: string): Promise<ResolvedHighlighter> {
+  const normalizedLanguage = normalizeSyntaxLanguage(language);
+  const cached = fileViewerHighlighterPromiseCache.get(normalizedLanguage);
+  if (cached) {
+    return cached;
+  }
+
+  const promise = getSharedHighlighter({
+    themes: [resolveDiffThemeName("dark"), resolveDiffThemeName("light")],
+    langs: [normalizedLanguage as SupportedLanguages],
+    preferredHighlighter: "shiki-js",
+  })
+    .then((highlighter) => ({ highlighter, language: normalizedLanguage }))
+    .catch(async () => {
+      const fallbackLanguage = "text";
+      const fallbackHighlighter = await getSharedHighlighter({
+        themes: [resolveDiffThemeName("dark"), resolveDiffThemeName("light")],
+        langs: [fallbackLanguage as SupportedLanguages],
+        preferredHighlighter: "shiki-js",
+      });
+      return { highlighter: fallbackHighlighter, language: fallbackLanguage };
+    });
+
+  fileViewerHighlighterPromiseCache.set(normalizedLanguage, promise);
+  return promise;
+}
+
+function extractHighlightedLines(html: string): string[] {
+  if (typeof DOMParser === "undefined") {
+    return html.split("\n");
+  }
+
+  const document = new DOMParser().parseFromString(html, "text/html");
+  const lineNodes = Array.from(document.querySelectorAll(".line"));
+  if (lineNodes.length === 0) {
+    return [html];
+  }
+
+  return lineNodes.map((lineNode) => lineNode.innerHTML);
+}
+
 export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
-  const navigate = useNavigate();
   const usesDesktopAppChrome = isElectronRuntime();
-  const { settings } = useAppSettings();
   const { resolvedTheme } = useTheme();
-  const [surfaceMode, setSurfaceMode] = useState<DiffSurfaceMode>("review");
-  const [diffRenderMode, setDiffRenderMode] = useState<DiffRenderMode>("stacked");
-  const patchViewportRef = useRef<HTMLDivElement>(null);
-  const turnStripRef = useRef<HTMLDivElement>(null);
-  const [canScrollTurnStripLeft, setCanScrollTurnStripLeft] = useState(false);
-  const [canScrollTurnStripRight, setCanScrollTurnStripRight] = useState(false);
   const routeThreadId = useParams({
     strict: false,
     select: (params) => (params.threadId ? ThreadId.makeUnsafe(params.threadId) : null),
@@ -311,368 +122,46 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
   const activeProject = useStore((store) =>
     activeProjectId ? store.projects.find((project) => project.id === activeProjectId) : undefined,
   );
-  const activeCwd = activeThread?.worktreePath ?? activeProject?.cwd;
-  const { turnDiffSummaries, inferredCheckpointTurnCountByTurnId } =
-    useTurnDiffSummaries(activeThread);
-  const orderedTurnDiffSummaries = useMemo(
-    () =>
-      [...turnDiffSummaries].toSorted((left, right) => {
-        const leftTurnCount =
-          left.checkpointTurnCount ?? inferredCheckpointTurnCountByTurnId[left.turnId] ?? 0;
-        const rightTurnCount =
-          right.checkpointTurnCount ?? inferredCheckpointTurnCountByTurnId[right.turnId] ?? 0;
-        if (leftTurnCount !== rightTurnCount) {
-          return rightTurnCount - leftTurnCount;
-        }
-        return right.completedAt.localeCompare(left.completedAt);
-      }),
-    [inferredCheckpointTurnCountByTurnId, turnDiffSummaries],
-  );
+  const activeCwd = activeThread?.worktreePath ?? activeProject?.cwd ?? null;
+  const filePanelState = useFilePanelStore((store) => getFilePanelThreadState(store, activeThreadId));
+  const openFile = useFilePanelStore((store) => store.openFile);
+  const closeFile = useFilePanelStore((store) => store.closeFile);
+  const selectSummary = useFilePanelStore((store) => store.selectSummary);
+  const toggleMarkdownRichView = useFilePanelStore((store) => store.toggleMarkdownRichView);
+  const toggleCodeWordWrap = useFilePanelStore((store) => store.toggleCodeWordWrap);
+  const addComment = useFilePanelStore((store) => store.addComment);
+  const updateComment = useFilePanelStore((store) => store.updateComment);
+  const deleteComment = useFilePanelStore((store) => store.deleteComment);
 
-  const selectedTurnId = diffSearch.diffTurnId ?? null;
-  const selectedFilePath = selectedTurnId !== null ? (diffSearch.diffFilePath ?? null) : null;
-  const selectedTurn =
-    selectedTurnId === null
-      ? undefined
-      : (orderedTurnDiffSummaries.find((summary) => summary.turnId === selectedTurnId) ??
-        orderedTurnDiffSummaries[0]);
-  const selectedCheckpointTurnCount =
-    selectedTurn &&
-    (selectedTurn.checkpointTurnCount ?? inferredCheckpointTurnCountByTurnId[selectedTurn.turnId]);
-  const selectedCheckpointRange = useMemo(
-    () =>
-      typeof selectedCheckpointTurnCount === "number"
-        ? {
-            fromTurnCount: Math.max(0, selectedCheckpointTurnCount - 1),
-            toTurnCount: selectedCheckpointTurnCount,
-          }
-        : null,
-    [selectedCheckpointTurnCount],
-  );
-  const conversationCheckpointTurnCount = useMemo(() => {
-    const turnCounts = orderedTurnDiffSummaries
-      .map(
-        (summary) =>
-          summary.checkpointTurnCount ?? inferredCheckpointTurnCountByTurnId[summary.turnId],
-      )
-      .filter((value): value is number => typeof value === "number");
-    if (turnCounts.length === 0) {
-      return undefined;
+  useEffect(() => {
+    if (!activeThreadId || !diffSearch.diffFilePath) {
+      return;
     }
-    const latest = Math.max(...turnCounts);
-    return latest > 0 ? latest : undefined;
-  }, [inferredCheckpointTurnCountByTurnId, orderedTurnDiffSummaries]);
-  const fullThreadCheckpointRange = useMemo(
-    () =>
-      typeof conversationCheckpointTurnCount === "number"
-        ? {
-            fromTurnCount: 0,
-            toTurnCount: conversationCheckpointTurnCount,
-          }
-        : null,
-    [conversationCheckpointTurnCount],
+    openFile(activeThreadId, diffSearch.diffFilePath);
+  }, [activeThreadId, diffSearch.diffFilePath, openFile]);
+
+  const activeFilePath = filePanelState.activeTab.kind === "file" ? filePanelState.activeTab.path : null;
+  const markdownRichViewEnabled = Boolean(
+    activeFilePath && !filePanelState.plainViewMarkdownFiles.includes(activeFilePath),
   );
-  const reviewCheckpointRange = selectedTurn ? selectedCheckpointRange : fullThreadCheckpointRange;
-  const conversationCacheScope = useMemo(() => {
-    if (orderedTurnDiffSummaries.length === 0) {
-      return null;
-    }
-    return `conversation:${orderedTurnDiffSummaries.map((summary) => summary.turnId).join(",")}`;
-  }, [orderedTurnDiffSummaries]);
-  const reviewCheckpointDiffQuery = useQuery(
-    checkpointDiffQueryOptions({
-      threadId: activeThreadId,
-      fromTurnCount: reviewCheckpointRange?.fromTurnCount ?? null,
-      toTurnCount: reviewCheckpointRange?.toTurnCount ?? null,
-      cacheScope: selectedTurn ? `turn:${selectedTurn.turnId}` : conversationCacheScope,
-    }),
+  const codeWordWrapEnabled = Boolean(
+    activeFilePath && !filePanelState.noWrapCodeFiles.includes(activeFilePath),
   );
-  const totalCheckpointDiffQuery = useQuery(
-    checkpointDiffQueryOptions({
-      threadId: activeThreadId,
-      fromTurnCount: fullThreadCheckpointRange?.fromTurnCount ?? null,
-      toTurnCount: fullThreadCheckpointRange?.toTurnCount ?? null,
-      cacheScope: conversationCacheScope ? `${conversationCacheScope}:total` : "conversation:total",
+  const activeFileQuery = useQuery(
+    projectReadFileQueryOptions({
+      cwd: activeCwd,
+      relativePath: activeFilePath,
+      enabled: activeCwd !== null && activeFilePath !== null,
     }),
   );
 
-  const reviewPatch = reviewCheckpointDiffQuery.data?.diff;
-  const totalPatch = totalCheckpointDiffQuery.data?.diff;
-  const activePatch = surfaceMode === "review" ? reviewPatch : totalPatch;
-  const activeDiffIsLoading =
-    surfaceMode === "review" ? reviewCheckpointDiffQuery.isLoading : totalCheckpointDiffQuery.isLoading;
-  const activeDiffError =
-    surfaceMode === "review"
-      ? reviewCheckpointDiffQuery.error instanceof Error
-        ? reviewCheckpointDiffQuery.error.message
-        : reviewCheckpointDiffQuery.error
-          ? "Failed to load checkpoint diff."
-          : null
-      : totalCheckpointDiffQuery.error instanceof Error
-        ? totalCheckpointDiffQuery.error.message
-        : totalCheckpointDiffQuery.error
-          ? "Failed to load total diff."
-          : null;
-  const canShowTotal = Boolean(activeThreadId && fullThreadCheckpointRange);
-  const canShowSummary = canShowTotal;
+  const breadcrumbs = useMemo(() => {
+    if (!activeFilePath) return [] as string[];
+    return activeFilePath.split("/").filter((segment) => segment.length > 0);
+  }, [activeFilePath]);
 
-  useEffect(() => {
-    if (!canShowTotal && (surfaceMode === "total" || surfaceMode === "summary")) {
-      setSurfaceMode("review");
-    }
-  }, [canShowTotal, surfaceMode]);
-
-  const hasResolvedPatch = typeof activePatch === "string";
-  const hasNoNetChanges = hasResolvedPatch && activePatch.trim().length === 0;
-  const renderablePatch = useMemo(
-    () => getRenderablePatch(activePatch, `diff-panel:${surfaceMode}:${resolvedTheme}`),
-    [activePatch, resolvedTheme, surfaceMode],
-  );
-  const patchSummary = useMemo(() => summarizePatch(totalPatch), [totalPatch]);
-  const hasResolvedSummaryPatch = typeof totalPatch === "string";
-  const hasNoSummaryChanges = hasResolvedSummaryPatch && totalPatch.trim().length === 0;
-  const summaryError =
-    totalCheckpointDiffQuery.error instanceof Error
-      ? totalCheckpointDiffQuery.error.message
-      : totalCheckpointDiffQuery.error
-        ? "Failed to load total diff."
-        : null;
-  const renderableFiles = useMemo(() => {
-    if (!renderablePatch || renderablePatch.kind !== "files") {
-      return [];
-    }
-    return renderablePatch.files.toSorted((left, right) =>
-      resolveFileDiffPath(left).localeCompare(resolveFileDiffPath(right), undefined, {
-        numeric: true,
-        sensitivity: "base",
-      }),
-    );
-  }, [renderablePatch]);
-
-  useEffect(() => {
-    if (!selectedFilePath || !patchViewportRef.current) {
-      return;
-    }
-    const target = Array.from(
-      patchViewportRef.current.querySelectorAll<HTMLElement>("[data-diff-file-path]"),
-    ).find((element) => element.dataset.diffFilePath === selectedFilePath);
-    target?.scrollIntoView({ block: "nearest" });
-  }, [selectedFilePath, renderableFiles]);
-
-  const openDiffFileInEditor = useCallback(
-    (filePath: string) => {
-      const api = readNativeApi();
-      if (!api) return;
-      const targetPath = activeCwd ? resolvePathLinkTarget(filePath, activeCwd) : filePath;
-      void api.shell.openInEditor(targetPath, preferredTerminalEditor()).catch((error) => {
-        console.warn("Failed to open diff file in editor.", error);
-      });
-    },
-    [activeCwd],
-  );
-
-  const selectTurn = (turnId: TurnId) => {
-    if (!activeThread) return;
-    setSurfaceMode("review");
-    void navigate({
-      to: "/$threadId",
-      params: { threadId: activeThread.id },
-      search: (previous) =>
-        withDiffSelection(previous as Record<string, unknown>, {
-          turnId,
-        }),
-    });
-  };
-  const selectWholeConversation = () => {
-    if (!activeThread) return;
-    setSurfaceMode("review");
-    void navigate({
-      to: "/$threadId",
-      params: { threadId: activeThread.id },
-      search: (previous) =>
-        withRightPanelMode(previous as Record<string, unknown>, "diff"),
-    });
-  };
-  const updateTurnStripScrollState = useCallback(() => {
-    const element = turnStripRef.current;
-    if (!element) {
-      setCanScrollTurnStripLeft(false);
-      setCanScrollTurnStripRight(false);
-      return;
-    }
-
-    const maxScrollLeft = Math.max(0, element.scrollWidth - element.clientWidth);
-    setCanScrollTurnStripLeft(element.scrollLeft > 4);
-    setCanScrollTurnStripRight(element.scrollLeft < maxScrollLeft - 4);
-  }, []);
-  const scrollTurnStripBy = useCallback((offset: number) => {
-    const element = turnStripRef.current;
-    if (!element) return;
-    element.scrollBy({ left: offset, behavior: "smooth" });
-  }, []);
-  const onTurnStripWheel = useCallback((event: ReactWheelEvent<HTMLDivElement>) => {
-    const element = turnStripRef.current;
-    if (!element) return;
-    if (element.scrollWidth <= element.clientWidth + 1) return;
-    if (Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
-
-    event.preventDefault();
-    element.scrollBy({ left: event.deltaY, behavior: "auto" });
-  }, []);
-
-  useEffect(() => {
-    const element = turnStripRef.current;
-    if (!element) return;
-
-    const frameId = window.requestAnimationFrame(() => updateTurnStripScrollState());
-    const onScroll = () => updateTurnStripScrollState();
-
-    element.addEventListener("scroll", onScroll, { passive: true });
-
-    const resizeObserver = new ResizeObserver(() => updateTurnStripScrollState());
-    resizeObserver.observe(element);
-
-    return () => {
-      window.cancelAnimationFrame(frameId);
-      element.removeEventListener("scroll", onScroll);
-      resizeObserver.disconnect();
-    };
-  }, [updateTurnStripScrollState]);
-
-  useEffect(() => {
-    const frameId = window.requestAnimationFrame(() => updateTurnStripScrollState());
-    return () => {
-      window.cancelAnimationFrame(frameId);
-    };
-  }, [orderedTurnDiffSummaries, selectedTurnId, updateTurnStripScrollState]);
-
-  useEffect(() => {
-    const element = turnStripRef.current;
-    if (!element) return;
-
-    const selectedChip = element.querySelector<HTMLElement>("[data-turn-chip-selected='true']");
-    selectedChip?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
-  }, [selectedTurn?.turnId, selectedTurnId]);
-
-  const headerRow = (
-    <>
-      <div className="relative min-w-0 flex-1 [-webkit-app-region:no-drag]">
-        {canScrollTurnStripLeft && (
-          <div className="pointer-events-none absolute inset-y-0 left-8 z-10 w-7 bg-linear-to-r from-card to-transparent" />
-        )}
-        {canScrollTurnStripRight && (
-          <div className="pointer-events-none absolute inset-y-0 right-8 z-10 w-7 bg-linear-to-l from-card to-transparent" />
-        )}
-        <button
-          type="button"
-          className={cn(
-            "absolute left-0 top-1/2 z-20 inline-flex size-6 -translate-y-1/2 items-center justify-center rounded-md border bg-background/90 text-muted-foreground transition-colors",
-            canScrollTurnStripLeft
-              ? "border-border/70 hover:border-border hover:text-foreground"
-              : "cursor-not-allowed border-border/40 text-muted-foreground/40",
-          )}
-          onClick={() => scrollTurnStripBy(-180)}
-          disabled={!canScrollTurnStripLeft}
-          aria-label="Scroll turn list left"
-        >
-          <ChevronLeftIcon className="size-3.5" />
-        </button>
-        <button
-          type="button"
-          className={cn(
-            "absolute right-0 top-1/2 z-20 inline-flex size-6 -translate-y-1/2 items-center justify-center rounded-md border bg-background/90 text-muted-foreground transition-colors",
-            canScrollTurnStripRight
-              ? "border-border/70 hover:border-border hover:text-foreground"
-              : "cursor-not-allowed border-border/40 text-muted-foreground/40",
-          )}
-          onClick={() => scrollTurnStripBy(180)}
-          disabled={!canScrollTurnStripRight}
-          aria-label="Scroll turn list right"
-        >
-          <ChevronRightIcon className="size-3.5" />
-        </button>
-        <div
-          ref={turnStripRef}
-          className="turn-chip-strip flex gap-1 overflow-x-auto px-8 py-0.5"
-          onWheel={onTurnStripWheel}
-        >
-          <button
-            type="button"
-            className="shrink-0 rounded-md"
-            onClick={selectWholeConversation}
-            data-turn-chip-selected={selectedTurnId === null}
-          >
-            <div
-              className={cn(
-                "rounded-md border px-2 py-1 text-left transition-colors",
-                selectedTurnId === null
-                  ? "border-border bg-accent text-accent-foreground"
-                  : "border-border/70 bg-background/70 text-muted-foreground/80 hover:border-border hover:text-foreground/80",
-              )}
-            >
-              <div className="text-[10px] leading-tight font-medium">All turns</div>
-            </div>
-          </button>
-          {orderedTurnDiffSummaries.map((summary) => (
-            <button
-              key={summary.turnId}
-              type="button"
-              className="shrink-0 rounded-md"
-              onClick={() => selectTurn(summary.turnId)}
-              title={summary.turnId}
-              data-turn-chip-selected={summary.turnId === selectedTurn?.turnId}
-            >
-              <div
-                className={cn(
-                  "rounded-md border px-2 py-1 text-left transition-colors",
-                  summary.turnId === selectedTurn?.turnId
-                    ? "border-border bg-accent text-accent-foreground"
-                    : "border-border/70 bg-background/70 text-muted-foreground/80 hover:border-border hover:text-foreground/80",
-                )}
-              >
-                <div className="flex items-center gap-1">
-                  <span className="text-[10px] leading-tight font-medium">
-                    Turn{" "}
-                    {summary.checkpointTurnCount ??
-                      inferredCheckpointTurnCountByTurnId[summary.turnId] ??
-                      "?"}
-                  </span>
-                  <span className="text-[9px] leading-tight opacity-70">
-                    {formatTurnChipTimestamp(summary.completedAt)}
-                  </span>
-                </div>
-              </div>
-            </button>
-          ))}
-        </div>
-      </div>
-      <div
-        className="desktop-top-edge-actions-safe flex shrink-0 items-center gap-2 [-webkit-app-region:no-drag]"
-        data-testid="diff-panel-header-actions"
-      >
-        <ToggleGroup
-          variant="outline"
-          size="xs"
-          value={[diffRenderMode]}
-          onValueChange={(value) => {
-            const next = value[0];
-            if (next === "stacked" || next === "split") {
-              setDiffRenderMode(next);
-            }
-          }}
-        >
-          <Toggle aria-label="Stacked diff view" value="stacked">
-            <Rows3Icon className="size-3" />
-          </Toggle>
-          <Toggle aria-label="Split diff view" value="split">
-            <Columns2Icon className="size-3" />
-          </Toggle>
-        </ToggleGroup>
-      </div>
-    </>
-  );
   const headerRowClassName = cn(
-    "desktop-top-edge-actions-safe flex min-w-0 items-center gap-2 pl-4 sm:pl-4",
+    "desktop-top-edge-actions-safe flex min-w-0 items-center gap-2 px-4",
     usesDesktopAppChrome && mode !== "sheet" ? "h-[var(--app-desktop-content-header-height)]" : "h-12",
   );
 
@@ -690,236 +179,431 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
           className={headerRowClassName}
           data-testid={usesDesktopAppChrome && mode !== "sheet" ? "diff-panel-top-header" : undefined}
         >
-          {headerRow}
+          <div className="min-w-0 flex-1 overflow-x-auto">
+            <div className="flex min-w-max items-center gap-1 py-2">
+              <ViewerTabButton
+                active={filePanelState.activeTab.kind === "summary"}
+                onClick={() => {
+                  if (activeThreadId) {
+                    selectSummary(activeThreadId);
+                  }
+                }}
+              >
+                Summary
+              </ViewerTabButton>
+              {filePanelState.openFiles.map((filePath) => (
+                <ViewerFileTab
+                  key={filePath}
+                  filePath={filePath}
+                  active={activeFilePath === filePath}
+                  onSelect={() => {
+                    if (activeThreadId) {
+                      openFile(activeThreadId, filePath);
+                    }
+                  }}
+                  onClose={() => {
+                    if (activeThreadId) {
+                      closeFile(activeThreadId, filePath);
+                    }
+                  }}
+                />
+              ))}
+            </div>
+          </div>
         </div>
-        <div
-          className="desktop-top-edge-actions-safe flex h-10 items-end gap-5 border-t border-border/60 px-4 [-webkit-app-region:no-drag]"
-          data-testid="diff-panel-surface-tabs"
-        >
-          <button
-            type="button"
-            className={cn(
-              "inline-flex h-9 items-center gap-1.5 border-b-2 px-0.5 text-[13px] font-semibold transition-colors",
-              surfaceMode === "summary"
-                ? "border-foreground text-foreground"
-                : "border-transparent text-muted-foreground hover:text-foreground",
-              !canShowSummary && "cursor-not-allowed opacity-45 hover:text-muted-foreground",
-            )}
-            disabled={!canShowSummary}
-            onClick={() => setSurfaceMode("summary")}
-            aria-pressed={surfaceMode === "summary"}
-          >
-            <AlignLeftIcon className="size-3.5" />
-            <span>Summary</span>
-          </button>
-          <button
-            type="button"
-            className={cn(
-              "inline-flex h-9 items-center gap-1.5 border-b-2 px-0.5 text-[13px] font-semibold transition-colors",
-              surfaceMode === "review"
-                ? "border-foreground text-foreground"
-                : "border-transparent text-muted-foreground hover:text-foreground",
-            )}
-            onClick={() => setSurfaceMode("review")}
-            aria-pressed={surfaceMode === "review"}
-          >
-            <FileDiffIcon className="size-3.5" />
-            <span>Review</span>
-          </button>
-          <button
-            type="button"
-            className={cn(
-              "inline-flex h-9 items-center gap-1.5 border-b-2 px-0.5 text-[13px] font-semibold transition-colors",
-              surfaceMode === "total"
-                ? "border-foreground text-foreground"
-                : "border-transparent text-muted-foreground hover:text-foreground",
-              !canShowTotal && "cursor-not-allowed opacity-45 hover:text-muted-foreground",
-            )}
-            disabled={!canShowTotal}
-            onClick={() => setSurfaceMode("total")}
-            aria-pressed={surfaceMode === "total"}
-          >
-            <GitForkIcon className="size-3.5" />
-            <span>Total</span>
-          </button>
+        <div className="desktop-top-edge-actions-safe flex h-9 items-center justify-between gap-3 border-t border-border/60 px-4 text-[12px] text-muted-foreground/70">
+          {activeFilePath ? (
+            <div className="min-w-0 truncate" data-testid="viewer-breadcrumbs">
+              {breadcrumbs.map((segment, index) => (
+                <span key={breadcrumbs.slice(0, index + 1).join("/")}>
+                  {index > 0 ? <ChevronRightIcon className="mx-1 inline size-3 opacity-60" /> : null}
+                  <span>{segment}</span>
+                </span>
+              ))}
+            </div>
+          ) : (
+            <span className="truncate">Viewer</span>
+          )}
+          {activeFilePath ? (
+            <Menu>
+              <MenuTrigger
+                render={
+                  <Button
+                    type="button"
+                    size="icon-xs"
+                    variant="ghost"
+                    aria-label="Viewer options"
+                    className="shrink-0"
+                  />
+                }
+              >
+                <EllipsisIcon className="size-3.5" />
+              </MenuTrigger>
+              <MenuPopup align="end">
+                {isMarkdownFile(activeFilePath) ? (
+                  <MenuItem
+                    onClick={() => {
+                      if (activeThreadId) {
+                        toggleMarkdownRichView(activeThreadId, activeFilePath);
+                      }
+                    }}
+                  >
+                    <span className="text-muted-foreground">{"{}"}</span>
+                    {markdownRichViewEnabled ? "Disable rich view" : "Enable rich view"}
+                  </MenuItem>
+                ) : (
+                  <MenuItem
+                    onClick={() => {
+                      if (activeThreadId) {
+                        toggleCodeWordWrap(activeThreadId, activeFilePath);
+                      }
+                    }}
+                  >
+                    <span className="text-muted-foreground">{'↩'}</span>
+                    {codeWordWrapEnabled ? "Disable word wrap" : "Enable word wrap"}
+                  </MenuItem>
+                )}
+              </MenuPopup>
+            </Menu>
+          ) : null}
         </div>
       </div>
 
-      {!activeThread ? (
-        <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
-          Select a thread to inspect turn diffs.
-        </div>
-      ) : orderedTurnDiffSummaries.length === 0 ? (
-        <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
-          No completed turns yet.
-        </div>
-      ) : (
-        <>
-          {surfaceMode === "summary" ? (
-            <div className="diff-panel-viewport min-h-0 min-w-0 flex-1 overflow-auto p-3">
-              <div className="rounded-md border border-border/70 bg-background/70 p-3">
-                <p className="text-xs font-semibold tracking-wide text-foreground">Summary</p>
-                <p className="mt-1 text-[11px] text-muted-foreground/75">
-                  Generated from the total thread diff.
-                </p>
-                {summaryError ? (
-                  <p className="mt-3 text-[11px] text-red-500/80">{summaryError}</p>
-                ) : totalCheckpointDiffQuery.isLoading ? (
-                  <p className="mt-3 text-[11px] text-muted-foreground/80">Loading summary...</p>
-                ) : hasNoSummaryChanges ? (
-                  <p className="mt-3 text-[11px] text-muted-foreground/80">No changes to summarize.</p>
-                ) : !patchSummary ? (
-                  <p className="mt-3 text-[11px] text-muted-foreground/80">
-                    Summary unavailable for the current diff.
-                  </p>
-                ) : (
-                  <div className="mt-3 space-y-3 text-[11px]">
-                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-                      <div className="rounded border border-border/70 bg-background px-2 py-1.5">
-                        <p className="text-[10px] uppercase tracking-wide text-muted-foreground/75">
-                          Files
-                        </p>
-                        <p className="text-sm font-medium text-foreground">{patchSummary.filesChanged}</p>
-                      </div>
-                      <div className="rounded border border-border/70 bg-background px-2 py-1.5">
-                        <p className="text-[10px] uppercase tracking-wide text-muted-foreground/75">Added</p>
-                        <p className="text-sm font-medium text-emerald-600 dark:text-emerald-400">
-                          +{patchSummary.additions}
-                        </p>
-                      </div>
-                      <div className="rounded border border-border/70 bg-background px-2 py-1.5">
-                        <p className="text-[10px] uppercase tracking-wide text-muted-foreground/75">
-                          Deleted
-                        </p>
-                        <p className="text-sm font-medium text-rose-600 dark:text-rose-400">
-                          -{patchSummary.deletions}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-                      <p className="rounded border border-border/70 bg-background px-2 py-1.5 text-muted-foreground/85">
-                        Renamed files: <span className="font-medium text-foreground">{patchSummary.renamedFiles}</span>
-                      </p>
-                      <p className="rounded border border-border/70 bg-background px-2 py-1.5 text-muted-foreground/85">
-                        Created files: <span className="font-medium text-foreground">{patchSummary.createdFiles}</span>
-                      </p>
-                      <p className="rounded border border-border/70 bg-background px-2 py-1.5 text-muted-foreground/85">
-                        Deleted files: <span className="font-medium text-foreground">{patchSummary.deletedFiles}</span>
-                      </p>
-                    </div>
-                    {patchSummary.topFiles.length > 0 && (
-                      <div className="space-y-1">
-                        <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/75">
-                          Most changed files
-                        </p>
-                        <ul className="space-y-1">
-                          {patchSummary.topFiles.map((file) => (
-                            <li
-                              key={file.path}
-                              className="flex items-center justify-between rounded border border-border/60 bg-background px-2 py-1"
-                            >
-                              <button
-                                type="button"
-                                className="truncate text-left text-foreground hover:text-primary hover:underline"
-                                title={file.path}
-                                onClick={() => openDiffFileInEditor(file.path)}
-                              >
-                                {file.path}
-                              </button>
-                              <span className="ml-2 shrink-0 text-[10px] text-muted-foreground/80">
-                                +{file.additions} / -{file.deletions}
-                              </span>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
+      <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+        {!activeThread ? (
+          <PanelEmptyState message="Select a thread to inspect files." />
+        ) : filePanelState.activeTab.kind === "summary" ? (
+          <SummarySurface cwd={activeCwd} openFiles={filePanelState.openFiles.length} />
+        ) : activeFileQuery.isLoading ? (
+          <PanelEmptyState message="Loading file…" />
+        ) : activeFileQuery.data?.status !== "text" ? (
+          <PanelEmptyState message={activeFileQuery.data?.message ?? "File unavailable."} />
+        ) : activeFilePath !== null ? (
+          isMarkdownFile(activeFilePath) && markdownRichViewEnabled ? (
+            <MarkdownFileViewer
+              filePath={activeFilePath}
+              contents={activeFileQuery.data.contents}
+              cwd={activeCwd}
+              onOpenInEditor={() => {
+                if (!activeCwd || !activeFilePath) {
+                  return;
+                }
+                const api = readNativeApi();
+                if (!api) {
+                  return;
+                }
+                const targetPath = resolvePathLinkTarget(activeFilePath, activeCwd);
+                void api.shell.openInEditor(targetPath, preferredTerminalEditor());
+              }}
+            />
           ) : (
-            <div
-              ref={patchViewportRef}
-              className="diff-panel-viewport min-h-0 min-w-0 flex-1 overflow-hidden"
-            >
-              {activeDiffError && !renderablePatch && (
-                <div className="px-3">
-                  <p className="mb-2 text-[11px] text-red-500/80">{activeDiffError}</p>
+            <Suspense fallback={<PanelEmptyState message="Loading syntax highlighting…" />}>
+              <ReadOnlyFileViewer
+                filePath={activeFilePath}
+                contents={activeFileQuery.data.contents}
+                comments={filePanelState.commentsByFilePath[activeFilePath] ?? []}
+                theme={resolvedTheme}
+                wrapLines={codeWordWrapEnabled}
+                onAddComment={(line, text) => {
+                  if (activeThreadId) {
+                    addComment(activeThreadId, activeFilePath, line, text);
+                  }
+                }}
+                onUpdateComment={(commentId, text) => {
+                  if (activeThreadId) {
+                    updateComment(activeThreadId, activeFilePath, commentId, text);
+                  }
+                }}
+                onDeleteComment={(commentId) => {
+                  if (activeThreadId) {
+                    deleteComment(activeThreadId, activeFilePath, commentId);
+                  }
+                }}
+                onOpenInEditor={() => {
+                  if (!activeCwd || !activeFilePath) {
+                    return;
+                  }
+                  const api = readNativeApi();
+                  if (!api) {
+                    return;
+                  }
+                  const targetPath = resolvePathLinkTarget(activeFilePath, activeCwd);
+                  void api.shell.openInEditor(targetPath, preferredTerminalEditor());
+                }}
+              />
+            </Suspense>
+          )
+        ) : (
+          <PanelEmptyState message="Select a file to view it here." />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ViewerTabButton(props: { active: boolean; onClick: () => void; children: string }) {
+  return (
+    <button
+      type="button"
+      className={cn(
+        "inline-flex h-8 items-center rounded-md border px-2.5 text-[12px] font-medium transition-colors",
+        props.active
+          ? "border-border bg-accent/55 text-foreground"
+          : "border-transparent bg-transparent text-muted-foreground/72 hover:bg-accent/30 hover:text-foreground",
+      )}
+      onClick={props.onClick}
+    >
+      {props.children}
+    </button>
+  );
+}
+
+function ViewerFileTab(props: {
+  filePath: string;
+  active: boolean;
+  onSelect: () => void;
+  onClose: () => void;
+}) {
+  const label = props.filePath.split("/").at(-1) ?? props.filePath;
+  return (
+    <div
+      className={cn(
+        "inline-flex h-8 max-w-52 items-center gap-1 rounded-md border px-2 text-[12px] transition-colors",
+        props.active
+          ? "border-border bg-accent/55 text-foreground"
+          : "border-transparent bg-transparent text-muted-foreground/72 hover:bg-accent/30 hover:text-foreground",
+      )}
+    >
+      <button type="button" className="flex min-w-0 items-center gap-1" onClick={props.onSelect}>
+        <FileIcon className="size-3 shrink-0" />
+        <span className="truncate">{label}</span>
+      </button>
+      <button
+        type="button"
+        className="rounded-sm text-muted-foreground/70 hover:text-foreground"
+        onClick={props.onClose}
+        aria-label={`Close ${label}`}
+      >
+        <XIcon className="size-3" />
+      </button>
+    </div>
+  );
+}
+
+function SummarySurface(props: { cwd: string | null; openFiles: number }) {
+  return (
+    <div className="h-full overflow-auto p-4">
+      <div className="space-y-3 rounded-md border border-border/60 bg-background/60 p-4 text-[12px] text-muted-foreground/78">
+        <div>
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-foreground/75">Summary</p>
+          <p className="mt-1">AI summary placeholder.</p>
+        </div>
+        <div className="space-y-1">
+          <p>Workspace: <span className="text-foreground/82">{props.cwd ?? "Unavailable"}</span></p>
+          <p>Open files: <span className="text-foreground/82">{props.openFiles}</span></p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PanelEmptyState(props: { message: string }) {
+  return (
+    <div className="flex h-full items-center justify-center px-4 text-center text-xs text-muted-foreground/70">
+      {props.message}
+    </div>
+  );
+}
+
+function MarkdownFileViewer(props: {
+  filePath: string;
+  contents: string;
+  cwd: string | null;
+  onOpenInEditor: () => void;
+}) {
+  return (
+    <div className="h-full overflow-auto bg-background/80">
+      <div className="flex items-center justify-between border-b border-border/60 px-4 py-2 text-[11px] text-muted-foreground/70">
+        <span className="truncate">{props.filePath}</span>
+        <Button type="button" size="xs" variant="outline" onClick={props.onOpenInEditor}>
+          Open
+        </Button>
+      </div>
+      <div className="px-6 py-6">
+        <ChatMarkdown text={props.contents} cwd={props.cwd ?? undefined} />
+      </div>
+    </div>
+  );
+}
+
+function ReadOnlyFileViewer(props: {
+  filePath: string;
+  contents: string;
+  comments: readonly FilePanelComment[];
+  theme: "light" | "dark";
+  wrapLines: boolean;
+  onAddComment: (line: number, text: string) => void;
+  onUpdateComment: (commentId: string, text: string) => void;
+  onDeleteComment: (commentId: string) => void;
+  onOpenInEditor: () => void;
+}) {
+  const [draftLine, setDraftLine] = useState<number | null>(null);
+  const [draftText, setDraftText] = useState("");
+  const lines = useMemo(() => props.contents.split(/\r?\n/), [props.contents]);
+  const themeName = resolveDiffThemeName(props.theme);
+  const requestedLanguage = inferFileViewerLanguage(props.filePath);
+  const { highlighter, language } = use(getFileViewerHighlighterPromise(requestedLanguage));
+  const highlightedHtml = useMemo(
+    () => highlighter.codeToHtml(props.contents, { lang: language, theme: themeName }),
+    [highlighter, language, props.contents, themeName],
+  );
+  const highlightedLines = useMemo(() => extractHighlightedLines(highlightedHtml), [highlightedHtml]);
+
+  return (
+    <div className="h-full overflow-auto bg-background/80">
+      <div className="flex items-center justify-between border-b border-border/60 px-4 py-2 text-[11px] text-muted-foreground/70">
+        <span className="truncate">{props.filePath}</span>
+        <Button type="button" size="xs" variant="outline" onClick={props.onOpenInEditor}>
+          Open
+        </Button>
+      </div>
+      <div className="font-mono text-[12px] leading-5.5">
+        {lines.map((lineText, index) => {
+          const lineNumber = index + 1;
+          const lineComments = props.comments.filter((comment) => comment.line === lineNumber);
+          return (
+            <div key={`${lineNumber}:${lineText}`}>
+              <div className="group flex items-start gap-3 px-4 py-[1px] hover:bg-accent/10">
+                <div className="flex w-16 shrink-0 items-center gap-1 pt-[1px] text-right text-[11px] text-muted-foreground/50">
+                  <button
+                    type="button"
+                    className="opacity-0 transition-opacity group-hover:opacity-100 hover:text-foreground"
+                    onClick={() => {
+                      setDraftLine(lineNumber);
+                      setDraftText("");
+                    }}
+                    aria-label={`Comment on line ${lineNumber}`}
+                  >
+                    <MessageSquareIcon className="size-3" />
+                  </button>
+                  <span className={cn("tabular-nums", lineComments.length > 0 ? "text-foreground/75" : "")}>{lineNumber}</span>
                 </div>
-              )}
-              {!renderablePatch ? (
-                <div className="flex h-full items-center justify-center px-3 py-2 text-xs text-muted-foreground/70">
-                  <p>
-                    {activeDiffIsLoading
-                      ? surfaceMode === "total"
-                        ? "Loading total diff..."
-                        : "Loading checkpoint diff..."
-                      : hasNoNetChanges
-                        ? surfaceMode === "total"
-                          ? "No total changes in this thread."
-                          : "No net changes in this selection."
-                        : "No patch available for this selection."}
-                  </p>
-                </div>
-              ) : renderablePatch.kind === "files" ? (
-                <Virtualizer
-                  className="diff-render-surface h-full min-h-0 overflow-auto px-2 pb-2"
-                  config={{
-                    overscrollSize: 600,
-                    intersectionObserverMargin: 1200,
+                <div
+                  className={cn(
+                    "file-viewer-shiki min-w-0 flex-1 py-0 font-mono text-[12px] leading-5.5",
+                    props.wrapLines ? "whitespace-pre-wrap break-words" : "whitespace-pre overflow-x-auto",
+                    props.theme === "dark" ? "text-foreground/88" : "text-foreground/84",
+                  )}
+                  dangerouslySetInnerHTML={{
+                    __html:
+                      highlightedLines[index] && highlightedLines[index].length > 0
+                        ? highlightedLines[index]
+                        : lineText.length > 0
+                          ? lineText
+                          : "&nbsp;",
                   }}
-                >
-                  {renderableFiles.map((fileDiff) => {
-                    const normalizedFileDiff = normalizeFileDiffLanguage(fileDiff);
-                    const filePath = resolveFileDiffPath(fileDiff);
-                    const fileKey = buildFileDiffRenderKey(fileDiff);
-                    const themedFileKey = `${fileKey}:${resolvedTheme}`;
-                    return (
-                      <div
-                        key={themedFileKey}
-                        data-diff-file-path={filePath}
-                        className="diff-render-file mb-2 rounded-md first:mt-2 last:mb-0"
-                        onClickCapture={(event) => {
-                          const nativeEvent = event.nativeEvent as MouseEvent;
-                          const composedPath = nativeEvent.composedPath?.() ?? [];
-                          const clickedHeader = composedPath.some((node) => {
-                            if (!(node instanceof Element)) return false;
-                            return node.hasAttribute("data-title");
-                          });
-                          if (!clickedHeader) return;
-                          openDiffFileInEditor(filePath);
+                />
+              </div>
+              {lineComments.map((comment) => (
+                <LineCommentCard
+                  key={comment.id}
+                  comment={comment}
+                  onSave={(text) => props.onUpdateComment(comment.id, text)}
+                  onDelete={() => props.onDeleteComment(comment.id)}
+                />
+              ))}
+              {draftLine === lineNumber ? (
+                <div className="px-20 pb-3 pr-4">
+                  <div className="rounded-md border border-border/60 bg-background/80 p-2">
+                    <textarea
+                      className="min-h-20 w-full resize-y bg-transparent text-[12px] text-foreground outline-none"
+                      placeholder="Local comment"
+                      value={draftText}
+                      onChange={(event) => setDraftText(event.target.value)}
+                    />
+                    <div className="mt-2 flex items-center justify-end gap-2">
+                      <Button type="button" size="xs" variant="ghost" onClick={() => setDraftLine(null)}>
+                        Cancel
+                      </Button>
+                      <Button
+                        type="button"
+                        size="xs"
+                        variant="outline"
+                        disabled={draftText.trim().length === 0}
+                        onClick={() => {
+                          props.onAddComment(lineNumber, draftText.trim());
+                          setDraftText("");
+                          setDraftLine(null);
                         }}
                       >
-                        <FileDiff
-                          fileDiff={normalizedFileDiff}
-                          options={{
-                            diffStyle: diffRenderMode === "split" ? "split" : "unified",
-                            lineDiffType: "none",
-                            overflow: settings.wrapTurnDiffLines ? "wrap" : "scroll",
-                            theme: resolveDiffThemeName(resolvedTheme),
-                            themeType: resolvedTheme as DiffThemeType,
-                            unsafeCSS: DIFF_PANEL_UNSAFE_CSS,
-                          }}
-                        />
-                      </div>
-                    );
-                  })}
-                </Virtualizer>
-              ) : (
-                <div className="h-full overflow-auto p-2">
-                  <div className="space-y-2">
-                    <p className="text-[11px] text-muted-foreground/75">{renderablePatch.reason}</p>
-                    <pre className="max-h-[72vh] overflow-auto rounded-md border border-border/70 bg-background/70 p-3 font-mono text-[11px] leading-relaxed text-muted-foreground/90">
-                      {renderablePatch.text}
-                    </pre>
+                        Save
+                      </Button>
+                    </div>
                   </div>
                 </div>
-              )}
+              ) : null}
             </div>
-          )}
-        </>
-      )}
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function LineCommentCard(props: {
+  comment: FilePanelComment;
+  onSave: (text: string) => void;
+  onDelete: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(props.comment.text);
+
+  useEffect(() => {
+    setValue(props.comment.text);
+  }, [props.comment.text]);
+
+  return (
+    <div className="px-20 pb-2 pr-4">
+      <div className="rounded-md border border-border/60 bg-background/70 p-2 text-[12px] text-muted-foreground/82">
+        {editing ? (
+          <>
+            <textarea
+              className="min-h-20 w-full resize-y bg-transparent text-[12px] text-foreground outline-none"
+              value={value}
+              onChange={(event) => setValue(event.target.value)}
+            />
+            <div className="mt-2 flex items-center justify-end gap-2">
+              <Button type="button" size="xs" variant="ghost" onClick={() => setEditing(false)}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                size="xs"
+                variant="outline"
+                disabled={value.trim().length === 0}
+                onClick={() => {
+                  props.onSave(value.trim());
+                  setEditing(false);
+                }}
+              >
+                Save
+              </Button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p className="whitespace-pre-wrap break-words text-foreground/84">{props.comment.text}</p>
+            <div className="mt-2 flex items-center justify-end gap-2">
+              <Button type="button" size="xs" variant="ghost" onClick={() => setEditing(true)}>
+                Edit
+              </Button>
+              <Button type="button" size="xs" variant="ghost" onClick={props.onDelete}>
+                Delete
+              </Button>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }

@@ -73,6 +73,7 @@ import { isElectron, isElectronRuntime } from "../env";
 import {
   parseDiffRouteSearch,
   resolveRightPanelMode,
+  withFilesRailOpen,
   withDiffSelection,
   withRightPanelMode,
 } from "../diffRouteSearch";
@@ -130,6 +131,7 @@ import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { useIsDisposableThread } from "../hooks/useIsDisposableThread";
 import { useComposerCommandMenuItems } from "../hooks/useComposerCommandMenuItems";
 import { useComposerSlashCommands } from "../hooks/useComposerSlashCommands";
+import { useFilePanelStore } from "../filePanelStore";
 import BranchToolbar from "./BranchToolbar";
 import GitActionsControl from "./GitActionsControl";
 import { ThreadWorktreeHandoffDialog } from "./ThreadWorktreeHandoffDialog";
@@ -145,6 +147,7 @@ import {
   EllipsisIcon,
   ChevronDownIcon,
   CircleAlertIcon,
+  FilesIcon,
   FolderClosedIcon,
   GlobeIcon,
   KanbanSquareIcon,
@@ -153,6 +156,7 @@ import {
   PlusIcon,
   Maximize2Icon,
   ArrowLeftRight,
+  TerminalIcon,
   Undo2Icon,
   Trash2Icon,
   XIcon,
@@ -470,6 +474,7 @@ interface ChatViewProps {
   isFocusedPane?: boolean;
   panelState?: {
     panel: "browser" | "diff" | null;
+    filesOpen: boolean;
     diffTurnId: TurnId | null;
     diffFilePath: string | null;
     hasOpenedPanel: boolean;
@@ -477,6 +482,8 @@ interface ChatViewProps {
   };
   onToggleDiffPanel?: () => void;
   onToggleBrowserPanel?: () => void;
+  onToggleFilesPanel?: () => void;
+  onOpenFileViewerPanel?: (path: string) => void;
   onOpenTurnDiffPanel?: (turnId: TurnId, filePath?: string) => void;
   onMaximizeSurface?: () => void;
   onSplitSurface?: () => void;
@@ -490,6 +497,8 @@ export default function ChatView({
   panelState,
   onToggleDiffPanel,
   onToggleBrowserPanel,
+  onToggleFilesPanel,
+  onOpenFileViewerPanel,
   onOpenTurnDiffPanel: _onOpenTurnDiffPanel,
   onMaximizeSurface,
   onSplitSurface,
@@ -701,6 +710,7 @@ export default function ChatView({
   const rightPanelMode = useMemo(() => resolveRightPanelMode(diffSearch), [diffSearch]);
   const diffOpen = rightPanelMode === "diff";
   const browserPaneOpen = rightPanelMode === "browser";
+  const filesRailOpen = panelState ? panelState.filesOpen : diffSearch.files === "1";
   const resolvedDiffOpen = panelState ? panelState.panel === "diff" : diffOpen;
   const resolvedBrowserPaneOpen = panelState ? panelState.panel === "browser" : browserPaneOpen;
   const activeThreadId = activeThread?.id ?? null;
@@ -1395,6 +1405,7 @@ export default function ChatView({
     () => shortcutLabelForCommand(keybindings, "terminal.close"),
     [keybindings],
   );
+  const openViewerFile = useFilePanelStore((store) => store.openFile);
   const diffPanelShortcutLabel = useMemo(
     () => shortcutLabelForCommand(keybindings, "diff.toggle"),
     [keybindings],
@@ -1408,13 +1419,15 @@ export default function ChatView({
       to: "/$threadId",
       params: { threadId },
       replace: true,
-      search: (previous) =>
-        withRightPanelMode(
+      search: (previous) => {
+        const next = withRightPanelMode(
           previous as Record<string, unknown>,
           diffOpen ? "none" : "diff",
-        ),
+        );
+        return filesRailOpen ? withFilesRailOpen(next, true) : next;
+      },
     });
-  }, [diffOpen, navigate, onToggleDiffPanel, threadId]);
+  }, [diffOpen, filesRailOpen, navigate, onToggleDiffPanel, threadId]);
   const onToggleBrowser = useCallback(() => {
     if (onToggleBrowserPanel) {
       onToggleBrowserPanel();
@@ -1431,6 +1444,33 @@ export default function ChatView({
         ),
     });
   }, [browserPaneOpen, navigate, onToggleBrowserPanel, threadId]);
+  const onToggleFiles = useCallback(() => {
+    if (onToggleFilesPanel) {
+      onToggleFilesPanel();
+    }
+  }, [onToggleFilesPanel]);
+  const onOpenFilePath = useCallback(
+    (path: string) => {
+      if (!activeThreadId) {
+        return;
+      }
+      openViewerFile(activeThreadId, path);
+      if (onOpenFileViewerPanel) {
+        onOpenFileViewerPanel(path);
+        return;
+      }
+      void navigate({
+        to: "/$threadId",
+        params: { threadId },
+        replace: true,
+        search: (previous) => {
+          const next = withRightPanelMode(previous as Record<string, unknown>, "diff");
+          return filesRailOpen ? withFilesRailOpen(next, true) : next;
+        },
+      });
+    },
+    [activeThreadId, filesRailOpen, navigate, onOpenFileViewerPanel, openViewerFile, threadId],
+  );
 
   const envLocked = Boolean(
     activeThread &&
@@ -4326,6 +4366,8 @@ export default function ChatView({
           handoffTargetProviderCount={handoffTargetProviders.length}
           handoffBadgeSourceProvider={handoffBadgeSourceProvider}
           handoffBadgeTargetProvider={handoffBadgeTargetProvider}
+          terminalOpen={terminalState.terminalOpen}
+          filesRailOpen={filesRailOpen}
           browserPaneOpen={resolvedBrowserPaneOpen}
           gitCwd={gitCwd}
           diffOpen={resolvedDiffOpen}
@@ -4351,6 +4393,8 @@ export default function ChatView({
                 }
               : null
           }
+          onToggleTerminal={toggleTerminalVisibility}
+          onToggleFiles={onToggleFiles}
           onToggleDiff={onToggleDiff}
           onToggleBrowser={onToggleBrowser}
           onCreateHandoff={onCreateProviderHandoffThread}
@@ -4462,6 +4506,7 @@ export default function ChatView({
                   params: { threadId },
                 });
               }}
+              onOpenFilePath={onOpenFilePath}
               markdownCwd={gitCwd ?? undefined}
               resolvedTheme={resolvedTheme}
               workspaceRoot={activeProject?.cwd ?? undefined}
@@ -5179,6 +5224,8 @@ interface ChatHeaderProps {
   handoffTargetProviderCount: number;
   handoffBadgeSourceProvider: ProviderKind | null;
   handoffBadgeTargetProvider: ProviderKind | null;
+  terminalOpen: boolean;
+  filesRailOpen: boolean;
   browserPaneOpen: boolean;
   gitCwd: string | null;
   diffOpen: boolean;
@@ -5190,6 +5237,8 @@ interface ChatHeaderProps {
   onAddProjectScript: (input: NewProjectScriptInput) => Promise<void>;
   onUpdateProjectScript: (scriptId: string, input: NewProjectScriptInput) => Promise<void>;
   onOpenTask: (() => void) | null;
+  onToggleTerminal: () => void;
+  onToggleFiles: () => void;
   onToggleDiff: () => void;
   onToggleBrowser: () => void;
   onCreateHandoff: () => void;
@@ -5215,6 +5264,8 @@ const ChatHeader = memo(function ChatHeader({
   handoffTargetProviderCount,
   handoffBadgeSourceProvider,
   handoffBadgeTargetProvider,
+  terminalOpen,
+  filesRailOpen,
   browserPaneOpen,
   gitCwd,
   diffOpen,
@@ -5226,6 +5277,8 @@ const ChatHeader = memo(function ChatHeader({
   onAddProjectScript,
   onUpdateProjectScript,
   onOpenTask,
+  onToggleTerminal,
+  onToggleFiles,
   onToggleDiff,
   onToggleBrowser,
   onCreateHandoff,
@@ -5515,6 +5568,10 @@ const ChatHeader = memo(function ChatHeader({
                   <MenuItem onClick={openInPreferredEditor} disabled={!openInCwd || !preferredEditor}>
                     Open in editor
                   </MenuItem>
+                  <MenuItem onClick={onToggleFiles}>
+                    <FilesIcon className="size-3.5 text-muted-foreground" />
+                    File tree
+                  </MenuItem>
                 </>
               ) : null}
               {onOpenTask ? (
@@ -5527,6 +5584,42 @@ const ChatHeader = memo(function ChatHeader({
           </Menu>
         ) : null}
         {activeProjectName && <GitActionsControl gitCwd={gitCwd} activeThreadId={activeThreadId} />}
+        {!compact ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Toggle
+                  className="shrink-0"
+                  pressed={filesRailOpen}
+                  onPressedChange={onToggleFiles}
+                  aria-label="Toggle file tree"
+                  variant="outline"
+                  size="xs"
+                >
+                  <FilesIcon className="size-3.5" />
+                </Toggle>
+              }
+            />
+            <TooltipPopup side="bottom">Toggle file tree</TooltipPopup>
+          </Tooltip>
+        ) : null}
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Toggle
+                className="shrink-0"
+                pressed={terminalOpen}
+                onPressedChange={onToggleTerminal}
+                aria-label="Toggle terminal drawer"
+                variant="outline"
+                size="xs"
+              >
+                <TerminalIcon className="size-3.5" />
+              </Toggle>
+            }
+          />
+          <TooltipPopup side="bottom">Toggle terminal drawer</TooltipPopup>
+        </Tooltip>
         {chatLayoutAction ? (
           <Tooltip>
             <TooltipTrigger
