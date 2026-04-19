@@ -54,6 +54,8 @@ interface PersistedComposerThreadDraftState {
   interactionMode?: ProviderInteractionMode | null;
   effort?: CodexReasoningEffort | null;
   codexFastMode?: boolean | null;
+  opencodeVariant?: string | null;
+  opencodeAgent?: string | null;
   serviceTier?: string | null;
 }
 
@@ -86,6 +88,8 @@ interface ComposerThreadDraftState {
   interactionMode: ProviderInteractionMode | null;
   effort: CodexReasoningEffort | null;
   codexFastMode: boolean;
+  opencodeVariant: string | null;
+  opencodeAgent: string | null;
 }
 
 export interface DraftThreadState {
@@ -149,6 +153,8 @@ interface ComposerDraftStoreState {
   ) => void;
   setEffort: (threadId: ThreadId, effort: CodexReasoningEffort | null | undefined) => void;
   setCodexFastMode: (threadId: ThreadId, enabled: boolean | null | undefined) => void;
+  setOpencodeVariant: (threadId: ThreadId, variant: string | null | undefined) => void;
+  setOpencodeAgent: (threadId: ThreadId, agent: string | null | undefined) => void;
   addImage: (threadId: ThreadId, image: ComposerImageAttachment) => void;
   addImages: (threadId: ThreadId, images: ComposerImageAttachment[]) => void;
   removeImage: (threadId: ThreadId, imageId: string) => void;
@@ -190,6 +196,8 @@ const EMPTY_THREAD_DRAFT = Object.freeze({
   interactionMode: null,
   effort: null,
   codexFastMode: false,
+  opencodeVariant: null,
+  opencodeAgent: null,
 }) as ComposerThreadDraftState;
 
 const REASONING_EFFORT_VALUES = new Set<CodexReasoningEffort>(
@@ -209,6 +217,8 @@ function createEmptyThreadDraft(): ComposerThreadDraftState {
     interactionMode: null,
     effort: null,
     codexFastMode: false,
+    opencodeVariant: null,
+    opencodeAgent: null,
   };
 }
 
@@ -229,7 +239,9 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     draft.runtimeMode === null &&
     draft.interactionMode === null &&
     draft.effort === null &&
-    draft.codexFastMode === false
+    draft.codexFastMode === false &&
+    draft.opencodeVariant === null &&
+    draft.opencodeAgent === null
   );
 }
 
@@ -463,6 +475,16 @@ function normalizePersistedComposerDraftState(value: unknown): PersistedComposer
     const codexFastMode =
       draftCandidate.codexFastMode === true ||
       (typeof draftCandidate.serviceTier === "string" && draftCandidate.serviceTier === "fast");
+    const opencodeVariant =
+      typeof draftCandidate.opencodeVariant === "string" &&
+      draftCandidate.opencodeVariant.length > 0
+        ? draftCandidate.opencodeVariant
+        : null;
+    const opencodeAgent =
+      typeof draftCandidate.opencodeAgent === "string" &&
+      draftCandidate.opencodeAgent.length > 0
+        ? draftCandidate.opencodeAgent
+        : null;
     if (
       prompt.length === 0 &&
       attachments.length === 0 &&
@@ -472,7 +494,9 @@ function normalizePersistedComposerDraftState(value: unknown): PersistedComposer
       !runtimeMode &&
       !interactionMode &&
       !effort &&
-      !codexFastMode
+      !codexFastMode &&
+      !opencodeVariant &&
+      !opencodeAgent
     ) {
       continue;
     }
@@ -486,6 +510,8 @@ function normalizePersistedComposerDraftState(value: unknown): PersistedComposer
       ...(interactionMode ? { interactionMode } : {}),
       ...(effort ? { effort } : {}),
       ...(codexFastMode ? { codexFastMode } : {}),
+      ...(opencodeVariant ? { opencodeVariant } : {}),
+      ...(opencodeAgent ? { opencodeAgent } : {}),
     };
   }
   return {
@@ -594,6 +620,8 @@ function toHydratedThreadDraft(
     interactionMode: persistedDraft.interactionMode ?? null,
     effort: persistedDraft.effort ?? null,
     codexFastMode: persistedDraft.codexFastMode === true,
+    opencodeVariant: persistedDraft.opencodeVariant ?? null,
+    opencodeAgent: persistedDraft.opencodeAgent ?? null,
   };
 }
 
@@ -1041,6 +1069,60 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
           return { draftsByThreadId: nextDraftsByThreadId };
         });
       },
+      setOpencodeVariant: (threadId, variant) => {
+        if (threadId.length === 0) {
+          return;
+        }
+        const nextVariant = typeof variant === "string" && variant.trim().length > 0 ? variant.trim() : null;
+        set((state) => {
+          const existing = state.draftsByThreadId[threadId];
+          if (!existing && nextVariant === null) {
+            return state;
+          }
+          const base = existing ?? createEmptyThreadDraft();
+          if (base.opencodeVariant === nextVariant) {
+            return state;
+          }
+          const nextDraft: ComposerThreadDraftState = {
+            ...base,
+            opencodeVariant: nextVariant,
+          };
+          const nextDraftsByThreadId = { ...state.draftsByThreadId };
+          if (shouldRemoveDraft(nextDraft)) {
+            delete nextDraftsByThreadId[threadId];
+          } else {
+            nextDraftsByThreadId[threadId] = nextDraft;
+          }
+          return { draftsByThreadId: nextDraftsByThreadId };
+        });
+      },
+      setOpencodeAgent: (threadId, agent) => {
+        if (threadId.length === 0) {
+          return;
+        }
+        const nextAgent = typeof agent === "string" && agent.trim().length > 0 ? agent.trim() : null;
+        set((state) => {
+          const existing = state.draftsByThreadId[threadId];
+          if (!existing && nextAgent === null) {
+            return state;
+          }
+          const base = existing ?? createEmptyThreadDraft();
+          if (base.opencodeAgent === nextAgent) {
+            return state;
+          }
+          const nextDraft: ComposerThreadDraftState = {
+            ...base,
+            opencodeAgent: nextAgent,
+          };
+          const nextDraftsByThreadId = { ...state.draftsByThreadId };
+          if (shouldRemoveDraft(nextDraft)) {
+            delete nextDraftsByThreadId[threadId];
+          } else {
+            nextDraftsByThreadId[threadId] = nextDraft;
+          }
+          return { draftsByThreadId: nextDraftsByThreadId };
+        });
+      },
       addImage: (threadId, image) => {
         if (threadId.length === 0) {
           return;
@@ -1349,7 +1431,9 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             draft.runtimeMode === null &&
             draft.interactionMode === null &&
             draft.effort === null &&
-            draft.codexFastMode === false
+            draft.codexFastMode === false &&
+            draft.opencodeVariant === null &&
+            draft.opencodeAgent === null
           ) {
             continue;
           }
@@ -1377,6 +1461,12 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
           }
           if (draft.codexFastMode) {
             persistedDraft.codexFastMode = true;
+          }
+          if (draft.opencodeVariant) {
+            persistedDraft.opencodeVariant = draft.opencodeVariant;
+          }
+          if (draft.opencodeAgent) {
+            persistedDraft.opencodeAgent = draft.opencodeAgent;
           }
           persistedDraftsByThreadId[threadId as ThreadId] = persistedDraft;
         }

@@ -21,11 +21,13 @@ import {
   ThreadTurnDiffCompletedPayload as ContractsThreadTurnDiffCompletedPayloadSchema,
   ThreadRevertedPayload as ContractsThreadRevertedPayloadSchema,
   ThreadActivityAppendedPayload as ContractsThreadActivityAppendedPayloadSchema,
+  ThreadArchivedPayload as ContractsThreadArchivedPayloadSchema,
   ThreadTurnStartRequestedPayload as ContractsThreadTurnStartRequestedPayloadSchema,
   ThreadTurnInterruptRequestedPayload as ContractsThreadTurnInterruptRequestedPayloadSchema,
   ThreadApprovalResponseRequestedPayload as ContractsThreadApprovalResponseRequestedPayloadSchema,
   ThreadCheckpointRevertRequestedPayload as ContractsThreadCheckpointRevertRequestedPayloadSchema,
   ThreadSessionStopRequestedPayload as ContractsThreadSessionStopRequestedPayloadSchema,
+  ThreadUnarchivedPayload as ContractsThreadUnarchivedPayloadSchema,
 } from "@t3tools/contracts";
 
 // Server-internal alias surface, backed by contract schemas as the source of truth.
@@ -48,6 +50,8 @@ export const ThreadMetaUpdatedPayload = ContractsThreadMetaUpdatedPayloadSchema;
 export const ThreadRuntimeModeSetPayload = ContractsThreadRuntimeModeSetPayloadSchema;
 export const ThreadInteractionModeSetPayload = ContractsThreadInteractionModeSetPayloadSchema;
 export const ThreadDeletedPayload = ContractsThreadDeletedPayloadSchema;
+export const ThreadArchivedPayload = ContractsThreadArchivedPayloadSchema;
+export const ThreadUnarchivedPayload = ContractsThreadUnarchivedPayloadSchema;
 
 export const MessageSentPayloadSchema = ContractsThreadMessageSentPayloadSchema;
 export const ThreadProposedPlanUpsertedPayload = ContractsThreadProposedPlanUpsertedPayloadSchema;

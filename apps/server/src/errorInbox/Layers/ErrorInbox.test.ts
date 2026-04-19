@@ -101,6 +101,8 @@ function makeServerConfig(stateDir: string): ServerConfigShape {
     host: undefined,
     cwd: stateDir,
     keybindingsConfigPath: path.join(stateDir, "keybindings.json"),
+    settingsPath: path.join(stateDir, "settings.json"),
+    providerStatusCacheDir: path.join(stateDir, "provider-status"),
     stateDir,
     staticDir: undefined,
     devUrl: undefined,

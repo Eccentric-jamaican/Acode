@@ -2,12 +2,13 @@ import AppPageShell from "./AppPageShell";
 import { isElectron, isElectronRuntime } from "../env";
 import { SidebarInsetTrigger } from "./ui/sidebar";
 
-export type ChatHomeSurfaceVariant = "no-projects" | "no-thread" | "hydrating";
+export type ChatHomeSurfaceVariant = "no-projects" | "no-thread" | "hydrating" | "error";
 
 const HOME_COPY_BY_VARIANT: Record<ChatHomeSurfaceVariant, string> = {
   "no-projects": "Open or add a project to get started.",
   "no-thread": "Select a thread or create a new one to get started.",
   hydrating: "Restoring your workspace.",
+  error: "The app could not restore your workspace state.",
 };
 
 export function resolveChatHomeSurfaceVariant(input: {
@@ -23,7 +24,11 @@ export function resolveChatHomeSurfaceVariant(input: {
 export default function ChatHomeSurface(props: { variant: ChatHomeSurfaceVariant }) {
   const usesDesktopAppChrome = isElectronRuntime();
   const topStatusLabel =
-    props.variant === "hydrating" ? "Restoring threads..." : "No active thread";
+    props.variant === "hydrating"
+      ? "Restoring threads..."
+      : props.variant === "error"
+        ? "Workspace restore failed"
+        : "No active thread";
 
   return (
     <AppPageShell
@@ -59,6 +64,11 @@ export default function ChatHomeSurface(props: { variant: ChatHomeSurfaceVariant
             {props.variant === "hydrating" && (
               <p className="text-xs text-muted-foreground/55" data-testid="chat-home-loading-line">
                 Loading threads...
+              </p>
+            )}
+            {props.variant === "error" && (
+              <p className="text-xs text-muted-foreground/55" data-testid="chat-home-error-line">
+                Check the server log or restart the app to retry hydration.
               </p>
             )}
           </div>

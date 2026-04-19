@@ -3,13 +3,13 @@ import { watch } from "node:fs";
 import { join } from "node:path";
 import waitOn from "wait-on";
 
-import { desktopDir, resolveElectronPath } from "./electron-launcher.mjs";
+import { desktopDir, repoRootDir, resolveElectronPath } from "./electron-launcher.mjs";
 
 const port = Number(process.env.ELECTRON_RENDERER_PORT ?? 5733);
 const devServerUrl = `http://localhost:${port}`;
 const appEntryPath = join(desktopDir, "dist-electron", "bootstrap.js");
 const electronPath = resolveElectronPath();
-const devRootArg = `--t3code-dev-root=${desktopDir}`;
+const devRootArg = `--t3code-dev-root=${repoRootDir}`;
 const requiredFiles = [
   "dist-electron/bootstrap.js",
   "dist-electron/main.js",
@@ -70,7 +70,7 @@ function cleanupStaleDevApps() {
     const script = [
       `$target = '--t3code-dev-root=${escapedDesktopDir}'`,
       "Get-CimInstance Win32_Process |",
-      "  Where-Object { $_.Name -ieq 'electron.exe' -and $_.CommandLine -like \"*$target*\" } |",
+      "  Where-Object { $_.CommandLine -and $_.CommandLine -like \"*$target*\" } |",
       "  ForEach-Object {",
       "    try {",
       "      Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop",

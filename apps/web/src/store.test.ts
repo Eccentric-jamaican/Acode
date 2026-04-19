@@ -34,6 +34,7 @@ function makeThread(overrides: Partial<Thread> = {}): Thread {
     branch: null,
     worktreePath: null,
     isPinned: false,
+    pinnedAt: null,
     ...overrides,
   };
 }
@@ -56,6 +57,7 @@ function makeState(thread: Thread): AppState {
     errorInbox: [],
     threads: [thread],
     threadsHydrated: true,
+    hydrationError: null,
   };
 }
 
@@ -78,6 +80,7 @@ function makeReadModelThread(
     updatedAt: "2026-02-27T00:00:00.000Z",
     deletedAt: null,
     isPinned: false,
+    pinnedAt: null,
     messages: [],
     activities: [],
     proposedPlans: [],
@@ -154,6 +157,21 @@ describe("store pure functions", () => {
     );
   });
 
+  it("sanitizes lightweight markdown in hydrated subagent thread titles", () => {
+    const initialState = makeState(makeThread());
+    const readModel = makeReadModel(
+      makeReadModelThread({
+        id: ThreadId.makeUnsafe("subagent:thread-1:child-provider-1"),
+        parentThreadId: ThreadId.makeUnsafe("thread-1"),
+        title: "**Current Shape**",
+      }),
+    );
+
+    const next = syncServerReadModel(initialState, readModel);
+
+    expect(next.threads[0]?.title).toBe("Current Shape");
+  });
+
   it("markThreadUnread does not change a thread without a completed turn", () => {
     const initialState = makeState(
       makeThread({
@@ -187,12 +205,14 @@ describe("store read model sync", () => {
     const readModel = makeReadModel(
       makeReadModelThread({
         isPinned: true,
+        pinnedAt: "2026-03-03T00:00:00.000Z",
       }),
     );
 
     const next = syncServerReadModel(initialState, readModel);
 
     expect(next.threads[0]?.isPinned).toBe(true);
+    expect(next.threads[0]?.pinnedAt).toBe("2026-03-03T00:00:00.000Z");
   });
 
   it("defaults missing thread pin state to false during read model sync", () => {
@@ -204,6 +224,7 @@ describe("store read model sync", () => {
     const next = syncServerReadModel(initialState, readModel);
 
     expect(next.threads[0]?.isPinned).toBe(false);
+    expect(next.threads[0]?.pinnedAt).toBeNull();
   });
 
   it("maps tasks and task-owned thread metadata from the read model", () => {

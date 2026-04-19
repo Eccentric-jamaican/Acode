@@ -530,6 +530,10 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
             projectId: event.payload.projectId,
             origin: event.payload.origin,
             taskId: event.payload.taskId,
+            parentThreadId: event.payload.parentThreadId ?? null,
+            subagentAgentId: event.payload.subagentAgentId ?? null,
+            subagentNickname: event.payload.subagentNickname ?? null,
+            subagentRole: event.payload.subagentRole ?? null,
             title: event.payload.title,
             model: event.payload.model,
             runtimeMode: event.payload.runtimeMode,
@@ -537,6 +541,8 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
             branch: event.payload.branch,
             worktreePath: event.payload.worktreePath,
             isPinned: event.payload.isPinned,
+            pinnedAt: event.payload.pinnedAt ?? null,
+            archivedAt: event.payload.archivedAt ?? null,
             handoff: event.payload.handoff ?? null,
             latestTurnId: null,
             createdAt: event.payload.createdAt,
@@ -557,6 +563,19 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
             ...(event.payload.title !== undefined ? { title: event.payload.title } : {}),
             ...(event.payload.model !== undefined ? { model: event.payload.model } : {}),
             ...(event.payload.isPinned !== undefined ? { isPinned: event.payload.isPinned } : {}),
+            ...(event.payload.pinnedAt !== undefined ? { pinnedAt: event.payload.pinnedAt } : {}),
+            ...(event.payload.parentThreadId !== undefined
+              ? { parentThreadId: event.payload.parentThreadId }
+              : {}),
+            ...(event.payload.subagentAgentId !== undefined
+              ? { subagentAgentId: event.payload.subagentAgentId }
+              : {}),
+            ...(event.payload.subagentNickname !== undefined
+              ? { subagentNickname: event.payload.subagentNickname }
+              : {}),
+            ...(event.payload.subagentRole !== undefined
+              ? { subagentRole: event.payload.subagentRole }
+              : {}),
             ...(event.payload.branch !== undefined ? { branch: event.payload.branch } : {}),
             ...(event.payload.worktreePath !== undefined
               ? { worktreePath: event.payload.worktreePath }
@@ -608,6 +627,36 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
             ...existingRow.value,
             deletedAt: event.payload.deletedAt,
             updatedAt: event.payload.deletedAt,
+          });
+          return;
+        }
+
+        case "thread.archived": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            archivedAt: event.payload.archivedAt,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "thread.unarchived": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            archivedAt: null,
+            updatedAt: event.payload.updatedAt,
           });
           return;
         }

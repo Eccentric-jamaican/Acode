@@ -1,20 +1,28 @@
 // FILE: taskCompletion.tsx
-// Purpose: Bridges thread completion events to in-app toasts and OS notifications.
+// Purpose: Bridges thread lifecycle notifications to in-app toasts and OS notifications.
 // Layer: Notification runtime
 // Exports: TaskCompletionNotifications and browser permission helpers
 
+import type { DesktopNotificationAction } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useRef } from "react";
-import { toastManager } from "../components/ui/toast";
 import { useAppSettings } from "../appSettings";
+import { toastManager } from "../components/ui/toast";
 import { isElectron } from "../env";
+import { newCommandId } from "../lib/utils";
+import { readNativeApi } from "../nativeApi";
 import { resolvePreferredSplitViewIdForThread, useSplitViewStore } from "../splitViewStore";
 import { useStore } from "../store";
 import type { Thread } from "../types";
 import {
+  buildApprovalRequiredCopy,
+  buildDesktopNotificationPayload,
   buildTaskCompletionCopy,
+  buildUserInputRequiredCopy,
+  collectApprovalRequestCandidates,
   collectCompletedThreadCandidates,
-  type CompletedThreadCandidate,
+  collectUserInputRequestCandidates,
+  type DesktopNotificationCandidate,
 } from "./taskCompletion.logic";
 
 export type BrowserNotificationPermissionState =
@@ -26,7 +34,6 @@ function isBrowserNotificationSupported(): boolean {
   return typeof window !== "undefined" && "Notification" in window;
 }
 
-// Browsers require secure contexts and a user gesture before asking for permission.
 export function readBrowserNotificationPermissionState(): BrowserNotificationPermissionState {
   if (typeof window === "undefined") {
     return "unsupported";
@@ -58,26 +65,42 @@ function isWindowForeground(): boolean {
   return document.visibilityState === "visible" && document.hasFocus();
 }
 
-async function showSystemTaskCompletionNotification(
-  candidate: CompletedThreadCandidate,
-): Promise<boolean> {
-  const { body, title } = buildTaskCompletionCopy(candidate);
+function buildCandidateCopy(
+  candidate: DesktopNotificationCandidate,
+): { title: string; body: string } {
+  switch (candidate.kind) {
+    case "turn_completed":
+      return buildTaskCompletionCopy(candidate);
+    case "approval_required":
+      return buildApprovalRequiredCopy(candidate);
+    case "user_input_required":
+      return buildUserInputRequiredCopy(candidate);
+  }
+}
 
+async function showDesktopSystemNotification(
+  candidate: DesktopNotificationCandidate,
+): Promise<boolean> {
   if (window.desktopBridge) {
     const supported = await window.desktopBridge.notifications.isSupported();
     if (!supported) {
       return false;
     }
-    return window.desktopBridge.notifications.show({ title, body, silent: false });
+    return window.desktopBridge.notifications.show(buildDesktopNotificationPayload(candidate));
+  }
+
+  if (candidate.kind !== "turn_completed") {
+    return false;
   }
 
   if (readBrowserNotificationPermissionState() !== "granted") {
     return false;
   }
 
+  const { body, title } = buildTaskCompletionCopy(candidate);
   const notification = new Notification(title, {
     body,
-    tag: `thread-completed:${candidate.threadId}`,
+    tag: candidate.notificationId,
   });
   notification.addEventListener("click", () => {
     window.focus();
@@ -85,14 +108,31 @@ async function showSystemTaskCompletionNotification(
   return true;
 }
 
-function showCompletionToast(
-  candidate: CompletedThreadCandidate,
+function navigateToThread(
+  candidate: Pick<DesktopNotificationCandidate, "threadId">,
   navigate: ReturnType<typeof useNavigate>,
   splitViewId: string | null,
 ): void {
-  const { body, title } = buildTaskCompletionCopy(candidate);
+  void navigate({
+    to: "/$threadId",
+    params: { threadId: candidate.threadId },
+    ...(splitViewId ? { search: () => ({ splitViewId }) } : {}),
+  });
+}
+
+function showCandidateToast(
+  candidate: DesktopNotificationCandidate,
+  navigate: ReturnType<typeof useNavigate>,
+  splitViewId: string | null,
+): void {
+  const { body, title } = buildCandidateCopy(candidate);
   toastManager.add({
-    type: "success",
+    type:
+      candidate.kind === "turn_completed"
+        ? "success"
+        : candidate.kind === "approval_required"
+          ? "warning"
+          : "info",
     title,
     description: body,
     data: {
@@ -101,15 +141,68 @@ function showCompletionToast(
     },
     actionProps: {
       children: "Open thread",
-      onClick: () => {
-        void navigate({
-          to: "/$threadId",
-          params: { threadId: candidate.threadId },
-          ...(splitViewId ? { search: () => ({ splitViewId }) } : {}),
-        });
-      },
+      onClick: () => navigateToThread(candidate, navigate, splitViewId),
     },
   });
+}
+
+async function handleDesktopNotificationAction(
+  action: DesktopNotificationAction,
+  navigate: ReturnType<typeof useNavigate>,
+  splitViewsById: ReturnType<typeof useSplitViewStore.getState>["splitViewsById"],
+  splitViewIdBySourceThreadId: ReturnType<typeof useSplitViewStore.getState>["splitViewIdBySourceThreadId"],
+): Promise<void> {
+  const preferredSplitViewId = resolvePreferredSplitViewIdForThread({
+    splitViewsById,
+    splitViewIdBySourceThreadId,
+    threadId: action.threadId,
+  });
+
+  if (action.kind === "open_thread") {
+    navigateToThread(action, navigate, preferredSplitViewId);
+    return;
+  }
+
+  const api = readNativeApi();
+  if (!api) {
+    navigateToThread(action, navigate, preferredSplitViewId);
+    return;
+  }
+
+  try {
+    if (action.kind === "approval_response") {
+      await api.orchestration.dispatchCommand({
+        type: "thread.approval.respond",
+        commandId: newCommandId(),
+        threadId: action.threadId,
+        requestId: action.requestId,
+        decision: action.decision,
+        createdAt: new Date().toISOString(),
+      });
+      return;
+    }
+
+    await api.orchestration.dispatchCommand({
+      type: "thread.user-input.respond",
+      commandId: newCommandId(),
+      threadId: action.threadId,
+      requestId: action.requestId,
+      answers: action.answers,
+      createdAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    navigateToThread(action, navigate, preferredSplitViewId);
+    toastManager.add({
+      type: "error",
+      title: "Notification action failed",
+      description:
+        error instanceof Error ? error.message : "Unable to complete the desktop notification action.",
+      data: {
+        threadId: action.threadId,
+        dismissAfterVisibleMs: 8000,
+      },
+    });
+  }
 }
 
 export function TaskCompletionNotifications() {
@@ -125,6 +218,33 @@ export function TaskCompletionNotifications() {
   const readyRef = useRef(false);
 
   useEffect(() => {
+    const bridge = window.desktopBridge?.notifications;
+    if (!bridge) {
+      return;
+    }
+
+    void bridge.consumePendingActions().then((actions) => {
+      for (const action of actions) {
+        void handleDesktopNotificationAction(
+          action,
+          navigate,
+          splitViewsById,
+          splitViewIdBySourceThreadId,
+        );
+      }
+    });
+
+    return bridge.onAction((action) => {
+      void handleDesktopNotificationAction(
+        action,
+        navigate,
+        splitViewsById,
+        splitViewIdBySourceThreadId,
+      );
+    });
+  }, [navigate, splitViewIdBySourceThreadId, splitViewsById]);
+
+  useEffect(() => {
     if (!threadsHydrated) {
       return;
     }
@@ -135,28 +255,33 @@ export function TaskCompletionNotifications() {
       return;
     }
 
-    const completions = collectCompletedThreadCandidates(previousThreadsRef.current, threads);
+    const candidates: DesktopNotificationCandidate[] = [
+      ...collectCompletedThreadCandidates(previousThreadsRef.current, threads),
+      ...collectApprovalRequestCandidates(previousThreadsRef.current, threads),
+      ...collectUserInputRequestCandidates(previousThreadsRef.current, threads),
+    ];
     previousThreadsRef.current = threads;
 
-    if (completions.length === 0) {
+    if (candidates.length === 0) {
       return;
     }
 
     const shouldAttemptSystemNotification =
-      settings.enableSystemTaskCompletionNotifications && !isWindowForeground();
+      settings.enableSystemTaskCompletionNotifications && (isElectron || !isWindowForeground());
 
-    for (const completion of completions) {
+    for (const candidate of candidates) {
       const preferredSplitViewId = resolvePreferredSplitViewIdForThread({
         splitViewsById,
         splitViewIdBySourceThreadId,
-        threadId: completion.threadId,
+        threadId: candidate.threadId,
       });
+
       if (settings.enableTaskCompletionToasts) {
-        showCompletionToast(completion, navigate, preferredSplitViewId);
+        showCandidateToast(candidate, navigate, preferredSplitViewId);
       }
 
       if (shouldAttemptSystemNotification) {
-        void showSystemTaskCompletionNotification(completion);
+        void showDesktopSystemNotification(candidate);
       }
     }
   }, [
@@ -176,7 +301,7 @@ export function buildNotificationSettingsSupportText(
   permissionState: BrowserNotificationPermissionState,
 ): string {
   if (isElectron) {
-    return "Desktop app notifications use your operating system notification center.";
+    return "Desktop app notifications use your operating system notification center for completed turns and threads that need input.";
   }
   switch (permissionState) {
     case "granted":

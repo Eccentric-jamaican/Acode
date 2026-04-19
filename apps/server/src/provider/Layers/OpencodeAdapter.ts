@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
-import net from "node:net";
-
-import { createOpencode, type OpencodeClient } from "@opencode-ai/sdk";
+import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import {
   EventId,
+  DEFAULT_SERVER_SETTINGS,
   OPENCODE_DEFAULT_MODEL_SLUG,
+  type OpenCodeModelOptions,
   type ProviderComposerCapabilities,
   type ProviderListCommandsInput,
   type ProviderListCommandsResult,
@@ -23,18 +23,25 @@ import {
 import {
   getDefaultModel,
   normalizeModelSlug,
+  normalizeOpenCodeModelOptions,
   parseOpencodeModelSlug,
 } from "@t3tools/shared/model";
 import { Data, Effect, FileSystem, Layer, Option, Queue, Ref, Stream } from "effect";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
 } from "../Errors.ts";
+import {
+  buildOpenCodeBasicAuthorizationHeader,
+  connectToOpenCodeServer,
+  createOpenCodeSdkClient,
+} from "../opencodeRuntime.ts";
 import { OpencodeMessageRoleGate } from "./OpencodeMessageRoleGate.ts";
 import { OpencodeAdapter, type OpencodeAdapterShape } from "../Services/OpencodeAdapter.ts";
 import { buildOpencodePromptAsyncBody, opencodeAgentForInteractionMode } from "./OpencodeTurnMapping.ts";
@@ -42,19 +49,18 @@ import { normalizeInvocationDiffFiles } from "./InvocationDiffNormalization.ts";
 import { discoverSkillsForCwd } from "./SkillDiscovery.ts";
 
 const PROVIDER = "opencode" as const;
-const HOST = "127.0.0.1";
 const STARTUP_TIMEOUT_MS = 20_000;
 const RECONNECT_DELAY_MS = 700;
 
 export interface OpencodeAdapterLiveOptions {
   readonly host?: string;
   readonly port?: number;
-  readonly createRuntime?: typeof createOpencode;
+  readonly createRuntime?: unknown;
 }
 
 interface RuntimeHandle {
-  readonly client: OpencodeClient;
   readonly baseUrl: string;
+  readonly serverPassword?: string;
   readonly close: () => void;
 }
 
@@ -135,34 +141,6 @@ function isConnectionRefused(cause: unknown): boolean {
   }
   const message = toMessage(cause, "").toLowerCase();
   return message.includes("econnrefused") || message.includes("connect refused");
-}
-
-function resolveFreePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once("error", reject);
-    server.listen(0, HOST, () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        server.close(() => reject(new Error("Failed to resolve free port")));
-        return;
-      }
-      const { port } = address;
-      server.close((error) => (error ? reject(error) : resolve(port)));
-    });
-  });
-}
-
-function parsePathParams(
-  pathPattern: RegExp,
-  pathValue: string,
-  methodName: string,
-): ReadonlyArray<string> {
-  const match = pathPattern.exec(pathValue);
-  if (!match) {
-    throw new Error(`Invalid path for '${methodName}': ${pathValue}`);
-  }
-  return match.slice(1).map((value) => decodeURIComponent(value));
 }
 
 function readResumeCursor(value: unknown): { sessionId: string; directory?: string } | undefined {
@@ -303,7 +281,7 @@ function eventBase(input: {
     ...(input.turnId ? { turnId: input.turnId } : {}),
     ...(input.itemId ? { itemId: RuntimeItemId.makeUnsafe(input.itemId) } : {}),
     ...(input.requestId ? { requestId: RuntimeRequestId.makeUnsafe(input.requestId) } : {}),
-    raw: { source: "opencode.server.event", method: input.method, payload: input.rawPayload },
+    raw: { source: "opencode.sdk.event", method: input.method, payload: input.rawPayload },
     type: input.type,
     payload: input.payload,
   } as ProviderRuntimeEvent;
@@ -313,6 +291,10 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const serverConfig = yield* Effect.service(ServerConfig);
+    const serverSettings =
+      Option.getOrUndefined(yield* Effect.serviceOption(ServerSettingsService)) ?? {
+        getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+      };
     const services = yield* Effect.services<never>();
     const queue = yield* Queue.unbounded<ProviderRuntimeEvent>();
     const runtimeRef = yield* Ref.make<RuntimeHandle | null>(null);
@@ -406,30 +388,39 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         const existing = yield* Ref.get(runtimeRef);
         if (existing) return existing;
 
-        const host = options?.host ?? HOST;
-        const port = options?.port ?? (yield* Effect.tryPromise({
-          try: () => resolveFreePort(),
-          catch: (cause) => processError(threadId, toMessage(cause, "Failed to resolve free TCP port."), cause),
-        }));
+        const settings = yield* serverSettings.getSettings.pipe(
+          Effect.map((value) => value.providers.opencode),
+          Effect.mapError((cause) =>
+            processError(threadId, toMessage(cause, "Failed to read OpenCode settings."), cause),
+          ),
+        );
+        const serverPassword =
+          settings.serverPassword.trim().length > 0
+            ? settings.serverPassword.trim()
+            : undefined;
 
         const runtimeFromSdk = yield* Effect.tryPromise({
-          try: () =>
-            (options?.createRuntime ?? createOpencode)({
-              hostname: host,
-              port,
-              timeout: STARTUP_TIMEOUT_MS,
-            }),
+          try: async () => {
+            const server = await connectToOpenCodeServer({
+              binaryPath: settings.binaryPath,
+              serverUrl: settings.serverUrl,
+              ...(options?.host ? { hostname: options.host } : {}),
+              ...(options?.port ? { port: options.port } : {}),
+              timeoutMs: STARTUP_TIMEOUT_MS,
+            });
+            return { server };
+          },
           catch: (cause) =>
             processError(
               threadId,
-              toMessage(cause, "Failed to start OpenCode runtime via SDK."),
+              toMessage(cause, "Failed to connect to OpenCode runtime."),
               cause,
             ),
         });
 
         const runtime: RuntimeHandle = {
           baseUrl: runtimeFromSdk.server.url,
-          client: runtimeFromSdk.client,
+          ...(serverPassword ? { serverPassword } : {}),
           close: runtimeFromSdk.server.close,
         };
         yield* Ref.set(runtimeRef, runtime);
@@ -448,172 +439,44 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         const executeRequest = (runtime: RuntimeHandle) =>
           Effect.tryPromise({
             try: async () => {
-              const query = input.directory ? { directory: input.directory } : undefined;
               const bodyRecord = asObject(input.body);
-              const client: any = runtime.client;
-              switch (input.methodName) {
-                case "provider.list":
-                  return (await client.provider.list({
-                    query,
-                    throwOnError: true,
-                    responseStyle: "data",
-                  })) as T;
-                case "command.list":
-                  return (await client.command.list({
-                    query,
-                    throwOnError: true,
-                    responseStyle: "data",
-                  })) as T;
-                case "session.create":
-                  return (await client.session.create({
-                    query,
-                    body: bodyRecord ?? {},
-                    throwOnError: true,
-                    responseStyle: "data",
-                  })) as T;
-                case "session.get": {
-                  const [sessionId] = parsePathParams(
-                    /^\/session\/([^/]+)$/,
-                    input.path,
-                    input.methodName,
-                  );
-                  return (await client.session.get({
-                    path: { id: sessionId! },
-                    query,
-                    throwOnError: true,
-                    responseStyle: "data",
-                  })) as T;
-                }
-                case "session.message": {
-                  const [sessionId, messageId] = parsePathParams(
-                    /^\/session\/([^/]+)\/message\/([^/]+)$/,
-                    input.path,
-                    input.methodName,
-                  );
-                  return (await client.session.message({
-                    path: { id: sessionId!, messageID: messageId! },
-                    query,
-                    throwOnError: true,
-                    responseStyle: "data",
-                  })) as T;
-                }
-                case "session.messages": {
-                  const [sessionId] = parsePathParams(
-                    /^\/session\/([^/]+)\/message$/,
-                    input.path,
-                    input.methodName,
-                  );
-                  return (await client.session.messages({
-                    path: { id: sessionId! },
-                    query,
-                    throwOnError: true,
-                    responseStyle: "data",
-                  })) as T;
-                }
-                case "session.prompt_async": {
-                  const [sessionId] = parsePathParams(
-                    /^\/session\/([^/]+)\/prompt_async$/,
-                    input.path,
-                    input.methodName,
-                  );
-                  return (await client.session.promptAsync({
-                    path: { id: sessionId! },
-                    query,
-                    body: bodyRecord ?? {},
-                    throwOnError: true,
-                    responseStyle: "data",
-                  })) as T;
-                }
-                case "session.command": {
-                  const [sessionId] = parsePathParams(
-                    /^\/session\/([^/]+)\/command$/,
-                    input.path,
-                    input.methodName,
-                  );
-                  return (await client.session.command({
-                    path: { id: sessionId! },
-                    query,
-                    body: bodyRecord ?? {},
-                    throwOnError: true,
-                    responseStyle: "data",
-                  })) as T;
-                }
-                case "session.abort": {
-                  const [sessionId] = parsePathParams(
-                    /^\/session\/([^/]+)\/abort$/,
-                    input.path,
-                    input.methodName,
-                  );
-                  return (await client.session.abort({
-                    path: { id: sessionId! },
-                    query,
-                    throwOnError: true,
-                    responseStyle: "data",
-                  })) as T;
-                }
-                case "session.revert": {
-                  const [sessionId] = parsePathParams(
-                    /^\/session\/([^/]+)\/revert$/,
-                    input.path,
-                    input.methodName,
-                  );
-                  return (await client.session.revert({
-                    path: { id: sessionId! },
-                    query,
-                    body: bodyRecord ?? undefined,
-                    throwOnError: true,
-                    responseStyle: "data",
-                  })) as T;
-                }
-                case "permission.reply": {
-                  const [sessionId, permissionId] = parsePathParams(
-                    /^\/session\/([^/]+)\/permissions\/([^/]+)$/,
-                    input.path,
-                    input.methodName,
-                  );
-                  const response =
-                    asString(bodyRecord?.response) ?? asString(bodyRecord?.reply) ?? undefined;
-                  if (response !== "once" && response !== "always" && response !== "reject") {
-                    throw new Error(
-                      `Invalid permission response '${response ?? "undefined"}' for '${input.methodName}'.`,
-                    );
-                  }
-                  return (await client.postSessionIdPermissionsPermissionId({
-                    path: { id: sessionId!, permissionID: permissionId! },
-                    query,
-                    body: { response },
-                    throwOnError: true,
-                    responseStyle: "data",
-                  })) as T;
-                }
-                case "question.reply": {
-                  const [requestId] = parsePathParams(
-                    /^\/question\/([^/]+)\/reply$/,
-                    input.path,
-                    input.methodName,
-                  );
-                  const url = new URL(`/question/${encodeURIComponent(requestId!)}/reply`, runtime.baseUrl);
-                  if (input.directory) {
-                    url.searchParams.set("directory", input.directory);
-                  }
-                  const response = await fetch(url, {
-                    method: "POST",
-                    headers: {
-                      Accept: "application/json",
-                      "Content-Type": "application/json",
-                    },
-                    body: JSON.stringify(bodyRecord ?? {}),
-                  });
-                  if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}: ${await response.text()}`);
-                  }
-                  if (response.status === 204) return undefined as T;
-                  const text = await response.text();
-                  return (text.trim() ? JSON.parse(text) : undefined) as T;
-                }
-                default:
-                  throw new Error(`Unsupported OpenCode SDK method '${input.methodName}'.`);
+              const url = new URL(input.path, runtime.baseUrl);
+              if (input.directory) {
+                url.searchParams.set("directory", input.directory);
               }
+              const response = await fetch(url, {
+                method: input.httpMethod,
+                headers: {
+                  Accept: "application/json",
+                  ...(input.httpMethod === "POST"
+                    ? { "Content-Type": "application/json" }
+                    : {}),
+                  ...(runtime.serverPassword
+                    ? {
+                        Authorization: buildOpenCodeBasicAuthorizationHeader(
+                          runtime.serverPassword,
+                        ),
+                      }
+                    : {}),
+                },
+                ...(input.httpMethod === "POST"
+                  ? { body: JSON.stringify(bodyRecord ?? {}) }
+                  : {}),
+              });
+              if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+              }
+              if (response.status === 204) {
+                return undefined as T;
+              }
+              const text = await response.text();
+              if (text.trim().length === 0) {
+                return undefined as T;
+              }
+              const parsed = JSON.parse(text) as { data?: unknown };
+              return (parsed && typeof parsed === "object" && "data" in parsed
+                ? parsed.data
+                : parsed) as T;
             },
             catch: (cause) =>
               new OpencodeRequestFailure({
@@ -1342,10 +1205,13 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           let runtime: RuntimeHandle | null = null;
           try {
             runtime = await ensureRuntime(threadId).pipe(runWithServices);
-            const eventStream = await runtime.client.event.subscribe({
-              query: { directory },
+            const eventClient = createOpenCodeSdkClient({
+              baseUrl: runtime.baseUrl,
+              directory,
+              ...(runtime.serverPassword ? { serverPassword: runtime.serverPassword } : {}),
+            });
+            const eventStream = await eventClient.event.subscribe(undefined, {
               signal: controller.signal,
-              throwOnError: true,
             });
             for await (const streamEvent of eventStream.stream) {
               if (controller.signal.aborted) {
@@ -1586,9 +1452,16 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
 
         const resolvedModel = yield* resolveModel(input.threadId, session.cwd, input.model, session.model, "sendTurn");
         session.model = resolvedModel.slug;
+        const openCodeOptions = normalizeOpenCodeModelOptions(
+          resolvedModel.slug,
+          input.modelOptions?.opencode as OpenCodeModelOptions | undefined,
+        );
         const text = input.input?.trim() ?? "";
         const slashInvocation = parseLeadingSlashInvocation(text);
-        const selectedAgent = opencodeAgentForInteractionMode(input.interactionMode);
+        const selectedAgent =
+          openCodeOptions?.agent ??
+          opencodeAgentForInteractionMode(input.interactionMode);
+        const selectedVariant = openCodeOptions?.variant;
 
         if (slashInvocation !== null) {
           if ((input.attachments?.length ?? 0) > 0) {
@@ -1631,13 +1504,14 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
             httpMethod: "POST",
             path: `/session/${encodeURIComponent(session.sessionId)}/command`,
             directory: session.cwd,
-            body: {
-              command: slashInvocation.name,
-              arguments: slashInvocation.arguments,
-              model: resolvedModel.slug,
-              ...(selectedAgent !== undefined ? { agent: selectedAgent } : {}),
-            },
-          });
+              body: {
+                command: slashInvocation.name,
+                arguments: slashInvocation.arguments,
+                model: resolvedModel.slug,
+                ...(selectedAgent !== undefined ? { agent: selectedAgent } : {}),
+                ...(selectedVariant !== undefined ? { variant: selectedVariant } : {}),
+              },
+            });
 
           const rawPayload = {
             sessionId: session.sessionId,
@@ -1646,6 +1520,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
             arguments: slashInvocation.arguments,
             ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
             ...(selectedAgent !== undefined ? { agent: selectedAgent } : {}),
+            ...(selectedVariant !== undefined ? { variant: selectedVariant } : {}),
           };
           yield* emit(
             eventBase({
@@ -1704,6 +1579,11 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           parts,
           ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
         });
+        const promptBodyWithOptions = {
+          ...promptBody,
+          ...(selectedVariant !== undefined ? { variant: selectedVariant } : {}),
+          ...(selectedAgent !== undefined ? { agent: selectedAgent } : {}),
+        };
 
         yield* requestJson<void>({
           threadId: input.threadId,
@@ -1711,7 +1591,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           httpMethod: "POST",
           path: `/session/${encodeURIComponent(session.sessionId)}/prompt_async`,
           directory: session.cwd,
-          body: promptBody,
+          body: promptBodyWithOptions,
         });
 
         const rawPayload = {
@@ -1719,6 +1599,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           model: resolvedModel.slug,
           ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
           ...(selectedAgent !== undefined ? { agent: selectedAgent } : {}),
+          ...(selectedVariant !== undefined ? { variant: selectedVariant } : {}),
         };
         yield* emit(
           eventBase({

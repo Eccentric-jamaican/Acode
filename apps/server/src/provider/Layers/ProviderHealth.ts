@@ -63,6 +63,22 @@ function detailFromResult(
   return undefined;
 }
 
+function withProviderDefaults(
+  provider: ServerProviderStatus["provider"],
+  input: Omit<ServerProviderStatus, "provider" | "enabled" | "installed" | "version" | "models"> & {
+    readonly installed?: boolean;
+  },
+): ServerProviderStatus {
+  return {
+    provider,
+    enabled: true,
+    installed: input.installed ?? input.available,
+    version: null,
+    models: [],
+    ...input,
+  };
+}
+
 function extractAuthBoolean(value: unknown): boolean | undefined {
   if (Array.isArray(value)) {
     for (const entry of value) {
@@ -319,8 +335,7 @@ export const checkCodexProviderStatus: Effect.Effect<
 
   if (Result.isFailure(versionProbe)) {
     const error = versionProbe.failure;
-    return {
-      provider: CODEX_PROVIDER,
+    return withProviderDefaults(CODEX_PROVIDER, {
       status: "error" as const,
       available: false,
       authStatus: "unknown" as const,
@@ -328,25 +343,23 @@ export const checkCodexProviderStatus: Effect.Effect<
       message: isCommandMissingCause(error, "codex")
         ? "Codex CLI (`codex`) is not installed or not on PATH."
         : `Failed to execute Codex CLI health check: ${error instanceof Error ? error.message : String(error)}.`,
-    };
+    });
   }
 
   if (Option.isNone(versionProbe.success)) {
-    return {
-      provider: CODEX_PROVIDER,
+    return withProviderDefaults(CODEX_PROVIDER, {
       status: "error" as const,
       available: false,
       authStatus: "unknown" as const,
       checkedAt,
       message: "Codex CLI is installed but failed to run. Timed out while running command.",
-    };
+    });
   }
 
   const version = versionProbe.success.value;
   if (version.code !== 0) {
     const detail = detailFromResult(version);
-    return {
-      provider: CODEX_PROVIDER,
+    return withProviderDefaults(CODEX_PROVIDER, {
       status: "error" as const,
       available: false,
       authStatus: "unknown" as const,
@@ -354,7 +367,7 @@ export const checkCodexProviderStatus: Effect.Effect<
       message: detail
         ? `Codex CLI is installed but failed to run. ${detail}`
         : "Codex CLI is installed but failed to run.",
-    };
+    });
   }
 
   // Probe 2: `codex login status` — is the user authenticated?
@@ -365,8 +378,7 @@ export const checkCodexProviderStatus: Effect.Effect<
 
   if (Result.isFailure(authProbe)) {
     const error = authProbe.failure;
-    return {
-      provider: CODEX_PROVIDER,
+    return withProviderDefaults(CODEX_PROVIDER, {
       status: "warning" as const,
       available: true,
       authStatus: "unknown" as const,
@@ -375,29 +387,27 @@ export const checkCodexProviderStatus: Effect.Effect<
         error instanceof Error
           ? `Could not verify Codex authentication status: ${error.message}.`
           : "Could not verify Codex authentication status.",
-    };
+    });
   }
 
   if (Option.isNone(authProbe.success)) {
-    return {
-      provider: CODEX_PROVIDER,
+    return withProviderDefaults(CODEX_PROVIDER, {
       status: "warning" as const,
       available: true,
       authStatus: "unknown" as const,
       checkedAt,
       message: "Could not verify Codex authentication status. Timed out while running command.",
-    };
+    });
   }
 
   const parsed = parseAuthStatusFromOutput(authProbe.success.value);
-  return {
-    provider: CODEX_PROVIDER,
+  return withProviderDefaults(CODEX_PROVIDER, {
     status: parsed.status,
     available: true,
     authStatus: parsed.authStatus,
     checkedAt,
     ...(parsed.message ? { message: parsed.message } : {}),
-  } satisfies ServerProviderStatus;
+  });
 });
 
 export const checkOpencodeProviderStatus: Effect.Effect<
@@ -414,8 +424,7 @@ export const checkOpencodeProviderStatus: Effect.Effect<
 
   if (Result.isFailure(versionProbe)) {
     const error = versionProbe.failure;
-    return {
-      provider: OPENCODE_PROVIDER,
+    return withProviderDefaults(OPENCODE_PROVIDER, {
       status: "error" as const,
       available: false,
       authStatus: "unknown" as const,
@@ -423,25 +432,23 @@ export const checkOpencodeProviderStatus: Effect.Effect<
       message: isCommandMissingCause(error, "opencode")
         ? "OpenCode CLI (`opencode`) is not installed or not on PATH."
         : `Failed to execute OpenCode CLI health check: ${error instanceof Error ? error.message : String(error)}.`,
-    };
+    });
   }
 
   if (Option.isNone(versionProbe.success)) {
-    return {
-      provider: OPENCODE_PROVIDER,
+    return withProviderDefaults(OPENCODE_PROVIDER, {
       status: "error" as const,
       available: false,
       authStatus: "unknown" as const,
       checkedAt,
       message: "OpenCode CLI is installed but failed to run. Timed out while running command.",
-    };
+    });
   }
 
   const version = versionProbe.success.value;
   if (version.code !== 0) {
     const detail = detailFromResult(version);
-    return {
-      provider: OPENCODE_PROVIDER,
+    return withProviderDefaults(OPENCODE_PROVIDER, {
       status: "error" as const,
       available: false,
       authStatus: "unknown" as const,
@@ -449,17 +456,16 @@ export const checkOpencodeProviderStatus: Effect.Effect<
       message: detail
         ? `OpenCode CLI is installed but failed to run. ${detail}`
         : "OpenCode CLI is installed but failed to run.",
-    };
+    });
   }
 
-  return {
-    provider: OPENCODE_PROVIDER,
+  return withProviderDefaults(OPENCODE_PROVIDER, {
     status: "ready",
     available: true,
     authStatus: "unknown",
     checkedAt,
     message: "OpenCode authentication status is managed externally in v1.",
-  } satisfies ServerProviderStatus;
+  });
 });
 
 export const checkClaudeProviderStatus: Effect.Effect<
@@ -476,8 +482,7 @@ export const checkClaudeProviderStatus: Effect.Effect<
 
   if (Result.isFailure(versionProbe)) {
     const error = versionProbe.failure;
-    return {
-      provider: CLAUDE_AGENT_PROVIDER,
+    return withProviderDefaults(CLAUDE_AGENT_PROVIDER, {
       status: "error" as const,
       available: false,
       authStatus: "unknown" as const,
@@ -485,25 +490,23 @@ export const checkClaudeProviderStatus: Effect.Effect<
       message: isCommandMissingCause(error, "claude")
         ? "Claude Agent CLI (`claude`) is not installed or not on PATH."
         : `Failed to execute Claude Agent CLI health check: ${error instanceof Error ? error.message : String(error)}.`,
-    };
+    });
   }
 
   if (Option.isNone(versionProbe.success)) {
-    return {
-      provider: CLAUDE_AGENT_PROVIDER,
+    return withProviderDefaults(CLAUDE_AGENT_PROVIDER, {
       status: "error" as const,
       available: false,
       authStatus: "unknown" as const,
       checkedAt,
       message: "Claude Agent CLI is installed but failed to run. Timed out while running command.",
-    };
+    });
   }
 
   const version = versionProbe.success.value;
   if (version.code !== 0) {
     const detail = detailFromResult(version);
-    return {
-      provider: CLAUDE_AGENT_PROVIDER,
+    return withProviderDefaults(CLAUDE_AGENT_PROVIDER, {
       status: "error" as const,
       available: false,
       authStatus: "unknown" as const,
@@ -511,7 +514,7 @@ export const checkClaudeProviderStatus: Effect.Effect<
       message: detail
         ? `Claude Agent CLI is installed but failed to run. ${detail}`
         : "Claude Agent CLI is installed but failed to run.",
-    };
+    });
   }
 
   const authProbe = yield* runCommand("claude", ["auth", "status"]).pipe(
@@ -521,8 +524,7 @@ export const checkClaudeProviderStatus: Effect.Effect<
 
   if (Result.isFailure(authProbe)) {
     const error = authProbe.failure;
-    return {
-      provider: CLAUDE_AGENT_PROVIDER,
+    return withProviderDefaults(CLAUDE_AGENT_PROVIDER, {
       status: "warning" as const,
       available: true,
       authStatus: "unknown" as const,
@@ -531,29 +533,27 @@ export const checkClaudeProviderStatus: Effect.Effect<
         error instanceof Error
           ? `Could not verify Claude authentication status: ${error.message}.`
           : "Could not verify Claude authentication status.",
-    };
+    });
   }
 
   if (Option.isNone(authProbe.success)) {
-    return {
-      provider: CLAUDE_AGENT_PROVIDER,
+    return withProviderDefaults(CLAUDE_AGENT_PROVIDER, {
       status: "warning" as const,
       available: true,
       authStatus: "unknown" as const,
       checkedAt,
       message: "Could not verify Claude authentication status. Timed out while running command.",
-    };
+    });
   }
 
   const parsed = parseClaudeAuthStatusFromOutput(authProbe.success.value);
-  return {
-    provider: CLAUDE_AGENT_PROVIDER,
+  return withProviderDefaults(CLAUDE_AGENT_PROVIDER, {
     status: parsed.status,
     available: true,
     authStatus: parsed.authStatus,
     checkedAt,
     ...(parsed.message ? { message: parsed.message } : {}),
-  } satisfies ServerProviderStatus;
+  });
 });
 
 // ── Layer ───────────────────────────────────────────────────────────

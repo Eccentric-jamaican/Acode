@@ -42,6 +42,25 @@ export interface WorkLogEntry {
   toolTitle?: string;
   itemType?: ToolLifecycleItemType;
   requestKind?: PendingApproval["requestKind"];
+  payload?: unknown;
+  subagentAction?: {
+    summaryText?: string;
+    model?: string;
+    prompt?: string;
+  };
+  subagents?: ReadonlyArray<{
+    threadId: string;
+    resolvedThreadId?: string;
+    agentId?: string;
+    nickname?: string;
+    role?: string;
+    title?: string;
+    model?: string;
+    rawStatus?: string;
+    statusLabel?: string;
+    latestUpdate?: string;
+    isActive?: boolean;
+  }>;
 }
 
 export interface InvocationDiffFile {
@@ -421,6 +440,13 @@ export function deriveWorkLogEntries(
     .filter((activity) => activity.kind !== "tool.started")
     .filter((activity) => activity.kind !== "task.started" && activity.kind !== "task.completed")
     .filter((activity) => activity.summary !== "Checkpoint captured")
+    .filter((activity) => {
+      const payload =
+        activity.payload && typeof activity.payload === "object"
+          ? (activity.payload as Record<string, unknown>)
+          : null;
+      return extractWorkLogItemType(payload) !== "collab_agent_tool_call";
+    })
     .map((activity) => {
       const payload =
         activity.payload && typeof activity.payload === "object"
@@ -469,6 +495,7 @@ export function deriveWorkLogEntries(
       if (requestKind) {
         entry.requestKind = requestKind;
       }
+      entry.payload = activity.payload;
       return entry;
     });
 }

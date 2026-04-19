@@ -34,6 +34,7 @@ export interface AppState {
   errorInbox: ErrorInboxEntry[];
   threads: Thread[];
   threadsHydrated: boolean;
+  hydrationError: string | null;
 }
 
 const PERSISTED_STATE_KEY = "t3code:renderer-state:v8";
@@ -56,6 +57,7 @@ const initialState: AppState = {
   errorInbox: [],
   threads: [],
   threadsHydrated: false,
+  hydrationError: null,
 };
 const persistedExpandedProjectCwds = new Set<string>();
 let hasPersistedExpandedProjectCwds = false;
@@ -232,6 +234,30 @@ function attachmentPreviewRoutePath(attachmentId: string): string {
   return `/attachments/${encodeURIComponent(attachmentId)}`;
 }
 
+function sanitizeSubagentThreadTitle(title: string, parentThreadId: ThreadId | null): string {
+  if (parentThreadId === null) {
+    return title;
+  }
+  let next = title.trim();
+  next = next.replace(/^[>\-+*]\s+/, "");
+  next = next.replace(/^#{1,6}\s+/, "");
+  next = next.replace(/^\[(.+?)\]\([^)]+\)$/, "$1");
+  for (;;) {
+    const updated = next
+      .replace(/^\*\*(.+)\*\*$/, "$1")
+      .replace(/^__(.+)__$/, "$1")
+      .replace(/^\*(.+)\*$/, "$1")
+      .replace(/^_(.+)_$/, "$1")
+      .replace(/^`(.+)`$/, "$1")
+      .trim();
+    if (updated === next) {
+      break;
+    }
+    next = updated;
+  }
+  return next.length > 0 ? next : title;
+}
+
 // ── Pure state transition functions ────────────────────────────────────
 
 export function syncServerReadModel(state: AppState, readModel: OrchestrationReadModel): AppState {
@@ -268,13 +294,18 @@ export function syncServerReadModel(state: AppState, readModel: OrchestrationRea
     .filter((thread) => thread.deletedAt === null)
     .map((thread) => {
       const existing = existingThreadById.get(thread.id);
+      const parentThreadId = thread.parentThreadId ?? null;
       return {
         id: thread.id,
         codexThreadId: null,
         projectId: thread.projectId,
         origin: thread.origin ?? "user",
         taskId: thread.taskId ?? null,
-        title: thread.title,
+        parentThreadId,
+        subagentAgentId: thread.subagentAgentId ?? null,
+        subagentNickname: thread.subagentNickname ?? null,
+        subagentRole: thread.subagentRole ?? null,
+        title: sanitizeSubagentThreadTitle(thread.title, parentThreadId),
         model: resolveModelSlugForProvider(
           inferProviderForThreadModel({
             model: thread.model,
@@ -331,6 +362,8 @@ export function syncServerReadModel(state: AppState, readModel: OrchestrationRea
         branch: thread.branch,
         worktreePath: thread.worktreePath,
         isPinned: thread.isPinned ?? false,
+        pinnedAt: thread.pinnedAt ?? null,
+        archivedAt: thread.archivedAt ?? null,
         turnDiffSummaries: thread.checkpoints.map((checkpoint) => ({
           turnId: checkpoint.turnId,
           completedAt: checkpoint.completedAt,
@@ -352,6 +385,17 @@ export function syncServerReadModel(state: AppState, readModel: OrchestrationRea
     taskRuntimes,
     threads,
     threadsHydrated: true,
+    hydrationError: null,
+  };
+}
+
+export function setHydrationError(state: AppState, error: string | null): AppState {
+  if (state.hydrationError === error) {
+    return state;
+  }
+  return {
+    ...state,
+    hydrationError: error,
   };
 }
 
@@ -486,6 +530,7 @@ export function setThreadBranch(
 
 interface AppStore extends AppState {
   syncServerReadModel: (readModel: OrchestrationReadModel) => void;
+  setHydrationError: (error: string | null) => void;
   syncErrorInbox: (entries: ReadonlyArray<ErrorInboxEntry>) => void;
   upsertErrorInboxEntry: (entry: ErrorInboxEntry) => void;
   markThreadVisited: (threadId: ThreadId, visitedAt?: string) => void;
@@ -501,6 +546,7 @@ interface AppStore extends AppState {
 export const useStore = create<AppStore>((set) => ({
   ...readPersistedState(),
   syncServerReadModel: (readModel) => set((state) => syncServerReadModel(state, readModel)),
+  setHydrationError: (error) => set((state) => setHydrationError(state, error)),
   syncErrorInbox: (entries) => set((state) => syncErrorInbox(state, entries)),
   upsertErrorInboxEntry: (entry) => set((state) => upsertErrorInboxEntry(state, entry)),
   markThreadVisited: (threadId, visitedAt) =>

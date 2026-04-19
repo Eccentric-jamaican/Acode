@@ -23,7 +23,9 @@ function appendBootstrapLog(message: string): void {
   }
 }
 
-appendBootstrapLog(`bootstrap entry start pid=${process.pid} execPath=${process.execPath}`);
+appendBootstrapLog(
+  `bootstrap entry start pid=${process.pid} execPath=${process.execPath} argv=${JSON.stringify(process.argv)}`,
+);
 
 process.on("uncaughtException", (error) => {
   appendBootstrapLog(`uncaught exception ${formatError(error)}`);
@@ -40,7 +42,7 @@ try {
   appendBootstrapLog(`main module failed ${formatError(error)}`);
   try {
     const { app, dialog } = require("electron") as typeof import("electron");
-    dialog.showErrorBox("T3 Code failed to start", formatError(error));
+    dialog.showErrorBox("A Code failed to start", formatError(error));
     app.quit();
   } catch {
     // Ignore follow-up failures while surfacing bootstrap errors.

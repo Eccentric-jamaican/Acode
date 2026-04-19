@@ -10,6 +10,7 @@
  * @module ProviderServiceLive
  */
 import {
+  DEFAULT_SERVER_SETTINGS,
   NonNegativeInt,
   ThreadId,
   ProviderInterruptTurnInput,
@@ -32,6 +33,7 @@ import {
 } from "../Services/ProviderSessionDirectory.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { AnalyticsService } from "../../telemetry/Services/AnalyticsService.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
 
 export interface ProviderServiceLiveOptions {
   readonly canonicalEventLogPath?: string;
@@ -110,6 +112,10 @@ function readPersistedCwd(
 const makeProviderService = (options?: ProviderServiceLiveOptions) =>
   Effect.gen(function* () {
     const analytics = yield* Effect.service(AnalyticsService);
+    const serverSettings =
+      Option.getOrUndefined(yield* Effect.serviceOption(ServerSettingsService)) ?? {
+        getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+      };
     const canonicalEventLogger =
       options?.canonicalEventLogger ??
       (options?.canonicalEventLogPath !== undefined
@@ -263,6 +269,15 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           threadId,
           provider: parsed.provider ?? "codex",
         };
+        if (input.provider === "opencode") {
+          const settings = yield* serverSettings.getSettings;
+          if (!settings.providers.opencode.enabled) {
+            return yield* toValidationError(
+              "ProviderService.startSession",
+              "Provider 'opencode' is disabled in server settings.",
+            );
+          }
+        }
         const adapter = yield* registry.getByProvider(input.provider);
         const session = yield* adapter.startSession(input);
 

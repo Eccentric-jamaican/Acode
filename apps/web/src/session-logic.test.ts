@@ -649,6 +649,54 @@ describe("deriveWorkLogEntries", () => {
     const entries = deriveWorkLogEntries(activities, undefined);
     expect(entries.map((entry) => entry.id)).toEqual(["first", "second"]);
   });
+
+  it("omits collab subagent tool lifecycle rows from the chat work log", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "collab-update",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "tool.updated",
+        summary: "Spawn subagents",
+        payload: {
+          itemType: "collab_agent_tool_call",
+          title: "Spawn agent",
+          data: {
+            item: {
+              receiverAgents: [
+                {
+                  threadId: "subagent:thread-1:agent-1",
+                  agentNickname: "Locke",
+                  agentRole: "explorer",
+                },
+                {
+                  threadId: "subagent:thread-1:agent-2",
+                  agentNickname: "Ada",
+                  agentRole: "worker",
+                },
+              ],
+            },
+          },
+        },
+      }),
+      makeActivity({
+        id: "collab-complete",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "tool.completed",
+        summary: "Spawn subagents",
+        payload: {
+          itemType: "collab_agent_tool_call",
+          title: "Spawn agent",
+          data: {
+            item: {
+              receiverThreadIds: ["subagent:thread-1:agent-1", "subagent:thread-1:agent-2"],
+            },
+          },
+        },
+      }),
+    ];
+
+    expect(deriveWorkLogEntries(activities, undefined)).toEqual([]);
+  });
 });
 
 describe("deriveTimelineEntries", () => {

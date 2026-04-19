@@ -14,6 +14,7 @@ import {
   type ChatAttachment as PersistedChatAttachment,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
+  DEFAULT_SERVER_SETTINGS,
   type ClientOrchestrationCommand,
   type OrchestrationCommand,
   ORCHESTRATION_WS_CHANNELS,
@@ -58,6 +59,7 @@ import { searchWorkspaceEntries } from "./workspaceEntries";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery";
 import { ProviderDiscoveryService } from "./provider/Services/ProviderDiscoveryService";
+import { ProviderRegistry } from "./provider/Services/ProviderRegistry";
 import { ProviderService } from "./provider/Services/ProviderService";
 import { ProviderHealth } from "./provider/Services/ProviderHealth";
 import { CodexAccountService } from "./provider/Services/CodexAccountService";
@@ -84,6 +86,7 @@ import { OrchestrationCommandReceiptRepository } from "./persistence/Services/Or
 import { ServerRuntimeStartup } from "./serverRuntimeStartup";
 import { suggestNewThreadTasks } from "./newThreadSuggestions";
 import { CodexAdapter } from "./provider/Services/CodexAdapter.ts";
+import { ServerSettingsService } from "./serverSettings";
 
 /**
  * ServerShape - Service API for server lifecycle control.
@@ -314,8 +317,20 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const keybindingsManager = yield* Keybindings;
   const providerHealth = yield* ProviderHealth;
   const providerDiscovery = yield* ProviderDiscoveryService;
+  const providerRegistry =
+    Option.getOrUndefined(yield* Effect.serviceOption(ProviderRegistry)) ?? {
+      getProviders: providerHealth.getStatuses,
+      refresh: () => providerHealth.getStatuses,
+      streamChanges: Stream.empty,
+    };
   const codexAccountService = yield* CodexAccountService;
   const codexAdapter = yield* CodexAdapter;
+  const serverSettings =
+    Option.getOrUndefined(yield* Effect.serviceOption(ServerSettingsService)) ?? {
+      getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+      updateSettings: () => Effect.succeed(DEFAULT_SERVER_SETTINGS),
+      streamChanges: Stream.empty,
+    };
   const git = yield* GitCore;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -329,8 +344,6 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       }),
     ),
   );
-
-  const providerStatuses = yield* providerHealth.getStatuses;
 
   const clients = yield* Ref.make(new Set<WebSocket>());
   const logger = createLogger("ws");
@@ -359,6 +372,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
 
   const getProviderStateSnapshot = Effect.fnUntraced(function* () {
     const providerAccounts = [yield* codexAccountService.getSnapshot()];
+    const providerStatuses = yield* providerRegistry.getProviders;
     const providers = overlayProviderStatuses({
       providerStatuses,
       providerAccounts,
@@ -733,19 +747,64 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   ).pipe(Effect.forkIn(subscriptionsScope));
 
   yield* Stream.runForEach(keybindingsManager.changes, (event) =>
-    broadcastPush({
-      type: "push",
-      channel: WS_CHANNELS.serverConfigUpdated,
-      data: {
-        issues: event.issues,
-        providers: providerStatuses,
-      },
+    Effect.gen(function* () {
+      const providers = yield* providerRegistry.getProviders;
+      yield* broadcastPush({
+        type: "push",
+        channel: WS_CHANNELS.serverConfigUpdated,
+        data: {
+          issues: event.issues,
+          providers,
+        },
+      });
+    }),
+  ).pipe(Effect.forkIn(subscriptionsScope));
+
+  yield* Stream.runForEach(providerRegistry.streamChanges, (providers) =>
+    Effect.gen(function* () {
+      const providerAccounts = [yield* codexAccountService.getSnapshot()];
+      const mergedProviders = overlayProviderStatuses({
+        providerStatuses: providers,
+        providerAccounts,
+      });
+      yield* broadcastPush({
+        type: "push",
+        channel: WS_CHANNELS.serverConfigUpdated,
+        data: {
+          issues: [],
+          providers: mergedProviders,
+        },
+      });
+      yield* broadcastPush({
+        type: "push",
+        channel: WS_CHANNELS.serverProviderStateUpdated,
+        data: {
+          providers: mergedProviders,
+          providerAccounts,
+        },
+      });
+    }),
+  ).pipe(Effect.forkIn(subscriptionsScope));
+
+  yield* Stream.runForEach(serverSettings.streamChanges, (settings) =>
+    Effect.gen(function* () {
+      const providers = yield* providerRegistry.getProviders;
+      yield* broadcastPush({
+        type: "push",
+        channel: WS_CHANNELS.serverConfigUpdated,
+        data: {
+          issues: [],
+          providers,
+          settings,
+        },
+      });
     }),
   ).pipe(Effect.forkIn(subscriptionsScope));
 
   yield* Stream.runForEach(codexAccountService.updates, (providerAccount) =>
     Effect.gen(function* () {
       const providerAccounts = [providerAccount];
+      const providerStatuses = yield* providerRegistry.getProviders;
       const providers = overlayProviderStatuses({
         providerStatuses,
         providerAccounts,
@@ -862,6 +921,40 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       case ORCHESTRATION_WS_METHODS.dispatchCommand: {
         const { command } = request.body;
         const normalizedCommand = yield* normalizeDispatchCommand({ command });
+        if (normalizedCommand.type === "thread.archive") {
+          const snapshot = yield* projectionReadModelQuery.getSnapshot();
+          const thread = snapshot.threads.find(
+            (entry) => entry.id === normalizedCommand.threadId && entry.deletedAt === null,
+          );
+          const archiveResult = yield* startup.enqueueCommand(
+            orchestrationEngine.dispatch(normalizedCommand),
+          );
+
+          if (
+            thread?.session &&
+            thread.session.status !== "stopped"
+          ) {
+            yield* startup
+              .enqueueCommand(
+                orchestrationEngine.dispatch({
+                  type: "thread.session.stop",
+                  commandId: CommandId.makeUnsafe(crypto.randomUUID()),
+                  threadId: normalizedCommand.threadId,
+                  createdAt: new Date().toISOString(),
+                }),
+              )
+              .pipe(Effect.catch(() => Effect.void));
+          }
+
+          yield* terminalManager
+            .close({
+              threadId: normalizedCommand.threadId,
+              deleteHistory: true,
+            })
+            .pipe(Effect.catch(() => Effect.void));
+
+          return archiveResult;
+        }
         return yield* startup.enqueueCommand(orchestrationEngine.dispatch(normalizedCommand));
       }
 
@@ -1026,6 +1119,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       case WS_METHODS.serverGetConfig:
         const keybindingsConfig = yield* keybindingsManager.loadConfigState;
         const providerState = yield* getProviderStateSnapshot();
+        const settings = yield* serverSettings.getSettings;
         return {
           cwd,
           keybindingsConfigPath,
@@ -1034,7 +1128,11 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
           providers: providerState.providers,
           providerAccounts: providerState.providerAccounts,
           availableEditors,
+          settings,
         };
+
+      case WS_METHODS.serverGetSettings:
+        return yield* serverSettings.getSettings;
 
       case WS_METHODS.serverGetErrorInbox:
         return yield* errorInbox.listEntries();
@@ -1152,6 +1250,13 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
               message: `Failed to suggest new thread tasks: ${String(cause)}`,
             }),
         });
+      }
+
+      case WS_METHODS.serverUpdateSettings: {
+        const body = stripRequestTag(request.body);
+        const settings = yield* serverSettings.updateSettings(body);
+        yield* providerRegistry.refresh("opencode").pipe(Effect.ignore);
+        return settings;
       }
 
       case WS_METHODS.providerGetComposerCapabilities: {

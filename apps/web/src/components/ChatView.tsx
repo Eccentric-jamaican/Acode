@@ -67,6 +67,7 @@ import {
   supportsSkillDiscovery,
 } from "~/lib/providerDiscoveryReactQuery";
 import { refineNewThreadSuggestionsQueryOptions } from "~/lib/newThreadSuggestionsReactQuery";
+import { enrichSubagentWorkEntries } from "~/lib/subagentWorkEntries";
 
 import { isElectron, isElectronRuntime } from "../env";
 import {
@@ -525,6 +526,12 @@ export default function ChatView({
   );
   const setComposerDraftEffort = useComposerDraftStore((store) => store.setEffort);
   const setComposerDraftCodexFastMode = useComposerDraftStore((store) => store.setCodexFastMode);
+  const setComposerDraftOpencodeVariant = useComposerDraftStore(
+    (store) => store.setOpencodeVariant,
+  );
+  const setComposerDraftOpencodeAgent = useComposerDraftStore(
+    (store) => store.setOpencodeAgent,
+  );
   const addComposerDraftImage = useComposerDraftStore((store) => store.addImage);
   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
   const removeComposerDraftImage = useComposerDraftStore((store) => store.removeImage);
@@ -738,6 +745,8 @@ export default function ChatView({
   const isPromptEmpty = prompt.trim().length === 0;
   const selectedServiceTierSetting = settings.codexServiceTier;
   const selectedServiceTier = resolveAppServiceTier(selectedServiceTierSetting);
+  const serverConfigQuery = useQuery(serverConfigQueryOptions());
+  const providerStatuses = serverConfigQuery.data?.providers ?? EMPTY_PROVIDER_STATUSES;
   const lockedProvider: ProviderKind | null = hasThreadStarted
     ? (sessionProvider ?? inferredProviderFromThreadModel ?? selectedProviderByThreadId ?? null)
     : null;
@@ -773,19 +782,35 @@ export default function ChatView({
     selectedProvider,
     activeThread?.model ?? activeProject?.model ?? getDefaultModel(selectedProvider),
   );
-  const customModelsForSelectedProvider =
-    selectedProvider === "opencode" ? settings.customOpencodeModels : settings.customCodexModels;
+  const selectedEffort = composerDraft.effort ?? getDefaultReasoningEffort(selectedProvider);
+  const selectedCodexFastModeEnabled =
+    selectedProvider === "codex" ? composerDraft.codexFastMode : false;
+  const selectedOpencodeVariant = selectedProvider === "opencode" ? composerDraft.opencodeVariant : null;
+  const selectedOpencodeAgent = selectedProvider === "opencode" ? composerDraft.opencodeAgent : null;
+  const modelOptionsByProvider = useMemo(
+    () => getCustomModelOptionsByProvider(settings, providerStatuses),
+    [providerStatuses, settings],
+  );
   const selectedModel = useMemo(() => {
     const draftModel = composerDraft.model;
+    const providerOptions = modelOptionsByProvider[selectedProvider];
     if (!draftModel) {
-      return baseThreadModel;
+      return (
+        resolveModelForProviderPicker(selectedProvider, baseThreadModel, providerOptions) ??
+        (baseThreadModel as ModelSlug)
+      );
     }
-    return resolveAppModelSelection(
-      selectedProvider,
-      customModelsForSelectedProvider,
-      draftModel,
-    ) as ModelSlug;
-  }, [baseThreadModel, composerDraft.model, customModelsForSelectedProvider, selectedProvider]);
+    return (
+      resolveModelForProviderPicker(selectedProvider, draftModel, providerOptions) ??
+      (baseThreadModel as ModelSlug)
+    );
+  }, [baseThreadModel, composerDraft.model, modelOptionsByProvider, selectedProvider]);
+  const selectedOpencodeModelCapabilities =
+    selectedProvider === "opencode"
+      ? (providerStatuses
+          .find((provider) => provider.provider === "opencode")
+          ?.models?.find((model) => model.slug === selectedModel)?.capabilities ?? null)
+      : null;
   const newThreadSuggestionsCwd = activeThread?.worktreePath ?? activeProject?.cwd ?? null;
   const newThreadGitStatusQuery = useQuery(gitStatusQueryOptions(newThreadSuggestionsCwd));
   const shouldShowNewThreadSuggestions =
@@ -812,24 +837,31 @@ export default function ChatView({
     newThreadSuggestionCount === 0;
   const reasoningOptions = getReasoningEffortOptions(selectedProvider);
   const supportsReasoningEffort = reasoningOptions.length > 0;
-  const selectedEffort = composerDraft.effort ?? getDefaultReasoningEffort(selectedProvider);
-  const selectedCodexFastModeEnabled =
-    selectedProvider === "codex" ? composerDraft.codexFastMode : false;
   const selectedModelOptionsForDispatch = useMemo(() => {
-    if (selectedProvider !== "codex") {
-      return undefined;
+    if (selectedProvider === "codex") {
+      const codexOptions = {
+        ...(supportsReasoningEffort && selectedEffort ? { reasoningEffort: selectedEffort } : {}),
+        ...(selectedCodexFastModeEnabled ? { fastMode: true } : {}),
+      };
+      return Object.keys(codexOptions).length > 0 ? { codex: codexOptions } : undefined;
     }
-    const codexOptions = {
-      ...(supportsReasoningEffort && selectedEffort ? { reasoningEffort: selectedEffort } : {}),
-      ...(selectedCodexFastModeEnabled ? { fastMode: true } : {}),
-    };
-    return Object.keys(codexOptions).length > 0 ? { codex: codexOptions } : undefined;
-  }, [selectedCodexFastModeEnabled, selectedEffort, selectedProvider, supportsReasoningEffort]);
+    if (selectedProvider === "opencode") {
+      const opencodeOptions = {
+        ...(selectedOpencodeVariant ? { variant: selectedOpencodeVariant } : {}),
+        ...(selectedOpencodeAgent ? { agent: selectedOpencodeAgent } : {}),
+      };
+      return Object.keys(opencodeOptions).length > 0 ? { opencode: opencodeOptions } : undefined;
+    }
+    return undefined;
+  }, [
+    selectedCodexFastModeEnabled,
+    selectedEffort,
+    selectedOpencodeAgent,
+    selectedOpencodeVariant,
+    selectedProvider,
+    supportsReasoningEffort,
+  ]);
   const selectedModelForPicker = selectedModel;
-  const modelOptionsByProvider = useMemo(
-    () => getCustomModelOptionsByProvider(settings),
-    [settings],
-  );
   const selectedModelForPickerWithCustomFallback = useMemo(() => {
     const currentOptions = modelOptionsByProvider[selectedProvider];
     return currentOptions.some((option) => option.slug === selectedModelForPicker)
@@ -858,10 +890,20 @@ export default function ChatView({
   const isPreparingWorktree = sendPhase === "preparing-worktree";
   const isWorking = phase === "running" || isSendBusy || isConnecting || isRevertingCheckpoint;
   const nowIso = new Date(nowTick).toISOString();
+  const allThreads = useStore((store) => store.threads);
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
-  const workLogEntries = useMemo(
+  const rawWorkLogEntries = useMemo(
     () => deriveWorkLogEntries(threadActivities, activeLatestTurn?.turnId ?? undefined),
     [activeLatestTurn?.turnId, threadActivities],
+  );
+  const workLogEntries = useMemo(
+    () =>
+      enrichSubagentWorkEntries({
+        entries: rawWorkLogEntries,
+        parentThreadId: activeThread?.id ?? null,
+        threads: allThreads,
+      }),
+    [activeThread?.id, allThreads, rawWorkLogEntries],
   );
   const latestTurnHasToolActivity = useMemo(
     () => hasToolActivityForTurn(threadActivities, activeLatestTurn?.turnId),
@@ -1236,7 +1278,6 @@ export default function ChatView({
     if (localBranch) return localBranch.name;
     return branches[0]?.name ?? null;
   }, [branchesQuery.data?.branches]);
-  const serverConfigQuery = useQuery(serverConfigQueryOptions());
   const composerDiscoveryCwd = resolveProviderDiscoveryCwd({
     activeThreadWorktreePath: activeThread?.worktreePath ?? null,
     activeProjectCwd: activeProject?.cwd ?? null,
@@ -1288,8 +1329,10 @@ export default function ChatView({
     [providerNativeCommands],
   );
   const supportsFastSlashCommand = selectedProvider === "codex";
-  const canOfferReviewCommand = selectedProvider === "codex";
-  const canOfferForkCommand = selectedProvider === "codex";
+  const canOfferReviewCommand =
+    selectedProvider === "codex" || selectedProvider === "opencode";
+  const canOfferForkCommand =
+    selectedProvider === "codex" || selectedProvider === "opencode";
   const providerSkills = providerSkillsQuery.data?.skills ?? EMPTY_PROVIDER_SKILLS;
   const composerMenuItems = useComposerCommandMenuItems({
     composerTrigger,
@@ -1321,7 +1364,6 @@ export default function ChatView({
   );
   const keybindings = serverConfigQuery.data?.keybindings ?? EMPTY_KEYBINDINGS;
   const availableEditors = serverConfigQuery.data?.availableEditors ?? EMPTY_AVAILABLE_EDITORS;
-  const providerStatuses = serverConfigQuery.data?.providers ?? EMPTY_PROVIDER_STATUSES;
   const activeProvider = activeThread?.session?.provider ?? "codex";
   const activeProviderStatus = useMemo(
     () => providerStatuses.find((status) => status.provider === activeProvider) ?? null,
@@ -3397,24 +3439,18 @@ export default function ChatView({
         return;
       }
       setComposerDraftProvider(activeThread.id, provider);
-      setComposerDraftModel(
-        activeThread.id,
-        resolveAppModelSelection(
-          provider,
-          provider === "opencode" ? settings.customOpencodeModels : settings.customCodexModels,
-          model,
-        ),
-      );
+      const resolvedModel =
+        resolveModelForProviderPicker(provider, model, modelOptionsByProvider[provider]) ?? model;
+      setComposerDraftModel(activeThread.id, resolvedModel);
       scheduleComposerFocus();
     },
     [
       activeThread,
       lockedProvider,
+      modelOptionsByProvider,
       scheduleComposerFocus,
       setComposerDraftModel,
       setComposerDraftProvider,
-      settings.customCodexModels,
-      settings.customOpencodeModels,
     ],
   );
   const onEffortSelect = useCallback(
@@ -3431,7 +3467,79 @@ export default function ChatView({
     },
     [scheduleComposerFocus, setComposerDraftCodexFastMode, threadId],
   );
+  const onOpencodeVariantChange = useCallback(
+    (variant: string) => {
+      setComposerDraftOpencodeVariant(threadId, variant);
+      scheduleComposerFocus();
+    },
+    [scheduleComposerFocus, setComposerDraftOpencodeVariant, threadId],
+  );
+  const onOpencodeAgentChange = useCallback(
+    (agent: string) => {
+      setComposerDraftOpencodeAgent(threadId, agent);
+      scheduleComposerFocus();
+    },
+    [scheduleComposerFocus, setComposerDraftOpencodeAgent, threadId],
+  );
   const compactTraitsMenuContent = useMemo(() => {
+    if (selectedProvider === "opencode") {
+      const variantOptions = selectedOpencodeModelCapabilities?.variantOptions ?? [];
+      const agentOptions = selectedOpencodeModelCapabilities?.agentOptions ?? [];
+      if (variantOptions.length === 0 && agentOptions.length === 0) {
+        return null;
+      }
+      return (
+        <>
+          {variantOptions.length > 0 ? (
+            <>
+              <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Variant</div>
+              <MenuRadioGroup
+                value={
+                  selectedOpencodeVariant ??
+                  variantOptions.find((option) => option.isDefault)?.value ??
+                  ""
+                }
+                onValueChange={(value) => {
+                  if (!value) return;
+                  onOpencodeVariantChange(value);
+                }}
+              >
+                {variantOptions.map((option) => (
+                  <MenuRadioItem key={option.value} value={option.value}>
+                    {option.label}
+                    {option.isDefault ? " (default)" : ""}
+                  </MenuRadioItem>
+                ))}
+              </MenuRadioGroup>
+            </>
+          ) : null}
+          {variantOptions.length > 0 && agentOptions.length > 0 ? <MenuDivider /> : null}
+          {agentOptions.length > 0 ? (
+            <>
+              <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Agent</div>
+              <MenuRadioGroup
+                value={
+                  selectedOpencodeAgent ??
+                  agentOptions.find((option) => option.isDefault)?.value ??
+                  ""
+                }
+                onValueChange={(value) => {
+                  if (!value) return;
+                  onOpencodeAgentChange(value);
+                }}
+              >
+                {agentOptions.map((option) => (
+                  <MenuRadioItem key={option.value} value={option.value}>
+                    {option.label}
+                    {option.isDefault ? " (default)" : ""}
+                  </MenuRadioItem>
+                ))}
+              </MenuRadioGroup>
+            </>
+          ) : null}
+        </>
+      );
+    }
     if (selectedProvider !== "codex" || selectedEffort == null) {
       return null;
     }
@@ -3471,9 +3579,15 @@ export default function ChatView({
   }, [
     onCodexFastModeChange,
     onEffortSelect,
+    onOpencodeAgentChange,
+    onOpencodeVariantChange,
     reasoningOptions,
     selectedCodexFastModeEnabled,
     selectedEffort,
+    selectedOpencodeAgent,
+    selectedOpencodeModelCapabilities?.agentOptions,
+    selectedOpencodeModelCapabilities?.variantOptions,
+    selectedOpencodeVariant,
     selectedProvider,
   ]);
   const onEnvModeChange = useCallback(
@@ -4342,6 +4456,12 @@ export default function ChatView({
               onRevertUserMessage={onRevertUserMessage}
               isRevertingCheckpoint={isRevertingCheckpoint}
               onImageExpand={onExpandTimelineImage}
+              onOpenThread={(threadId) => {
+                void navigate({
+                  to: "/$threadId",
+                  params: { threadId },
+                });
+              }}
               markdownCwd={gitCwd ?? undefined}
               resolvedTheme={resolvedTheme}
               workspaceRoot={activeProject?.cwd ?? undefined}
@@ -4697,6 +4817,7 @@ export default function ChatView({
                 >
                   <ComposerExtrasMenu
                     interactionMode={interactionMode}
+                    showInteractionModeToggle={selectedProvider !== "opencode"}
                     supportsFastMode={selectedProvider === "codex"}
                     fastModeEnabled={selectedCodexFastModeEnabled}
                     onAddPhotos={addComposerImages}
@@ -4721,6 +4842,7 @@ export default function ChatView({
                     <CompactComposerControlsMenu
                       traitsMenuContent={compactTraitsMenuContent}
                       interactionMode={interactionMode}
+                      showInteractionModeToggle={selectedProvider !== "opencode"}
                       onToggleInteractionMode={toggleInteractionMode}
                       {...(showRuntimeControlInComposer
                         ? {
@@ -4745,28 +4867,47 @@ export default function ChatView({
                           />
                         </>
                       ) : null}
+                      {selectedProvider === "opencode" &&
+                      ((selectedOpencodeModelCapabilities?.variantOptions?.length ?? 0) > 0 ||
+                        (selectedOpencodeModelCapabilities?.agentOptions?.length ?? 0) > 0) ? (
+                        <>
+                          <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
+                          <OpenCodeTraitsPicker
+                            variantOptions={selectedOpencodeModelCapabilities?.variantOptions ?? []}
+                            agentOptions={selectedOpencodeModelCapabilities?.agentOptions ?? []}
+                            selectedVariant={selectedOpencodeVariant}
+                            selectedAgent={selectedOpencodeAgent}
+                            onVariantChange={onOpencodeVariantChange}
+                            onAgentChange={onOpencodeAgentChange}
+                          />
+                        </>
+                      ) : null}
 
                       {/* Divider */}
-                      <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
+                      {selectedProvider !== "opencode" ? (
+                        <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
+                      ) : null}
 
                       {/* Interaction mode toggle */}
-                      <Button
-                        variant="ghost"
-                        className="shrink-0 whitespace-nowrap px-2 text-muted-foreground/70 hover:text-foreground/80 sm:px-3"
-                        size="sm"
-                        type="button"
-                        onClick={toggleInteractionMode}
-                        title={
-                          interactionMode === "plan"
-                            ? "Plan mode — click to return to normal chat mode"
-                            : "Default mode — click to enter plan mode"
-                        }
-                      >
-                        <BotIcon />
-                        <span className="sr-only sm:not-sr-only">
-                          {interactionMode === "plan" ? "Plan" : "Chat"}
-                        </span>
-                      </Button>
+                      {selectedProvider !== "opencode" ? (
+                        <Button
+                          variant="ghost"
+                          className="shrink-0 whitespace-nowrap px-2 text-muted-foreground/70 hover:text-foreground/80 sm:px-3"
+                          size="sm"
+                          type="button"
+                          onClick={toggleInteractionMode}
+                          title={
+                            interactionMode === "plan"
+                              ? "Plan mode — click to return to normal chat mode"
+                              : "Default mode — click to enter plan mode"
+                          }
+                        >
+                          <BotIcon />
+                          <span className="sr-only sm:not-sr-only">
+                            {interactionMode === "plan" ? "Plan" : "Chat"}
+                          </span>
+                        </Button>
+                      ) : null}
 
                       {showRuntimeControlInComposer ? (
                         <>
@@ -5782,10 +5923,15 @@ function getCustomModelOptionsByProvider(settings: {
   customCodexModels: readonly string[];
   customOpencodeModels: readonly string[];
   customClaudeModels: readonly string[];
-}): Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>> {
+}, providerStatuses: readonly ServerProviderStatus[]): Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>> {
+  const opencodeProvider = providerStatuses.find((provider) => provider.provider === "opencode");
+  const opencodeOptions =
+    opencodeProvider?.models && opencodeProvider.models.length > 0
+      ? opencodeProvider.models.map((model) => ({ slug: model.slug, name: model.name }))
+      : getAppModelOptions("opencode", settings.customOpencodeModels);
   return {
     codex: getAppModelOptions("codex", settings.customCodexModels),
-    opencode: getAppModelOptions("opencode", settings.customOpencodeModels),
+    opencode: opencodeOptions,
     claudeAgent: getAppModelOptions("claudeAgent", settings.customClaudeModels),
   };
 }
@@ -5893,39 +6039,41 @@ const ProviderModelPicker = memo(function ProviderModelPicker(props: {
                 />
                 {option.label}
               </MenuSubTrigger>
-              <MenuSubPopup className="[--available-height:min(24rem,70vh)]">
-                <MenuGroup>
-                  <MenuRadioGroup
-                    value={props.provider === option.value ? props.model : ""}
-                    onValueChange={(value) => {
-                      if (props.disabled) return;
-                      if (isDisabledByProviderLock) return;
-                      if (!value) return;
-                      const resolvedModel = resolveModelForProviderPicker(
-                        option.value,
-                        value,
-                        props.modelOptionsByProvider[option.value],
-                      );
-                      if (!resolvedModel) return;
-                      props.onProviderModelChange(option.value, resolvedModel);
-                      setIsMenuOpen(false);
-                    }}
-                  >
-                    {props.modelOptionsByProvider[option.value].map((modelOption) => (
-                      <MenuRadioItem
-                        key={`${option.value}:${modelOption.slug}`}
-                        value={modelOption.slug}
-                        onClick={() => setIsMenuOpen(false)}
-                      >
-                        {option.value === "codex" &&
-                        shouldShowFastTierIcon(modelOption.slug, props.serviceTierSetting) ? (
-                          <ZapIcon className="size-3.5 shrink-0 text-amber-500" />
-                        ) : null}
-                        {modelOption.name}
-                      </MenuRadioItem>
-                    ))}
-                  </MenuRadioGroup>
-                </MenuGroup>
+              <MenuSubPopup className="[--available-height:min(24rem,70vh)] max-h-[min(var(--available-height),24rem)]">
+                <div className="max-h-[min(var(--available-height),24rem)] overflow-y-auto overscroll-contain">
+                  <MenuGroup>
+                    <MenuRadioGroup
+                      value={props.provider === option.value ? props.model : ""}
+                      onValueChange={(value) => {
+                        if (props.disabled) return;
+                        if (isDisabledByProviderLock) return;
+                        if (!value) return;
+                        const resolvedModel = resolveModelForProviderPicker(
+                          option.value,
+                          value,
+                          props.modelOptionsByProvider[option.value],
+                        );
+                        if (!resolvedModel) return;
+                        props.onProviderModelChange(option.value, resolvedModel);
+                        setIsMenuOpen(false);
+                      }}
+                    >
+                      {props.modelOptionsByProvider[option.value].map((modelOption) => (
+                        <MenuRadioItem
+                          key={`${option.value}:${modelOption.slug}`}
+                          value={modelOption.slug}
+                          onClick={() => setIsMenuOpen(false)}
+                        >
+                          {option.value === "codex" &&
+                          shouldShowFastTierIcon(modelOption.slug, props.serviceTierSetting) ? (
+                            <ZapIcon className="size-3.5 shrink-0 text-amber-500" />
+                          ) : null}
+                          {modelOption.name}
+                        </MenuRadioItem>
+                      ))}
+                    </MenuRadioGroup>
+                  </MenuGroup>
+                </div>
               </MenuSubPopup>
             </MenuSub>
           );
@@ -6035,6 +6183,100 @@ const CodexTraitsPicker = memo(function CodexTraitsPicker(props: {
             <MenuRadioItem value="on">on</MenuRadioItem>
           </MenuRadioGroup>
         </MenuGroup>
+      </MenuPopup>
+    </Menu>
+  );
+});
+
+const OpenCodeTraitsPicker = memo(function OpenCodeTraitsPicker(props: {
+  variantOptions: ReadonlyArray<{ value: string; label: string; isDefault?: boolean | undefined }>;
+  agentOptions: ReadonlyArray<{ value: string; label: string; isDefault?: boolean | undefined }>;
+  selectedVariant: string | null;
+  selectedAgent: string | null;
+  onVariantChange: (value: string) => void;
+  onAgentChange: (value: string) => void;
+}) {
+  const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const selectedVariantLabel =
+    props.variantOptions.find((option) => option.value === props.selectedVariant)?.label ??
+    props.variantOptions.find((option) => option.isDefault)?.label ??
+    "Default";
+  const selectedAgentLabel =
+    props.agentOptions.find((option) => option.value === props.selectedAgent)?.label ??
+    props.agentOptions.find((option) => option.isDefault)?.label;
+  const triggerLabel = [selectedVariantLabel, ...(selectedAgentLabel ? [selectedAgentLabel] : [])]
+    .filter(Boolean)
+    .join(" · ");
+
+  return (
+    <Menu
+      open={isMenuOpen}
+      onOpenChange={(open) => {
+        setIsMenuOpen(open);
+      }}
+    >
+      <MenuTrigger
+        render={
+          <Button
+            size="sm"
+            variant="ghost"
+            className="shrink-0 whitespace-nowrap px-2 text-muted-foreground/70 hover:text-foreground/80 sm:px-3"
+          />
+        }
+      >
+        <span>{triggerLabel}</span>
+        <ChevronDownIcon aria-hidden="true" className="size-3 opacity-60" />
+      </MenuTrigger>
+      <MenuPopup align="start">
+        {props.variantOptions.length > 0 ? (
+          <>
+            <MenuGroup>
+              <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Variant</div>
+              <MenuRadioGroup
+                value={
+                  props.selectedVariant ??
+                  props.variantOptions.find((option) => option.isDefault)?.value ??
+                  ""
+                }
+                onValueChange={(value) => {
+                  if (!value) return;
+                  props.onVariantChange(value);
+                }}
+              >
+                {props.variantOptions.map((option) => (
+                  <MenuRadioItem key={option.value} value={option.value}>
+                    {option.label}
+                    {option.isDefault ? " (default)" : ""}
+                  </MenuRadioItem>
+                ))}
+              </MenuRadioGroup>
+            </MenuGroup>
+            {props.agentOptions.length > 0 ? <MenuDivider /> : null}
+          </>
+        ) : null}
+        {props.agentOptions.length > 0 ? (
+          <MenuGroup>
+            <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Agent</div>
+            <MenuRadioGroup
+              value={
+                props.selectedAgent ??
+                props.agentOptions.find((option) => option.isDefault)?.value ??
+                ""
+              }
+              onValueChange={(value) => {
+                if (!value) return;
+                props.onAgentChange(value);
+              }}
+            >
+              {props.agentOptions.map((option) => (
+                <MenuRadioItem key={option.value} value={option.value}>
+                  {option.label}
+                  {option.isDefault ? " (default)" : ""}
+                </MenuRadioItem>
+              ))}
+            </MenuRadioGroup>
+          </MenuGroup>
+        ) : null}
       </MenuPopup>
     </Menu>
   );

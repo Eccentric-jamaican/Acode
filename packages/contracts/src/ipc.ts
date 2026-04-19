@@ -40,6 +40,7 @@ import type {
   ServerConfig,
   ServerErrorInboxUpdatedPayload,
   ServerGetErrorInboxResult,
+  ServerGetSettingsResult,
   ServerLogoutProviderInput,
   ServerLogoutProviderResult,
   ServerSuggestNewThreadTasksInput,
@@ -52,6 +53,8 @@ import type {
   ServerSetErrorInboxEntryResolutionResult,
   ServerStartProviderLoginInput,
   ServerStartProviderLoginResult,
+  ServerUpdateSettingsInput,
+  ServerUpdateSettingsResult,
 } from "./server";
 import type {
   TerminalClearInput,
@@ -71,7 +74,10 @@ import type {
   OrchestrationGetTurnDiffResult,
   OrchestrationEvent,
   OrchestrationReadModel,
+  ProviderApprovalDecision,
 } from "./orchestration";
+import type { ApprovalRequestId, ProjectId, ThreadId } from "./baseSchemas";
+import type { UserInputQuestion } from "./providerRuntime";
 import { EditorId } from "./editor";
 import type {
   ProviderComposerCapabilities,
@@ -132,9 +138,85 @@ export interface DesktopWindowChromeMetrics {
 }
 
 export interface DesktopNotificationInput {
+  kind: "turn_completed" | "user_input_required" | "approval_required";
+  notificationId: string;
+  threadId: ThreadId;
+  projectId: ProjectId;
   title: string;
   body: string;
   silent?: boolean;
+}
+
+export interface DesktopNotificationQuestionOption {
+  id: string;
+  label: string;
+  description: string;
+}
+
+export interface DesktopNotificationQuestion
+  extends Omit<UserInputQuestion, "options"> {
+  options: ReadonlyArray<DesktopNotificationQuestionOption>;
+}
+
+export interface DesktopTurnCompletedNotificationInput
+  extends DesktopNotificationInput {
+  kind: "turn_completed";
+}
+
+export interface DesktopApprovalRequiredNotificationInput
+  extends DesktopNotificationInput {
+  kind: "approval_required";
+  requestId: ApprovalRequestId;
+  requestKind: "command" | "file-read" | "file-change";
+  detail?: string;
+}
+
+export interface DesktopUserInputRequiredNotificationInput
+  extends DesktopNotificationInput {
+  kind: "user_input_required";
+  requestId: ApprovalRequestId;
+  questions: ReadonlyArray<DesktopNotificationQuestion>;
+}
+
+export type DesktopNotificationPayload =
+  | DesktopTurnCompletedNotificationInput
+  | DesktopApprovalRequiredNotificationInput
+  | DesktopUserInputRequiredNotificationInput;
+
+export type DesktopNotificationAction =
+  | {
+      kind: "open_thread";
+      notificationId: string;
+      threadId: ThreadId;
+      projectId: ProjectId;
+    }
+  | {
+      kind: "approval_response";
+      notificationId: string;
+      threadId: ThreadId;
+      projectId: ProjectId;
+      requestId: ApprovalRequestId;
+      decision: ProviderApprovalDecision;
+    }
+  | {
+      kind: "user_input_response";
+      notificationId: string;
+      threadId: ThreadId;
+      projectId: ProjectId;
+      requestId: ApprovalRequestId;
+      answers: Record<string, string>;
+    };
+
+export interface DesktopNotificationFallbackAction {
+  type: "open-thread";
+  label: string;
+}
+
+export interface DesktopNotificationFallbackInput {
+  title: string;
+  body: string;
+  silent?: boolean;
+  action?: DesktopNotificationFallbackAction;
 }
 
 export interface DesktopBridge {
@@ -154,7 +236,9 @@ export interface DesktopBridge {
   onUpdateState: (listener: (state: DesktopUpdateState) => void) => () => void;
   notifications: {
     isSupported: () => Promise<boolean>;
-    show: (input: DesktopNotificationInput) => Promise<boolean>;
+    show: (input: DesktopNotificationPayload) => Promise<boolean>;
+    onAction: (listener: (action: DesktopNotificationAction) => void) => () => void;
+    consumePendingActions: () => Promise<DesktopNotificationAction[]>;
   };
   browser: {
     getState: (input: BrowserProjectInput) => Promise<BrowserSessionSnapshot>;
@@ -218,6 +302,7 @@ export interface NativeApi {
   };
   server: {
     getConfig: () => Promise<ServerConfig>;
+    getSettings: () => Promise<ServerGetSettingsResult>;
     getErrorInbox: () => Promise<ServerGetErrorInboxResult>;
     reportClientDiagnostic: (
       input: ServerReportClientDiagnosticInput,
@@ -239,6 +324,7 @@ export interface NativeApi {
     suggestNewThreadTasks: (
       input: ServerSuggestNewThreadTasksInput,
     ) => Promise<ServerSuggestNewThreadTasksResult>;
+    updateSettings: (input: ServerUpdateSettingsInput) => Promise<ServerUpdateSettingsResult>;
     onErrorInboxUpdated: (callback: (payload: ServerErrorInboxUpdatedPayload) => void) => () => void;
   };
   provider: {

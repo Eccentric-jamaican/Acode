@@ -10,12 +10,18 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, protocol, shell
 import type { MenuItemConstructorOptions } from "electron";
 import * as Effect from "effect/Effect";
 import type {
+  ApprovalRequestId,
   BrowserInspectCapture,
   BrowserPaneBounds,
   BrowserRuntimeEvent,
+  DesktopNotificationAction,
+  DesktopNotificationFallbackInput,
+  DesktopNotificationPayload,
+  DesktopNotificationQuestion,
   DesktopUpdateActionResult,
   DesktopUpdateState,
   ProjectId,
+  ThreadId,
 } from "@t3tools/contracts";
 import { autoUpdater } from "electron-updater";
 
@@ -63,6 +69,8 @@ const UPDATE_DOWNLOAD_CHANNEL = "desktop:update-download";
 const UPDATE_INSTALL_CHANNEL = "desktop:update-install";
 const NOTIFICATIONS_IS_SUPPORTED_CHANNEL = "desktop:notifications-is-supported";
 const NOTIFICATIONS_SHOW_CHANNEL = "desktop:notifications-show";
+const NOTIFICATIONS_ACTION_CHANNEL = "desktop:notifications-action";
+const NOTIFICATIONS_CONSUME_PENDING_ACTIONS_CHANNEL = "desktop:notifications-consume-pending-actions";
 const BROWSER_GET_STATE_CHANNEL = "desktop:browser-get-state";
 const BROWSER_OPEN_CHANNEL = "desktop:browser-open";
 const BROWSER_CLOSE_PANE_CHANNEL = "desktop:browser-close-pane";
@@ -89,9 +97,30 @@ const ELECTRON_USER_DATA_DIR =
   process.env.T3CODE_ELECTRON_USER_DATA_DIR?.trim() ||
   Path.join(app.getPath("appData"), APP_DISPLAY_NAME);
 const DESKTOP_SCHEME = "t3";
-const ROOT_DIR = Path.resolve(__dirname, "../../..");
+function resolveExplicitDevRoot(): string | null {
+  const commandLineValue = app.commandLine.getSwitchValue("t3code-dev-root")?.trim();
+  if (commandLineValue) {
+    return Path.resolve(commandLineValue);
+  }
+
+  for (const argument of process.argv) {
+    if (!argument.startsWith("--t3code-dev-root=")) {
+      continue;
+    }
+    const value = argument.slice("--t3code-dev-root=".length).trim();
+    if (value.length === 0) {
+      continue;
+    }
+    return Path.resolve(value);
+  }
+  return null;
+}
+
+const EXPLICIT_DEV_ROOT = resolveExplicitDevRoot();
+const ROOT_DIR = EXPLICIT_DEV_ROOT ?? Path.resolve(__dirname, "../../..");
 const COMMIT_HASH_PATTERN = /^[0-9a-f]{7,40}$/i;
 const COMMIT_HASH_DISPLAY_LENGTH = 12;
+const WINDOWS_TOAST_ACTIVATOR_CLSID = "{5F94EA7E-6646-4B11-9AA6-4C80A88E1D1A}";
 const LOG_DIR = Path.join(STATE_DIR, "logs");
 const LOG_FILE_MAX_BYTES = 10 * 1024 * 1024;
 const LOG_FILE_MAX_FILES = 10;
@@ -122,6 +151,8 @@ let aboutCommitHashCache: string | null | undefined;
 let desktopLogSink: RotatingFileSink | null = null;
 let backendLogSink: RotatingFileSink | null = null;
 let restoreStdIoCapture: (() => void) | null = null;
+const pendingDesktopNotificationActions: DesktopNotificationAction[] = [];
+let windowsRichToastDisabledForSession: string | null = null;
 
 let destructiveMenuIconCache: Electron.NativeImage | null | undefined;
 const browserRuntimeRegistry = new BrowserRuntimeRegistry({
@@ -180,6 +211,280 @@ function asRecord(value: unknown): Record<string, unknown> {
     throw new Error("Expected an object payload.");
   }
   return value as Record<string, unknown>;
+}
+
+function readWindowsLastNotificationAddedTime(appId: string): number | null {
+  if (process.platform !== "win32") {
+    return null;
+  }
+
+  const registryPath = `HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings\\${appId}`;
+  const result = ChildProcess.spawnSync("reg.exe", ["query", registryPath, "/v", "LastNotificationAddedTime"], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (result.status !== 0) {
+    return null;
+  }
+
+  const output = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  const match = output.match(/LastNotificationAddedTime\s+REG_QWORD\s+0x([0-9a-f]+)/i);
+  if (!match?.[1]) {
+    return null;
+  }
+
+  try {
+    return Number.parseInt(match[1], 16);
+  } catch {
+    return null;
+  }
+}
+
+function readOptionalString(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key];
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function readRequiredString(record: Record<string, unknown>, key: string): string {
+  const value = readOptionalString(record, key);
+  if (!value) {
+    throw new Error(`${key} must be a non-empty string.`);
+  }
+  return value;
+}
+
+function readBoolean(record: Record<string, unknown>, key: string): boolean {
+  return record[key] === true;
+}
+
+function readNotificationQuestion(
+  rawQuestion: unknown,
+  questionIndex: number,
+): DesktopNotificationQuestion {
+  const question = asRecord(rawQuestion);
+  const rawOptions = question.options;
+  if (!Array.isArray(rawOptions) || rawOptions.length === 0) {
+    throw new Error(`questions[${questionIndex}].options must be a non-empty array.`);
+  }
+
+  return {
+    id: readRequiredString(question, "id"),
+    header: readRequiredString(question, "header"),
+    question: readRequiredString(question, "question"),
+    options: rawOptions.map((rawOption) => {
+      const option = asRecord(rawOption);
+      return {
+        id: readRequiredString(option, "id"),
+        label: readRequiredString(option, "label"),
+        description: readRequiredString(option, "description"),
+      };
+    }),
+  };
+}
+
+function parseDesktopNotificationPayload(rawInput: unknown): DesktopNotificationPayload {
+  const input = asRecord(rawInput);
+  const kind = readRequiredString(input, "kind");
+  const base = {
+    notificationId: readRequiredString(input, "notificationId"),
+    threadId: readRequiredString(input, "threadId") as ThreadId,
+    projectId: readRequiredString(input, "projectId") as ProjectId,
+    title: readRequiredString(input, "title"),
+    body: String(input.body ?? ""),
+    ...(readBoolean(input, "silent") ? { silent: true } : {}),
+  };
+
+  if (kind === "turn_completed") {
+    return {
+      kind,
+      ...base,
+    };
+  }
+
+  if (kind === "approval_required") {
+    const requestKind = readRequiredString(input, "requestKind");
+    if (
+      requestKind !== "command" &&
+      requestKind !== "file-read" &&
+      requestKind !== "file-change"
+    ) {
+      throw new Error("requestKind must be command, file-read, or file-change.");
+    }
+    const detail = readOptionalString(input, "detail");
+    return {
+      ...base,
+      kind,
+      requestId: readRequiredString(input, "requestId") as ApprovalRequestId,
+      requestKind,
+      ...(detail ? { detail } : {}),
+    };
+  }
+
+  if (kind === "user_input_required") {
+    const rawQuestions = input.questions;
+    if (!Array.isArray(rawQuestions) || rawQuestions.length === 0) {
+      throw new Error("questions must be a non-empty array.");
+    }
+    return {
+      ...base,
+      kind,
+      requestId: readRequiredString(input, "requestId") as ApprovalRequestId,
+      questions: rawQuestions.map(readNotificationQuestion),
+    };
+  }
+
+  throw new Error(`Unsupported notification kind: ${kind}`);
+}
+
+function emitDesktopNotificationAction(action: DesktopNotificationAction): void {
+  pendingDesktopNotificationActions.push(action);
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (window.isDestroyed()) continue;
+    window.webContents.send(NOTIFICATIONS_ACTION_CHANNEL, action);
+  }
+}
+
+function consumePendingDesktopNotificationActions(): DesktopNotificationAction[] {
+  const pending = [...pendingDesktopNotificationActions];
+  pendingDesktopNotificationActions.length = 0;
+  return pending;
+}
+
+function focusMainWindow(): void {
+  const window = mainWindow ?? BrowserWindow.getAllWindows()[0] ?? null;
+  if (!window || window.isDestroyed()) {
+    return;
+  }
+  if (window.isMinimized()) {
+    window.restore();
+  }
+  window.show();
+  window.focus();
+}
+
+function buildDesktopNotificationFallbackInput(
+  input: DesktopNotificationPayload,
+): DesktopNotificationFallbackInput {
+  const action =
+    input.kind === "turn_completed" ||
+    input.kind === "approval_required" ||
+    input.kind === "user_input_required"
+      ? { type: "open-thread" as const, label: "Open thread" }
+      : undefined;
+  return {
+    title: input.title,
+    body: input.body,
+    ...(input.silent === true ? { silent: true } : {}),
+    ...(action ? { action } : {}),
+  };
+}
+
+function encodeDesktopNotificationAction(args: Record<string, string>): string {
+  const params = new URLSearchParams(args);
+  return params.toString();
+}
+
+function parseDesktopNotificationActionPayload(serialized: string): Record<string, string> {
+  const params = new URLSearchParams(serialized);
+  return Object.fromEntries(params.entries());
+}
+
+function tryReadNotificationAnswer(
+  rawInput: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const value = rawInput[key];
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function toUserInputResponseAction(
+  input: Extract<DesktopNotificationPayload, { kind: "user_input_required" }>,
+  rawAnswers: Record<string, unknown>,
+): DesktopNotificationAction | null {
+  const answers: Record<string, string> = {};
+  for (const question of input.questions) {
+    const selectionId = tryReadNotificationAnswer(rawAnswers, question.id);
+    if (!selectionId) {
+      return null;
+    }
+    const selected = question.options.find((option) => option.id === selectionId);
+    if (!selected) {
+      return null;
+    }
+    answers[question.id] = selected.label;
+  }
+  return {
+    kind: "user_input_response",
+    notificationId: input.notificationId,
+    threadId: input.threadId,
+    projectId: input.projectId,
+    requestId: input.requestId,
+    answers,
+  };
+}
+
+function handleWindowsToastActivation(
+  input: DesktopNotificationPayload,
+  serializedAction: string,
+  rawNotificationInput: Record<string, unknown>,
+): void {
+  const payload = parseDesktopNotificationActionPayload(serializedAction);
+  const actionKind = payload.action;
+  if (actionKind === "open_thread") {
+    focusMainWindow();
+    emitDesktopNotificationAction({
+      kind: "open_thread",
+      notificationId: input.notificationId,
+      threadId: input.threadId,
+      projectId: input.projectId,
+    });
+    return;
+  }
+  if (actionKind === "approval_response" && input.kind === "approval_required") {
+    const decision = payload.decision;
+    if (decision === "accept" || decision === "decline") {
+      emitDesktopNotificationAction({
+        kind: "approval_response",
+        notificationId: input.notificationId,
+        threadId: input.threadId,
+        projectId: input.projectId,
+        requestId: input.requestId,
+        decision,
+      });
+      return;
+    }
+  }
+  if (actionKind === "user_input_response" && input.kind === "user_input_required") {
+    const action = toUserInputResponseAction(input, rawNotificationInput);
+    if (action) {
+      emitDesktopNotificationAction(action);
+      return;
+    }
+    focusMainWindow();
+    emitDesktopNotificationAction({
+      kind: "open_thread",
+      notificationId: input.notificationId,
+      threadId: input.threadId,
+      projectId: input.projectId,
+    });
+    return;
+  }
+
+  focusMainWindow();
+  emitDesktopNotificationAction({
+    kind: "open_thread",
+    notificationId: input.notificationId,
+    threadId: input.threadId,
+    projectId: input.projectId,
+  });
 }
 
 async function readRequestBody(request: Http.IncomingMessage): Promise<unknown> {
@@ -546,6 +851,9 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 function resolveAppRoot(): string {
+  if (EXPLICIT_DEV_ROOT) {
+    return EXPLICIT_DEV_ROOT;
+  }
   if (!app.isPackaged) {
     return ROOT_DIR;
   }
@@ -689,7 +997,7 @@ function handleFatalStartupError(stage: string, error: unknown): void {
   console.error(`[desktop] fatal startup error (${stage})`, error);
   if (!isQuitting) {
     isQuitting = true;
-    dialog.showErrorBox("T3 Code failed to start", `Stage: ${stage}\n${message}${detail}`);
+    dialog.showErrorBox("A Code failed to start", `Stage: ${stage}\n${message}${detail}`);
   }
   stopBackend();
   restoreStdIoCapture?.();
@@ -882,6 +1190,55 @@ function resolveBrandPngPath(): string | null {
   return FS.existsSync(repoAsset) ? repoAsset : null;
 }
 
+function ensureWindowsToastShortcut(): void {
+  if (process.platform !== "win32" || !app.isReady()) {
+    return;
+  }
+
+  const shortcutPath = Path.join(
+    app.getPath("appData"),
+    "Microsoft",
+    "Windows",
+    "Start Menu",
+    "Programs",
+    `${APP_DISPLAY_NAME}.lnk`,
+  );
+  const shortcutDir = Path.dirname(shortcutPath);
+  const targetPath = process.execPath;
+  const iconPath = resolveIconPath("ico") ?? targetPath;
+  const details = {
+    target: targetPath,
+    cwd: Path.dirname(targetPath),
+    args: "",
+    description: APP_DISPLAY_NAME,
+    icon: iconPath,
+    iconIndex: 0,
+    appUserModelId: APP_DESKTOP_APP_ID,
+    toastActivatorClsid: WINDOWS_TOAST_ACTIVATOR_CLSID,
+  };
+
+  try {
+    FS.mkdirSync(shortcutDir, { recursive: true });
+    const operation = FS.existsSync(shortcutPath) ? "update" : "create";
+    const wroteShortcut = shell.writeShortcutLink(
+      shortcutPath,
+      operation,
+      details,
+    );
+    if (!wroteShortcut) {
+      console.warn(
+        "[desktop-notifications] Failed to persist Windows toast shortcut metadata.",
+        { shortcutPath, operation },
+      );
+    }
+  } catch (error) {
+    console.warn(
+      "[desktop-notifications] Failed to ensure Windows toast shortcut metadata.",
+      error,
+    );
+  }
+}
+
 function configureAppIdentity(): void {
   app.setName(APP_DISPLAY_NAME);
   const commitHash = resolveAboutCommitHash();
@@ -893,6 +1250,12 @@ function configureAppIdentity(): void {
 
   if (process.platform === "win32") {
     app.setAppUserModelId(APP_DESKTOP_APP_ID);
+    try {
+      app.setToastActivatorCLSID(WINDOWS_TOAST_ACTIVATOR_CLSID);
+    } catch (error) {
+      console.warn("[desktop-notifications] Failed to set Toast Activator CLSID.", error);
+    }
+    ensureWindowsToastShortcut();
   }
 
   if (process.platform === "darwin" && app.dock) {
@@ -1001,6 +1364,233 @@ async function installDownloadedUpdate(): Promise<{ accepted: boolean; completed
     console.error(`[desktop-updater] Failed to install update: ${message}`);
     return { accepted: true, completed: false };
   }
+}
+
+function buildWindowsToastActionString(
+  input: DesktopNotificationPayload,
+  action:
+    | { action: "open_thread" }
+    | { action: "approval_response"; decision: "accept" | "decline" }
+    | { action: "user_input_response" },
+): string {
+  return encodeDesktopNotificationAction({
+    action: action.action,
+    notificationId: input.notificationId,
+    threadId: input.threadId,
+    projectId: input.projectId,
+    ...(action.action === "approval_response" ? { decision: action.decision } : {}),
+  });
+}
+
+function createWindowsToastOptions(input: DesktopNotificationPayload): Record<string, unknown> {
+  const iconPath = resolveBrandPngPath() ?? undefined;
+  const baseOptions: Record<string, unknown> = {
+    aumid: APP_DESKTOP_APP_ID,
+    uniqueID: input.notificationId,
+    title: input.title,
+    message: input.body,
+    silent: input.silent,
+    longTime: input.kind !== "turn_completed",
+    keepalive: input.kind === "turn_completed" ? 120 : 600,
+    ...(iconPath ? { icon: iconPath, cropIcon: true } : {}),
+    activation: {
+      type: "background",
+      launch: buildWindowsToastActionString(input, { action: "open_thread" }),
+    },
+  };
+
+  if (input.kind === "approval_required") {
+    return {
+      ...baseOptions,
+      scenario: "reminder",
+      button: [
+        {
+          text: "Approve",
+          activation: {
+            type: "background",
+            launch: buildWindowsToastActionString(input, {
+              action: "approval_response",
+              decision: "accept",
+            }),
+          },
+          style: "success",
+        },
+        {
+          text: "Decline",
+          activation: {
+            type: "background",
+            launch: buildWindowsToastActionString(input, {
+              action: "approval_response",
+              decision: "decline",
+            }),
+          },
+          style: "critical",
+        },
+        {
+          text: "Open thread",
+          activation: {
+            type: "background",
+            launch: buildWindowsToastActionString(input, { action: "open_thread" }),
+          },
+        },
+      ],
+    };
+  }
+
+  if (input.kind === "user_input_required") {
+    return {
+      ...baseOptions,
+      scenario: "reminder",
+      select: input.questions.map((question) => ({
+        id: question.id,
+        title: `${question.header}: ${question.question}`,
+        items: question.options.map((option, optionIndex) => ({
+          id: option.id,
+          text: option.label,
+          ...(optionIndex === 0 ? { default: true } : {}),
+        })),
+      })),
+      button: [
+        {
+          text: "Reply",
+          activation: {
+            type: "background",
+            launch: buildWindowsToastActionString(input, { action: "user_input_response" }),
+          },
+        },
+        {
+          text: "Open thread",
+          activation: {
+            type: "background",
+            launch: buildWindowsToastActionString(input, { action: "open_thread" }),
+          },
+        },
+      ],
+    };
+  }
+
+  return {
+    ...baseOptions,
+    button: [
+      {
+        text: "Open thread",
+        activation: {
+          type: "background",
+          launch: buildWindowsToastActionString(input, { action: "open_thread" }),
+        },
+      },
+    ],
+  };
+}
+
+async function showWindowsRichNotification(input: DesktopNotificationPayload): Promise<boolean> {
+  if (process.platform !== "win32" || windowsRichToastDisabledForSession !== null) {
+    return false;
+  }
+
+  try {
+    const previousAddedTime = readWindowsLastNotificationAddedTime(APP_DESKTOP_APP_ID);
+    const { Toast } = await import("powertoast");
+    const toast = new Toast(createWindowsToastOptions(input));
+    toast.on("activated", (event: unknown, rawInput: unknown) => {
+      if (typeof event !== "string" || event.trim().length === 0) {
+        focusMainWindow();
+        emitDesktopNotificationAction({
+          kind: "open_thread",
+          notificationId: input.notificationId,
+          threadId: input.threadId,
+          projectId: input.projectId,
+        });
+        return;
+      }
+      const notificationInput =
+        rawInput && typeof rawInput === "object" ? (rawInput as Record<string, unknown>) : {};
+      handleWindowsToastActivation(input, event, notificationInput);
+    });
+    await toast.show(isDevelopment ? { disableWinRT: true } : undefined);
+    await new Promise((resolve) => {
+      setTimeout(resolve, 900);
+    });
+    const nextAddedTime = readWindowsLastNotificationAddedTime(APP_DESKTOP_APP_ID);
+    const delivered =
+      nextAddedTime !== null &&
+      (previousAddedTime === null || nextAddedTime > previousAddedTime);
+    if (!delivered) {
+      console.warn(
+        "[desktop-notifications] Windows rich toast was not recorded by the shell; falling back.",
+        { notificationId: input.notificationId, kind: input.kind, previousAddedTime, nextAddedTime },
+      );
+    }
+    return delivered;
+  } catch (error) {
+    const message = formatErrorMessage(error);
+    if (
+      /ERR_POWERSHELL|Install-Package|Microsoft\.Windows\.SDK\.NET\.Ref|No package found/i.test(
+        message,
+      )
+    ) {
+      windowsRichToastDisabledForSession = message;
+      console.warn(
+        "[desktop-notifications] Disabling Windows rich toasts for this app session after PowerShell failure.",
+        { message },
+      );
+    }
+    console.warn("[desktop-notifications] Windows rich toast failed; falling back.", error);
+    return false;
+  }
+}
+
+async function showElectronFallbackNotification(
+  input: DesktopNotificationPayload,
+): Promise<boolean> {
+  const { Notification } = await import("electron");
+  if (!Notification.isSupported()) {
+    return false;
+  }
+
+  const fallback = buildDesktopNotificationFallbackInput(input);
+  const notification = {
+    title: fallback.title,
+    body: fallback.body,
+    ...(fallback.silent === true ? { silent: true } : {}),
+    ...(fallback.action
+      ? { actions: [{ type: "button" as const, text: fallback.action.label }] }
+      : {}),
+    ...getIconOption(),
+  };
+
+  try {
+    const notif = new Notification(notification);
+    notif.on("click", () => {
+      focusMainWindow();
+      emitDesktopNotificationAction({
+        kind: "open_thread",
+        notificationId: input.notificationId,
+        threadId: input.threadId,
+        projectId: input.projectId,
+      });
+    });
+    notif.on("action", () => {
+      focusMainWindow();
+      emitDesktopNotificationAction({
+        kind: "open_thread",
+        notificationId: input.notificationId,
+        threadId: input.threadId,
+        projectId: input.projectId,
+      });
+    });
+    notif.show();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function showDesktopNotification(input: DesktopNotificationPayload): Promise<boolean> {
+  if (await showWindowsRichNotification(input)) {
+    return true;
+  }
+  return showElectronFallbackNotification(input);
 }
 
 function configureAutoUpdater(): void {
@@ -1444,33 +2034,14 @@ function registerIpcHandlers(): void {
 
   ipcMain.removeHandler(NOTIFICATIONS_SHOW_CHANNEL);
   ipcMain.handle(NOTIFICATIONS_SHOW_CHANNEL, async (_event, rawInput: unknown) => {
-    const input = asRecord(rawInput);
-    const title = String(input.title ?? "Notification");
-    const body = String(input.body ?? "");
-    const silent = Boolean(input.silent);
-
-    if (!mainWindow) return false;
-
-    const notification = {
-      title,
-      body,
-      silent,
-    };
-
-    // Use Electron's notification API
-    const { Notification } = await import("electron");
-    if (!Notification.isSupported()) {
-      return false;
-    }
-
-    try {
-      const notif = new Notification(notification);
-      notif.show();
-      return true;
-    } catch {
-      return false;
-    }
+    const input = parseDesktopNotificationPayload(rawInput);
+    return showDesktopNotification(input);
   });
+
+  ipcMain.removeHandler(NOTIFICATIONS_CONSUME_PENDING_ACTIONS_CHANNEL);
+  ipcMain.handle(NOTIFICATIONS_CONSUME_PENDING_ACTIONS_CHANNEL, async () =>
+    consumePendingDesktopNotificationActions(),
+  );
 
   ipcMain.removeHandler(BROWSER_GET_STATE_CHANNEL);
   ipcMain.handle(BROWSER_GET_STATE_CHANNEL, async (_event, rawInput: unknown) =>

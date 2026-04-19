@@ -1050,6 +1050,7 @@ function SingleChatSurface(props: {
 
 function ChatThreadRouteView() {
   const threadsHydrated = useStore((store) => store.threadsHydrated);
+  const hydrationError = useStore((store) => store.hydrationError);
   const navigate = useNavigate();
   const threadId = Route.useParams({
     select: (params) => ThreadId.makeUnsafe(params.threadId),
@@ -1182,7 +1183,7 @@ function ChatThreadRouteView() {
   }, [panelMode]);
 
   if (!threadsHydrated) {
-    return <ChatHomeSurface variant="hydrating" />;
+    return <ChatHomeSurface variant={hydrationError ? "error" : "hydrating"} />;
   }
 
   if (splitView && search.splitViewId) {

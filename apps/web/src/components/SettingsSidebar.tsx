@@ -1,5 +1,6 @@
 import { Link } from "@tanstack/react-router";
 import {
+  ArchiveIcon,
   ArrowLeftIcon,
   BrushIcon,
   KeyboardIcon,
@@ -36,6 +37,8 @@ function settingsSectionIcon(sectionId: SettingsSectionId) {
       return KeyboardIcon;
     case SETTINGS_SECTION_IDS.safety:
       return LockIcon;
+    case SETTINGS_SECTION_IDS.archived:
+      return ArchiveIcon;
     default:
       return Settings2Icon;
   }

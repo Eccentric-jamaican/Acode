@@ -294,6 +294,62 @@ function createDraftOnlySnapshot(): OrchestrationReadModel {
   };
 }
 
+function createChatViewSnapshot(options: {
+  messages: OrchestrationReadModel["threads"][number]["messages"];
+}): OrchestrationReadModel {
+  return {
+    snapshotSequence: 1,
+    projects: [
+      {
+        id: PROJECT_ID,
+        title: "Project",
+        workspaceRoot: "/repo/project",
+        defaultModel: "gpt-5",
+        scripts: [],
+        createdAt: NOW_ISO,
+        updatedAt: NOW_ISO,
+        deletedAt: null,
+      },
+    ],
+    tasks: [],
+    taskRuntimes: [],
+    projectRules: [],
+    threads: [
+      {
+        id: THREAD_ID,
+        projectId: PROJECT_ID,
+        origin: "user",
+        taskId: null,
+        title: "Browser test thread",
+        model: "gpt-5",
+        interactionMode: "default",
+        runtimeMode: "full-access",
+        branch: "main",
+        worktreePath: null,
+        isPinned: false,
+        latestTurn: null,
+        createdAt: NOW_ISO,
+        updatedAt: NOW_ISO,
+        deletedAt: null,
+        messages: options.messages,
+        activities: [],
+        proposedPlans: [],
+        checkpoints: [],
+        session: {
+          threadId: THREAD_ID,
+          status: "ready",
+          providerName: "codex",
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: NOW_ISO,
+        },
+      },
+    ],
+    updatedAt: NOW_ISO,
+  };
+}
+
 function createSelectionFeatureSnapshot(): OrchestrationReadModel {
   return {
     snapshotSequence: 1,
@@ -635,6 +691,132 @@ function createCheckpointRevertSnapshot(): OrchestrationReadModel {
         session: {
           threadId: THREAD_ID,
           status: "ready",
+          providerName: "codex",
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: NOW_ISO,
+        },
+      },
+    ],
+    updatedAt: NOW_ISO,
+  };
+}
+
+function createSubagentTimelineSnapshot(): OrchestrationReadModel {
+  const childThreadId = "subagent:thread-browser-test:child-provider-1" as ThreadId;
+  return {
+    snapshotSequence: 1,
+    projects: [
+      {
+        id: PROJECT_ID,
+        title: "Project",
+        workspaceRoot: "/repo/project",
+        defaultModel: "gpt-5",
+        scripts: [],
+        createdAt: NOW_ISO,
+        updatedAt: NOW_ISO,
+        deletedAt: null,
+      },
+    ],
+    tasks: [],
+    taskRuntimes: [],
+    projectRules: [],
+    threads: [
+      {
+        id: THREAD_ID,
+        projectId: PROJECT_ID,
+        origin: "user",
+        taskId: null,
+        title: "Parent thread",
+        model: "gpt-5",
+        interactionMode: "default",
+        runtimeMode: "full-access",
+        branch: "main",
+        worktreePath: null,
+        isPinned: false,
+        latestTurn: null,
+        createdAt: NOW_ISO,
+        updatedAt: NOW_ISO,
+        deletedAt: null,
+        messages: [
+          createUserMessage({
+            id: "msg-user-subagent-parent" as MessageId,
+            text: "Delegate this search",
+            offsetSeconds: 0,
+          }),
+        ],
+        activities: [
+          {
+            id: EventId.makeUnsafe("activity-subagent-tool"),
+            tone: "tool",
+            kind: "tool.completed",
+            summary: "Delegate to subagent",
+            payload: {
+              itemType: "collab_agent_tool_call",
+              title: "Delegate to subagent",
+              data: {
+                receiverAgents: [
+                  {
+                    threadId: "child-provider-1",
+                    agentId: "agent-1",
+                    agentNickname: "Locke",
+                    agentRole: "explorer",
+                    model: "gpt-5.4-mini",
+                    prompt: "Search the repository",
+                  },
+                ],
+              },
+            },
+            turnId: null,
+            createdAt: isoAt(3),
+          },
+        ],
+        proposedPlans: [],
+        checkpoints: [],
+        session: {
+          threadId: THREAD_ID,
+          status: "ready",
+          providerName: "codex",
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: NOW_ISO,
+        },
+      },
+      {
+        id: childThreadId,
+        projectId: PROJECT_ID,
+        origin: "user",
+        taskId: null,
+        parentThreadId: THREAD_ID,
+        subagentAgentId: "agent-1",
+        subagentNickname: "Locke",
+        subagentRole: "explorer",
+        title: "Locke [explorer]",
+        model: "gpt-5.4-mini",
+        interactionMode: "default",
+        runtimeMode: "full-access",
+        branch: "main",
+        worktreePath: null,
+        isPinned: false,
+        latestTurn: null,
+        createdAt: NOW_ISO,
+        updatedAt: NOW_ISO,
+        deletedAt: null,
+        messages: [
+          createAssistantMessage({
+            id: "msg-assistant-subagent-child" as MessageId,
+            text: "Searching the repository structure.",
+            offsetSeconds: 6,
+          }),
+        ],
+        activities: [],
+        proposedPlans: [],
+        checkpoints: [],
+        session: {
+          threadId: childThreadId,
+          status: "running",
           providerName: "codex",
           runtimeMode: "full-access",
           activeTurnId: null,
@@ -2121,6 +2303,62 @@ describe("ChatView timeline estimator parity (full app)", () => {
     }
   });
 
+  it("renders assistant markdown and keeps copy actions in a detached footer row", async () => {
+    const assistantMessageId = "msg-assistant-copy-render" as MessageId;
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createChatViewSnapshot({
+        messages: [
+          {
+            id: "msg-user-assistant-copy-render" as MessageId,
+            role: "user",
+            text: "hello",
+            turnId: null,
+            createdAt: NOW_ISO,
+            updatedAt: NOW_ISO,
+            streaming: false,
+          },
+          {
+            id: assistantMessageId,
+            role: "assistant",
+            text: "## Assistant heading\n\nSome assistant text.",
+            turnId: "turn-assistant-copy-render" as TurnId,
+            createdAt: NOW_ISO,
+            updatedAt: NOW_ISO,
+            streaming: false,
+          },
+        ],
+      }),
+    });
+
+    try {
+      const row = await waitForElement(
+        () =>
+          document.querySelector<HTMLElement>(
+            `[data-message-id="${assistantMessageId}"][data-message-role="assistant"]`,
+          ),
+        "Unable to find targeted assistant row.",
+      );
+      const markdownBody = await waitForElement(
+        () => row.querySelector<HTMLElement>('[data-chat-selection-region="assistant-output"]'),
+        "Unable to find assistant markdown body.",
+      );
+      const footer = await waitForElement(
+        () => row.querySelector<HTMLElement>('[data-assistant-message-footer="true"]'),
+        "Unable to find assistant message footer.",
+      );
+
+      expect(markdownBody.querySelector("h2")?.textContent).toContain("Assistant heading");
+      const copyButton = row.querySelector<HTMLButtonElement>('button[title="Copy message"]');
+      expect(copyButton).toBeTruthy();
+      expect(footer.contains(copyButton)).toBe(true);
+      expect(markdownBody.contains(copyButton)).toBe(false);
+      expect(footer.querySelector("p")?.textContent?.trim().length).toBeGreaterThan(0);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("dispatches checkpoint revert for the targeted user message undo control", async () => {
     const targetMessageId = "msg-user-revert-first" as MessageId;
     const mounted = await mountChatView({
@@ -3015,6 +3253,34 @@ describe("ChatView timeline estimator parity (full app)", () => {
       expect(isElementFullyVisible(openButton)).toBe(true);
       expect(isElementFullyVisible(implementButton)).toBe(true);
       expect(isElementFullyVisible(branchSelector)).toBe(true);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("opens a resolved subagent child thread from the timeline work card", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSubagentTimelineSnapshot(),
+    });
+
+    try {
+      const openThreadButton = await waitForElement(
+        () =>
+          Array.from(document.querySelectorAll("button")).find(
+            (button) => button.textContent?.trim() === "Open thread",
+          ) as HTMLButtonElement | null,
+        "Unable to find the subagent open thread button.",
+      );
+
+      openThreadButton.click();
+      await waitForLayout();
+
+      await expect
+        .poll(
+          () => document.querySelector<HTMLElement>("[data-testid='chat-header-title']")?.textContent ?? "",
+        )
+        .toContain("Locke [explorer]");
     } finally {
       await mounted.cleanup();
     }

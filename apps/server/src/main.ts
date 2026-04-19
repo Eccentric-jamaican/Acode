@@ -42,6 +42,7 @@ import { ServerRuntimeStartup } from "./serverRuntimeStartup";
 import { ServerLoggerLive } from "./serverLogger";
 import { AnalyticsServiceLayerLive } from "./telemetry/Layers/AnalyticsService";
 import { AnalyticsService } from "./telemetry/Services/AnalyticsService";
+import { ServerSettingsLive } from "./serverSettings";
 
 export class StartupError extends Data.TaggedError("StartupError")<{
   readonly message: string;
@@ -187,6 +188,8 @@ export const makeServerConfigLayer = (input: CliInput) =>
       const staticDir = devUrl ? undefined : yield* cliConfig.resolveStaticDir;
       const { join } = yield* Path.Path;
       const keybindingsConfigPath = join(stateDir, "keybindings.json");
+      const settingsPath = join(stateDir, "settings.json");
+      const providerStatusCacheDir = join(stateDir, "provider-status");
       const host =
         Option.getOrUndefined(input.host) ??
         env.host ??
@@ -197,6 +200,8 @@ export const makeServerConfigLayer = (input: CliInput) =>
         port,
         cwd: cliConfig.cwd,
         keybindingsConfigPath,
+        settingsPath,
+        providerStatusCacheDir,
         host,
         stateDir,
         staticDir,
@@ -215,6 +220,7 @@ export const makeServerProgramLayer = (input: CliInput) =>
   Layer.empty.pipe(
     Layer.provideMerge(makeServerRuntimeServicesLayer()),
     Layer.provideMerge(makeServerProviderLayer()),
+    Layer.provideMerge(ServerSettingsLive),
     Layer.provideMerge(CodexAccountServiceLive),
     Layer.provideMerge(ProviderHealthLive),
     Layer.provideMerge(SqlitePersistence.layerConfig),

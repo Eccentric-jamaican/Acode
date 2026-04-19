@@ -561,6 +561,35 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
     }),
   );
 
+  it.effect("maps process stderr provider errors to runtime.warning", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const eventFiber = yield* Stream.runHead(adapter.streamEvents).pipe(Effect.forkChild);
+
+      lifecycleManager.emit("event", {
+        id: asEventId("evt-process-stderr-warning"),
+        kind: "error",
+        provider: "codex",
+        threadId: asThreadId("thread-1"),
+        createdAt: new Date().toISOString(),
+        method: "process/stderr",
+        message:
+          "2026-04-19T03:18:44.234069Z ERROR codex_core::tools::router: error=Full-history forked agents inherit the parent agent type, model, and reasoning effort; omit agent_type, model, and reasoning_effort, or spawn without fork_context/fork_turns=all.",
+      });
+
+      const event = yield* Fiber.join(eventFiber);
+
+      assert.equal(event._tag, "Some");
+      if (event._tag !== "Some") {
+        return;
+      }
+      assert.equal(event.value.type, "runtime.warning");
+      if (event.value.type === "runtime.warning") {
+        assert.match(event.value.payload.message, /Full-history forked agents inherit/i);
+      }
+    }),
+  );
+
   it.effect(
     "maps requestUserInput requests and answered notifications to canonical user-input events",
     () =>

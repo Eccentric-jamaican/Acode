@@ -1,4 +1,4 @@
-import { type MessageId, type TurnId } from "@t3tools/contracts";
+import { ThreadId, type MessageId, type TurnId } from "@t3tools/contracts";
 import { clamp } from "effect/Number";
 import {
   memo,
@@ -75,6 +75,10 @@ import { type PinnedSelectionDraft } from "../../composerDraftStore";
 import { readNativeApi } from "~/nativeApi";
 import { cn } from "~/lib/utils";
 import { getVscodeIconUrlForEntry } from "../../vscode-icons";
+import {
+  humanizeSubagentStatus,
+  resolveSubagentPresentation,
+} from "../../lib/subagentPresentation";
 
 import ChatMarkdown from "../ChatMarkdown";
 import { Button } from "../ui/button";
@@ -137,6 +141,7 @@ export interface MessagesTimelineProps {
   onRevertUserMessage: (messageId: MessageId) => void;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
+  onOpenThread?: ((threadId: ThreadId) => void) | undefined;
   markdownCwd: string | undefined;
   resolvedTheme: "light" | "dark";
   workspaceRoot: string | undefined;
@@ -148,6 +153,34 @@ export interface MessagesTimelineProps {
   onRemovePinnedSelection: (pinnedSelectionId: string) => void;
   pendingPinnedSelectionJumpId: string | null;
   onPinnedSelectionJumpHandled: (pinnedSelectionId: string) => void;
+}
+
+function formatSubagentModelLabel(model: string | undefined): string | null {
+  if (!model) {
+    return null;
+  }
+  return model.includes("/") ? model.split("/").at(-1) ?? model : model;
+}
+
+function subagentStatusClasses(
+  statusLabel: string | null | undefined,
+  rawStatus: string | undefined,
+  isActive: boolean | undefined,
+): string {
+  const normalized = humanizeSubagentStatus(rawStatus ?? statusLabel ?? null, isActive === true);
+  if (normalized === "Running") {
+    return "border-sky-400/35 bg-sky-400/10 text-sky-300";
+  }
+  if (normalized === "Completed") {
+    return "border-emerald-400/30 bg-emerald-400/10 text-emerald-300";
+  }
+  if (normalized === "Failed") {
+    return "border-rose-400/35 bg-rose-400/10 text-rose-300";
+  }
+  if (normalized === "Stopped") {
+    return "border-amber-400/30 bg-amber-400/10 text-amber-300";
+  }
+  return "border-border/50 bg-background/70 text-muted-foreground/80";
 }
 
 type TimelineEntry = ReturnType<typeof deriveTimelineEntries>[number];
@@ -819,8 +852,9 @@ const ProposedPlanCard = memo(function ProposedPlanCard(props: {
 const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   workEntry: WorkLogEntry;
   resolvedTheme: "light" | "dark";
+  onOpenThread?: ((threadId: ThreadId) => void) | undefined;
 }) {
-  const { workEntry, resolvedTheme } = props;
+  const { onOpenThread, workEntry, resolvedTheme } = props;
   const iconConfig = workToneIcon(workEntry.tone);
   const EntryIcon = workEntryIcon(workEntry);
   const heading = toolWorkEntryHeading(workEntry);
@@ -909,6 +943,145 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
 
   const activeInvocationDiff =
     (activeInvocationDiffPath ? parsedByPath[activeInvocationDiffPath] : null) ?? null;
+
+  if ((workEntry.subagents?.length ?? 0) > 0 || workEntry.subagentAction) {
+    const subagentSummary =
+      workEntry.subagentAction?.summaryText ??
+      ((workEntry.subagents?.length ?? 0) === 1
+        ? workEntry.subagents?.[0]?.nickname ?? workEntry.subagents?.[0]?.title ?? "Subagent"
+        : `${workEntry.subagents?.length ?? 0} subagents`);
+    const subagentMeta = [
+      formatSubagentModelLabel(workEntry.subagentAction?.model),
+      workEntry.subagentAction?.prompt,
+    ]
+      .filter((value): value is string => Boolean(value))
+      .join(" • ");
+    const visibleSubagents = workEntry.subagents?.slice(0, 3) ?? [];
+    const hiddenSubagentCount = Math.max(
+      0,
+      (workEntry.subagents?.length ?? 0) - visibleSubagents.length,
+    );
+
+    return (
+      <div className="space-y-1.5 rounded-md border border-border/35 bg-background/35 px-2 py-1.5">
+        <div className="flex min-w-0 items-start gap-2">
+          <span className={cn("mt-0.5 flex size-4.5 shrink-0 items-center justify-center", iconConfig.className)}>
+            <EntryIcon className="size-3" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[11px] font-medium leading-4.5 text-foreground/85" title={subagentSummary}>
+              {subagentSummary}
+            </p>
+            {subagentMeta ? (
+              <p className="truncate text-[10px] leading-4 text-muted-foreground/70" title={subagentMeta}>
+                {subagentMeta}
+              </p>
+            ) : null}
+          </div>
+        </div>
+        {(visibleSubagents.length > 0 || hiddenSubagentCount > 0) && (
+          <div className="space-y-[5px] rounded-lg border border-border/45 bg-background/55 px-2.5 py-2">
+            {visibleSubagents.map((subagent) => {
+              const presentation = resolveSubagentPresentation({
+                nickname: subagent.nickname,
+                role: subagent.role,
+                title: subagent.title,
+                fallbackId: subagent.threadId,
+              });
+              const secondaryLabel = [subagent.title, formatSubagentModelLabel(subagent.model)]
+                .filter((value): value is string => Boolean(value))
+                .join(" • ");
+              const displayStatusLabel =
+                subagent.statusLabel ??
+                humanizeSubagentStatus(subagent.rawStatus ?? null, subagent.isActive);
+              const resolvedThreadId = subagent.resolvedThreadId
+                ? ThreadId.makeUnsafe(subagent.resolvedThreadId)
+                : null;
+              return (
+                <div
+                  key={`${workEntry.id}:${subagent.threadId}`}
+                  className="flex items-start gap-2.5 rounded-lg border border-border/28 bg-background/82 px-[11px] py-2"
+                >
+                  <span
+                    className={cn(
+                      "mt-1.5 size-1.5 shrink-0 rounded-full",
+                      subagent.isActive ? "bg-sky-300/95" : "bg-muted-foreground/22",
+                    )}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div
+                      className="truncate text-[11px] font-semibold leading-[18px] text-foreground/90"
+                      title={presentation.fullLabel}
+                    >
+                      <span style={{ color: presentation.accentColor }}>
+                        {presentation.nickname ?? presentation.primaryLabel}
+                      </span>
+                      {presentation.role ? (
+                        <span className="ml-1 text-[10px] font-medium text-muted-foreground/48">
+                          ({presentation.role})
+                        </span>
+                      ) : null}
+                    </div>
+                    {secondaryLabel ? (
+                      <div className="truncate pt-0.5 text-[10px] leading-4 text-muted-foreground/56" title={secondaryLabel}>
+                        {secondaryLabel}
+                      </div>
+                    ) : null}
+                    {subagent.latestUpdate ? (
+                      <div className="flex items-baseline gap-1.5 pt-1 text-[9px] text-muted-foreground/42" title={subagent.latestUpdate}>
+                        <span className="shrink-0 uppercase tracking-[0.14em] text-muted-foreground/30">
+                          Latest
+                        </span>
+                        <span className="truncate">{subagent.latestUpdate}</span>
+                      </div>
+                    ) : null}
+                  </div>
+                  <div className="flex shrink-0 flex-col items-end gap-1">
+                    {displayStatusLabel ? (
+                      <span
+                        className={cn(
+                          "shrink-0 rounded-full border px-2 py-0.5 text-[9px] font-medium tracking-[0.08em]",
+                          subagentStatusClasses(
+                            displayStatusLabel,
+                            subagent.rawStatus,
+                            subagent.isActive,
+                          ),
+                        )}
+                      >
+                        {displayStatusLabel}
+                      </span>
+                    ) : null}
+                    <button
+                      type="button"
+                      className={cn(
+                        "shrink-0 rounded-full border border-border/45 px-2.5 py-1 text-[9px] font-medium uppercase tracking-[0.12em] text-muted-foreground/62 transition-colors",
+                        resolvedThreadId && onOpenThread
+                          ? "hover:border-foreground/15 hover:text-foreground/84"
+                          : "cursor-default opacity-50",
+                      )}
+                      disabled={!resolvedThreadId || !onOpenThread}
+                      onClick={() => {
+                        if (resolvedThreadId && onOpenThread) {
+                          onOpenThread(resolvedThreadId);
+                        }
+                      }}
+                    >
+                      Open thread
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+            {hiddenSubagentCount > 0 ? (
+              <div className="px-1 text-[10px] text-muted-foreground/55">
+                +{hiddenSubagentCount} more
+              </div>
+            ) : null}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="rounded-md border border-border/35 bg-background/35 px-2 py-1.5">
@@ -1030,6 +1203,7 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
     onRevertUserMessage,
     isRevertingCheckpoint,
     onImageExpand,
+    onOpenThread,
     markdownCwd,
     resolvedTheme,
     workspaceRoot,
@@ -1730,6 +1904,7 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
                     key={`work-row:${workEntry.id}`}
                     workEntry={workEntry}
                     resolvedTheme={resolvedTheme}
+                    onOpenThread={onOpenThread}
                   />
                 ))}
               </div>
@@ -1838,7 +2013,7 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
                   <span className="h-px flex-1 bg-border" />
                 </div>
               )}
-              <div className="min-w-0 px-1 py-0.5">
+              <div className="group min-w-0 px-1 py-0.5">
                 <div
                   {...{
                     [CHAT_SELECTION_REGION_ATTRIBUTE]: CHAT_SELECTION_REGION_VALUE,
@@ -1912,14 +2087,22 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
                     </div>
                   );
                 })()}
-                <p className="mt-1.5 text-[10px] text-muted-foreground/30">
-                  {formatMessageMeta(
-                    row.message.createdAt,
-                    row.message.streaming
-                      ? formatElapsed(row.message.createdAt, nowIso)
-                      : formatElapsed(row.message.createdAt, row.message.completedAt),
-                  )}
-                </p>
+                <div
+                  data-assistant-message-footer="true"
+                  className="mt-1.5 flex items-center justify-between gap-2"
+                >
+                  <div className="flex items-center gap-1.5 opacity-0 transition-opacity duration-200 focus-within:opacity-100 group-hover:opacity-100">
+                    {row.message.text && <MessageCopyButton text={row.message.text} />}
+                  </div>
+                  <p className="text-[10px] text-muted-foreground/30">
+                    {formatMessageMeta(
+                      row.message.createdAt,
+                      row.message.streaming
+                        ? formatElapsed(row.message.createdAt, nowIso)
+                        : formatElapsed(row.message.createdAt, row.message.completedAt),
+                    )}
+                  </p>
+                </div>
               </div>
             </>
           );

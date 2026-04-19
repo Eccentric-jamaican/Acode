@@ -5,6 +5,7 @@ export const SETTINGS_SECTION_IDS = {
   responses: "responses",
   keybindings: "keybindings",
   safety: "safety",
+  archived: "archived",
 } as const;
 
 export type SettingsSectionId =
@@ -20,4 +21,5 @@ export const SETTINGS_SIDEBAR_SECTIONS: ReadonlyArray<{
   { id: SETTINGS_SECTION_IDS.responses, label: "Responses" },
   { id: SETTINGS_SECTION_IDS.keybindings, label: "Keybindings" },
   { id: SETTINGS_SECTION_IDS.safety, label: "Safety" },
+  { id: SETTINGS_SECTION_IDS.archived, label: "Archived" },
 ];

@@ -50,8 +50,10 @@ import {
 import {
   ServerCancelProviderLoginInput,
   ServerLogoutProviderInput,
+  ServerGetSettingsInput,
   ServerStartProviderLoginInput,
   ServerSuggestNewThreadTasksInput,
+  ServerUpdateSettingsInput,
 } from "./server";
 
 // ── WebSocket RPC Method Names ───────────────────────────────────────
@@ -89,6 +91,7 @@ export const WS_METHODS = {
 
   // Server meta
   serverGetConfig: "server.getConfig",
+  serverGetSettings: "server.getSettings",
   serverGetErrorInbox: "server.getErrorInbox",
   serverReportClientDiagnostic: "server.reportClientDiagnostic",
   serverSetErrorInboxEntryResolution: "server.setErrorInboxEntryResolution",
@@ -98,6 +101,7 @@ export const WS_METHODS = {
   serverCancelProviderLogin: "server.cancelProviderLogin",
   serverLogoutProvider: "server.logoutProvider",
   serverSuggestNewThreadTasks: "server.suggestNewThreadTasks",
+  serverUpdateSettings: "server.updateSettings",
 
   // Provider discovery
   providerGetComposerCapabilities: "provider.getComposerCapabilities",
@@ -171,6 +175,7 @@ const WebSocketRequestBody = Schema.Union([
 
   // Server meta
   tagRequestBody(WS_METHODS.serverGetConfig, Schema.Struct({})),
+  tagRequestBody(WS_METHODS.serverGetSettings, ServerGetSettingsInput),
   tagRequestBody(WS_METHODS.serverGetErrorInbox, ServerGetErrorInboxInput),
   tagRequestBody(WS_METHODS.serverReportClientDiagnostic, ServerReportClientDiagnosticInput),
   tagRequestBody(
@@ -186,6 +191,7 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.serverCancelProviderLogin, ServerCancelProviderLoginInput),
   tagRequestBody(WS_METHODS.serverLogoutProvider, ServerLogoutProviderInput),
   tagRequestBody(WS_METHODS.serverSuggestNewThreadTasks, ServerSuggestNewThreadTasksInput),
+  tagRequestBody(WS_METHODS.serverUpdateSettings, ServerUpdateSettingsInput),
 
   // Provider discovery
   tagRequestBody(WS_METHODS.providerGetComposerCapabilities, ProviderGetComposerCapabilitiesInput),
