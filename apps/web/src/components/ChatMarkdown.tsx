@@ -25,7 +25,7 @@ import { fnv1a32 } from "../lib/diffRendering";
 import { LRUCache } from "../lib/lruCache";
 import { normalizeSyntaxLanguage } from "../lib/syntaxLanguage";
 import { useTheme } from "../hooks/useTheme";
-import { resolveMarkdownFileLinkTarget } from "../markdown-links";
+import { resolveMarkdownFileLinkTarget, resolveMarkdownFileViewerPath } from "../markdown-links";
 import { readNativeApi } from "../nativeApi";
 import { preferredTerminalEditor } from "../terminal-links";
 import { cn } from "../lib/utils";
@@ -35,6 +35,7 @@ interface ChatMarkdownProps {
   cwd: string | undefined;
   isStreaming?: boolean;
   variant?: "assistant" | "user";
+  onOpenFilePath?: (relativePath: string) => void;
 }
 
 const CODE_FENCE_LANGUAGE_REGEX = /(?:^|\s)language-([^\s]+)/;
@@ -227,6 +228,7 @@ function ChatMarkdown({
   cwd,
   isStreaming = false,
   variant = "assistant",
+  onOpenFilePath,
 }: ChatMarkdownProps) {
   const { resolvedTheme } = useTheme();
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
@@ -237,6 +239,7 @@ function ChatMarkdown({
         if (!targetPath) {
           return <a {...props} href={href} target="_blank" rel="noreferrer" />;
         }
+        const viewerPath = resolveMarkdownFileViewerPath(href, cwd);
 
         return (
           <a
@@ -245,6 +248,10 @@ function ChatMarkdown({
             onClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
+              if (viewerPath && onOpenFilePath) {
+                onOpenFilePath(viewerPath);
+                return;
+              }
               const api = readNativeApi();
               if (api) {
                 void api.shell.openInEditor(targetPath, preferredTerminalEditor());
@@ -275,7 +282,7 @@ function ChatMarkdown({
         );
       },
     }),
-    [cwd, diffThemeName, isStreaming],
+    [cwd, diffThemeName, isStreaming, onOpenFilePath],
   );
 
   return (

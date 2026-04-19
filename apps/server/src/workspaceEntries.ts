@@ -4,6 +4,11 @@ import path from "node:path";
 import { runProcess } from "./processRunner";
 
 import {
+  ProjectDirectoryEntry,
+  ProjectListDirectoryInput,
+  ProjectListDirectoryResult,
+  ProjectReadFileInput,
+  ProjectReadFileResult,
   ProjectEntry,
   ProjectSearchEntriesInput,
   ProjectSearchEntriesResult,
@@ -14,6 +19,7 @@ const WORKSPACE_CACHE_MAX_KEYS = 4;
 const WORKSPACE_INDEX_MAX_ENTRIES = 25_000;
 const WORKSPACE_SCAN_READDIR_CONCURRENCY = 32;
 const GIT_CHECK_IGNORE_MAX_STDIN_BYTES = 256 * 1024;
+const PROJECT_READ_FILE_MAX_BYTES = 256 * 1024;
 const IGNORED_DIRECTORY_NAMES = new Set([
   ".git",
   ".convex",
@@ -45,6 +51,40 @@ function parentPathOf(input: string): string | undefined {
     return undefined;
   }
   return input.slice(0, separatorIndex);
+}
+
+function resolveWorkspaceTargetPath(input: {
+  cwd: string;
+  relativePath: string | null;
+}): { absolutePath: string; relativePath: string | null } {
+  const normalizedRelativePath = input.relativePath?.trim() ?? null;
+  if (!normalizedRelativePath) {
+    return {
+      absolutePath: input.cwd,
+      relativePath: null,
+    };
+  }
+
+  if (path.isAbsolute(normalizedRelativePath)) {
+    throw new Error("Workspace path must be relative to the project root.");
+  }
+
+  const absolutePath = path.resolve(input.cwd, normalizedRelativePath);
+  const relativeToRoot = toPosixPath(path.relative(input.cwd, absolutePath));
+  if (
+    relativeToRoot.length === 0 ||
+    relativeToRoot === "." ||
+    relativeToRoot.startsWith("../") ||
+    relativeToRoot === ".." ||
+    path.isAbsolute(relativeToRoot)
+  ) {
+    throw new Error("Workspace path must stay within the project root.");
+  }
+
+  return {
+    absolutePath,
+    relativePath: relativeToRoot,
+  };
 }
 
 function basenameOf(input: string): string {
@@ -427,5 +467,115 @@ export async function searchWorkspaceEntries(
   return {
     entries: ranked.slice(0, input.limit),
     truncated: index.truncated || ranked.length > input.limit,
+  };
+}
+
+export async function listWorkspaceDirectory(
+  input: ProjectListDirectoryInput,
+): Promise<ProjectListDirectoryResult> {
+  const target = resolveWorkspaceTargetPath({
+    cwd: input.cwd,
+    relativePath: input.relativePath,
+  });
+  const directoryEntries = await fs.readdir(target.absolutePath, { withFileTypes: true });
+  const candidateRelativePaths = directoryEntries
+    .filter((entry) => entry.isDirectory() || entry.isFile())
+    .map((entry) =>
+      toPosixPath(
+        target.relativePath === null ? entry.name : path.join(target.relativePath, entry.name),
+      ),
+    )
+    .filter((relativePath) => !isPathInIgnoredDirectory(relativePath));
+  const allowedRelativePaths = new Set(await filterGitIgnoredPaths(input.cwd, candidateRelativePaths));
+
+  const entries: ProjectDirectoryEntry[] = directoryEntries
+    .filter((entry) => entry.isDirectory() || entry.isFile())
+    .map((entry) => {
+      const relativePath = toPosixPath(
+        target.relativePath === null ? entry.name : path.join(target.relativePath, entry.name),
+      );
+      return {
+        entry,
+        relativePath,
+      };
+    })
+    .filter((candidate) => allowedRelativePaths.has(candidate.relativePath))
+    .map(({ entry, relativePath }) => ({
+      path: relativePath,
+      name: entry.name,
+      kind: entry.isDirectory() ? ("directory" as const) : ("file" as const),
+      ...(parentPathOf(relativePath) ? { parentPath: parentPathOf(relativePath) } : {}),
+    }))
+    .sort((left, right) => {
+      if (left.kind !== right.kind) {
+        return left.kind === "directory" ? -1 : 1;
+      }
+      return left.path.localeCompare(right.path, undefined, {
+        numeric: true,
+        sensitivity: "base",
+      });
+    });
+
+  return {
+    relativePath: target.relativePath,
+    entries,
+  };
+}
+
+export async function readWorkspaceFile(
+  input: ProjectReadFileInput,
+): Promise<ProjectReadFileResult> {
+  const target = resolveWorkspaceTargetPath({
+    cwd: input.cwd,
+    relativePath: input.relativePath,
+  });
+  if (target.relativePath === null) {
+    return {
+      relativePath: input.relativePath,
+      status: "unreadable",
+      message: "Cannot open the workspace root as a file.",
+    };
+  }
+
+  let stats;
+  try {
+    stats = await fs.stat(target.absolutePath);
+  } catch {
+    return {
+      relativePath: target.relativePath,
+      status: "missing",
+      message: "File not found.",
+    };
+  }
+
+  if (!stats.isFile()) {
+    return {
+      relativePath: target.relativePath,
+      status: "unreadable",
+      message: "Only files can be opened in the viewer.",
+    };
+  }
+
+  if (stats.size > PROJECT_READ_FILE_MAX_BYTES) {
+    return {
+      relativePath: target.relativePath,
+      status: "too-large",
+      message: "File is too large to display in the viewer.",
+    };
+  }
+
+  const bytes = await fs.readFile(target.absolutePath);
+  if (bytes.includes(0)) {
+    return {
+      relativePath: target.relativePath,
+      status: "binary",
+      message: "Binary files are not supported in the viewer yet.",
+    };
+  }
+
+  return {
+    relativePath: target.relativePath,
+    status: "text",
+    contents: bytes.toString("utf8"),
   };
 }

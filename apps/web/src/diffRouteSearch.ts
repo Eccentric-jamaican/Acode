@@ -7,6 +7,7 @@ export type ChatRightPanel = RightPanelMode;
 export interface DiffRouteSearch {
   panel?: RightPanelMode;
   diff?: "1";
+  files?: "1";
   diffTurnId?: TurnId;
   diffFilePath?: string;
   splitViewId?: string;
@@ -42,12 +43,17 @@ export function resolveRightPanelMode(search: Pick<DiffRouteSearch, "panel" | "d
   return "none";
 }
 
+export function resolveFilesRailOpen(search: Pick<DiffRouteSearch, "files">): boolean {
+  return search.files === "1";
+}
+
 export function stripDiffSearchParams<T extends Record<string, unknown>>(
   params: T,
 ): Omit<T, "panel" | "diff" | "diffTurnId" | "diffFilePath" | "splitViewId"> {
   const {
     panel: _panel,
     diff: _diff,
+    files: _files,
     diffTurnId: _diffTurnId,
     diffFilePath: _diffFilePath,
     splitViewId: _splitViewId,
@@ -64,12 +70,24 @@ export function withRightPanelMode<T extends Record<string, unknown>>(
 ): Record<string, unknown> {
   const rest = stripDiffSearchParams(params);
   if (mode === "diff") {
-    return { ...rest, panel: "diff", diff: "1" };
+      return { ...rest, panel: "diff", diff: "1" };
   }
   if (mode === "browser") {
     return { ...rest, panel: "browser" };
   }
   return rest;
+}
+
+export function withFilesRailOpen<T extends Record<string, unknown>>(
+  params: T,
+  open: boolean,
+): Record<string, unknown> {
+  const rest = { ...params };
+  if (open) {
+    return { ...rest, files: "1" };
+  }
+  const { files: _files, ...withoutFiles } = rest as Record<string, unknown>;
+  return withoutFiles;
 }
 
 export function withDiffSelection<T extends Record<string, unknown>>(
@@ -90,6 +108,7 @@ export function parseDiffRouteSearch(search: Record<string, unknown>): DiffRoute
   const legacyDiffOpen = isDiffOpenValue(search.diff);
   const resolvedMode: RightPanelMode | undefined = panel ?? (legacyDiffOpen ? "diff" : undefined);
   const diff = resolvedMode === "diff" ? "1" : undefined;
+  const files = isDiffOpenValue(search.files) ? "1" : undefined;
   const diffTurnIdRaw = resolvedMode === "diff" ? normalizeSearchString(search.diffTurnId) : undefined;
   const diffTurnId = diffTurnIdRaw ? TurnId.makeUnsafe(diffTurnIdRaw) : undefined;
   const diffFilePath =
@@ -99,6 +118,7 @@ export function parseDiffRouteSearch(search: Record<string, unknown>): DiffRoute
   return {
     ...(resolvedMode ? { panel: resolvedMode } : {}),
     ...(diff ? { diff } : {}),
+    ...(files ? { files } : {}),
     ...(diffTurnId ? { diffTurnId } : {}),
     ...(diffFilePath ? { diffFilePath } : {}),
     ...(splitViewId ? { splitViewId } : {}),

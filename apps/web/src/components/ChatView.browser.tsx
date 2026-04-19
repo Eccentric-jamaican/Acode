@@ -3202,6 +3202,11 @@ describe("ChatView timeline estimator parity (full app)", () => {
           ) as HTMLButtonElement | null,
         "Unable to find the thread header open button.",
       );
+      const terminalButton = await waitForElement(
+        () =>
+          document.querySelector<HTMLButtonElement>("button[aria-label='Toggle terminal drawer']"),
+        "Unable to find the thread header terminal button.",
+      );
       const gitActionOptions = await waitForElement(
         () => document.querySelector<HTMLElement>("button[aria-label='Git action options']"),
         "Unable to find the git action menu button.",
@@ -3236,6 +3241,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
       const scrollContainer = await waitForMessagesScrollContainer();
 
       expect(isElementFullyVisible(openButton)).toBe(true);
+      expect(isElementFullyVisible(terminalButton)).toBe(true);
       expect(isElementFullyVisible(gitActionOptions)).toBe(true);
       expect(isElementFullyVisible(diffToggle)).toBe(true);
       expect(isElementFullyVisible(composerEditor)).toBe(true);
@@ -3251,6 +3257,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await waitForLayout();
       await expect.poll(() => scrollContainer.scrollTop).toBeGreaterThan(0);
       expect(isElementFullyVisible(openButton)).toBe(true);
+      expect(isElementFullyVisible(terminalButton)).toBe(true);
       expect(isElementFullyVisible(implementButton)).toBe(true);
       expect(isElementFullyVisible(branchSelector)).toBe(true);
     } finally {
