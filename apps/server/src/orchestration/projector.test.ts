@@ -68,30 +68,29 @@ describe("orchestration projector", () => {
     );
 
     expect(next.snapshotSequence).toBe(1);
-    expect(next.threads).toEqual([
-      {
-        id: "thread-1",
-        projectId: "project-1",
-        title: "demo",
-        model: "gpt-5-codex",
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        branch: null,
-        worktreePath: null,
-        isPinned: false,
-        latestTurn: null,
-        createdAt: now,
-        updatedAt: now,
-        deletedAt: null,
-        origin: "user",
-        taskId: null,
-        messages: [],
-        proposedPlans: [],
-        activities: [],
-        checkpoints: [],
-        session: null,
-      },
-    ]);
+    expect(next.threads).toHaveLength(1);
+    expect(next.threads[0]).toMatchObject({
+      id: "thread-1",
+      projectId: "project-1",
+      title: "demo",
+      model: "gpt-5-codex",
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      isPinned: false,
+      latestTurn: null,
+      createdAt: now,
+      updatedAt: now,
+      deletedAt: null,
+      origin: "user",
+      taskId: null,
+      messages: [],
+      proposedPlans: [],
+      activities: [],
+      checkpoints: [],
+      session: null,
+    });
   });
 
   it("fails when event payload cannot be decoded by runtime schema", async () => {

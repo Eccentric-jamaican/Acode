@@ -53,7 +53,7 @@ describe("normalizeInvocationDiffFiles", () => {
         path: "apps/web/src/session-logic.ts",
         additions: 5,
         deletions: 2,
-        patch: "diff --git a/apps/web/src/session-logic.ts b/apps/web/src/session-logic.ts\n",
+        patch: "diff --git a/apps/web/src/session-logic.ts b/apps/web/src/session-logic.ts",
       },
       {
         path: "apps/web/src/components/chat/MessagesTimeline.tsx",

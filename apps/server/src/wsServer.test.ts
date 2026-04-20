@@ -9,12 +9,10 @@ import { describe, expect, it, afterEach, vi } from "vitest";
 import { createServer } from "./wsServer";
 import WebSocket from "ws";
 import { ServerConfig, type ServerConfigShape } from "./config";
-import {
-  makeServerProviderLayer,
-  makeServerRuntimeServicesLayer,
-} from "./serverLayers";
+import { makeServerRuntimeServicesLayer } from "./serverLayers";
 
 import {
+  DEFAULT_SERVER_SETTINGS,
   DEFAULT_TERMINAL_ID,
   EDITORS,
   EventId,
@@ -52,6 +50,10 @@ import {
   ProviderDiscoveryService,
   type ProviderDiscoveryServiceShape,
 } from "./provider/Services/ProviderDiscoveryService";
+import {
+  ProviderRegistry,
+  type ProviderRegistryShape,
+} from "./provider/Services/ProviderRegistry";
 import { ProviderHealth, type ProviderHealthShape } from "./provider/Services/ProviderHealth";
 import { CodexAccountService, type CodexAccountServiceShape } from "./provider/Services/CodexAccountService";
 import { Open, type OpenShape } from "./open";
@@ -115,6 +117,12 @@ const defaultProviderAccounts: ReadonlyArray<ServerProviderAccountSummary> = [
 
 const defaultProviderHealthService: ProviderHealthShape = {
   getStatuses: Effect.succeed(defaultProviderStatuses),
+};
+
+const defaultProviderRegistryService: ProviderRegistryShape = {
+  getProviders: Effect.succeed(defaultProviderStatuses),
+  refresh: () => Effect.succeed(defaultProviderStatuses),
+  streamChanges: Stream.empty,
 };
 
 const defaultCodexAccountService: CodexAccountServiceShape = {
@@ -200,6 +208,22 @@ const defaultCodexAdapter: CodexAdapterShape = {
   readStoredThread: vi.fn(),
   archiveStoredThread: vi.fn(),
   startReview: vi.fn(),
+  streamEvents: Stream.empty,
+};
+
+const unusedProviderEffect = <T>() =>
+  Effect.die(new Error("Unexpected ProviderService call in wsServer test")) as Effect.Effect<T>;
+
+const defaultProviderService: ProviderServiceShape = {
+  startSession: () => unusedProviderEffect(),
+  sendTurn: () => unusedProviderEffect(),
+  interruptTurn: () => unusedProviderEffect(),
+  respondToRequest: () => unusedProviderEffect(),
+  respondToUserInput: () => unusedProviderEffect(),
+  stopSession: () => unusedProviderEffect(),
+  listSessions: () => Effect.succeed([]),
+  getCapabilities: () => Effect.succeed(defaultCodexAdapter.capabilities),
+  rollbackConversation: () => Effect.void,
   streamEvents: Stream.empty,
 };
 
@@ -510,8 +534,10 @@ describe("WebSocket Server", () => {
       authToken?: string;
       stateDir?: string;
       staticDir?: string;
-      providerLayer?: Layer.Layer<ProviderService | ProviderDiscoveryService, never>;
+      providerLayer?: Layer.Layer<ProviderService, never>;
+      providerService?: ProviderServiceShape;
       providerDiscovery?: ProviderDiscoveryServiceShape;
+      providerRegistry?: ProviderRegistryShape;
       providerHealth?: ProviderHealthShape;
       codexAccountService?: CodexAccountServiceShape;
       open?: OpenShape;
@@ -530,6 +556,10 @@ describe("WebSocket Server", () => {
     const providerHealthLayer = Layer.succeed(
       ProviderHealth,
       options.providerHealth ?? defaultProviderHealthService,
+    );
+    const providerRegistryLayer = Layer.succeed(
+      ProviderRegistry,
+      options.providerRegistry ?? defaultProviderRegistryService,
     );
     const providerDiscoveryLayer = Layer.succeed(
       ProviderDiscoveryService,
@@ -559,7 +589,8 @@ describe("WebSocket Server", () => {
     const serverSettingsLayer = ServerSettingsService.layerTest();
     const baseLayer = Layer.mergeAll(persistenceLayer, serverConfigLayer, serverSettingsLayer);
     const providerLayer =
-      options.providerLayer ?? makeServerProviderLayer().pipe(Layer.provideMerge(baseLayer));
+      options.providerLayer ??
+      Layer.succeed(ProviderService, options.providerService ?? defaultProviderService);
     const infrastructureLayer = providerLayer;
     const runtimeOverrides = Layer.mergeAll(
       options.gitManager ? Layer.succeed(GitManager, options.gitManager) : Layer.empty,
@@ -580,6 +611,7 @@ describe("WebSocket Server", () => {
     const dependenciesLayer = Layer.empty.pipe(
       Layer.provideMerge(runtimeLayer),
       Layer.provideMerge(providerHealthLayer),
+      Layer.provideMerge(providerRegistryLayer),
       Layer.provideMerge(providerDiscoveryLayer),
       Layer.provideMerge(codexAccountServiceLayer),
       Layer.provideMerge(openLayer),
@@ -934,6 +966,7 @@ describe("WebSocket Server", () => {
       issues: [],
       providers: defaultProviderStatuses,
       providerAccounts: defaultProviderAccounts,
+      settings: DEFAULT_SERVER_SETTINGS,
       availableEditors: expect.any(Array),
     });
     expectAvailableEditors((response.result as { availableEditors: unknown }).availableEditors);
@@ -961,6 +994,7 @@ describe("WebSocket Server", () => {
       issues: [],
       providers: defaultProviderStatuses,
       providerAccounts: defaultProviderAccounts,
+      settings: DEFAULT_SERVER_SETTINGS,
       availableEditors: expect.any(Array),
     });
     expectAvailableEditors((response.result as { availableEditors: unknown }).availableEditors);
@@ -998,6 +1032,7 @@ describe("WebSocket Server", () => {
       ],
       providers: defaultProviderStatuses,
       providerAccounts: defaultProviderAccounts,
+      settings: DEFAULT_SERVER_SETTINGS,
       availableEditors: expect.any(Array),
     });
     expectAvailableEditors((response.result as { availableEditors: unknown }).availableEditors);
@@ -1270,6 +1305,7 @@ describe("WebSocket Server", () => {
       issues: [],
       providers: defaultProviderStatuses,
       providerAccounts: defaultProviderAccounts,
+      settings: DEFAULT_SERVER_SETTINGS,
       availableEditors: expect.any(Array),
     });
     expectAvailableEditors((response.result as { availableEditors: unknown }).availableEditors);
@@ -1319,6 +1355,7 @@ describe("WebSocket Server", () => {
       issues: [],
       providers: defaultProviderStatuses,
       providerAccounts: defaultProviderAccounts,
+      settings: DEFAULT_SERVER_SETTINGS,
       availableEditors: expect.any(Array),
     });
     expectAvailableEditors(
