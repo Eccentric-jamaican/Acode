@@ -73,6 +73,30 @@ function normalizeOpenCodeBinaryCommand(binaryPath: string): string {
   return trimmed.length > 0 ? trimmed : DEFAULT_OPENCODE_BINARY_PATH;
 }
 
+function quoteWindowsCmdSegment(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+function spawnOpenCodeProcess(input: {
+  readonly binaryPath: string;
+  readonly args: ReadonlyArray<string>;
+  readonly env: NodeJS.ProcessEnv;
+}): ChildProcess {
+  if (process.platform !== "win32") {
+    return spawn(input.binaryPath, [...input.args], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: input.env,
+    });
+  }
+
+  const commandLine = [input.binaryPath, ...input.args].map(quoteWindowsCmdSegment).join(" ");
+  return spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", commandLine], {
+    stdio: ["ignore", "pipe", "pipe"],
+    env: input.env,
+    windowsHide: true,
+  });
+}
+
 function toTrimmedOutputSnippet(output: string): string | undefined {
   const trimmed = output.trim();
   if (trimmed.length === 0) {
@@ -302,17 +326,17 @@ export async function startOpenCodeServerProcess(input: {
   const port = input.port ?? (await findAvailablePort());
   const timeoutMs = input.timeoutMs ?? DEFAULT_OPENCODE_SERVER_TIMEOUT_MS;
   const startedAt = Date.now();
-  const child = spawn(binaryPath, ["serve", `--hostname=${hostname}`, `--port=${port}`], {
-    stdio: ["ignore", "pipe", "pipe"],
-    shell: process.platform === "win32",
+  const child = spawnOpenCodeProcess({
+    binaryPath,
+    args: ["serve", `--hostname=${hostname}`, `--port=${port}`],
     env: {
       ...process.env,
       OPENCODE_CONFIG_CONTENT: JSON.stringify({}),
     },
   });
 
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
+  child.stdout?.setEncoding("utf8");
+  child.stderr?.setEncoding("utf8");
 
   let stdout = "";
   let stderr = "";
@@ -340,8 +364,8 @@ export async function startOpenCodeServerProcess(input: {
         clearInterval(portPoll);
         portPoll = null;
       }
-      child.stdout.off("data", onStdout);
-      child.stderr.off("data", onStderr);
+      child.stdout?.off("data", onStdout);
+      child.stderr?.off("data", onStderr);
       child.off("error", onError);
       child.off("close", onClose);
     };
@@ -400,8 +424,8 @@ export async function startOpenCodeServerProcess(input: {
       });
     };
 
-    child.stdout.on("data", onStdout);
-    child.stderr.on("data", onStderr);
+    child.stdout?.on("data", onStdout);
+    child.stderr?.on("data", onStderr);
     child.once("error", onError);
     child.once("close", onClose);
     portPoll = setInterval(pollPort, PORT_POLL_INTERVAL_MS);
@@ -447,9 +471,9 @@ export async function runOpenCodeCommand(input: {
   readonly args: ReadonlyArray<string>;
 }): Promise<{ stdout: string; stderr: string; code: number }> {
   const binaryPath = normalizeOpenCodeBinaryCommand(input.binaryPath);
-  const child = spawn(binaryPath, [...input.args], {
-    stdio: ["ignore", "pipe", "pipe"],
-    shell: process.platform === "win32",
+  const child = spawnOpenCodeProcess({
+    binaryPath,
+    args: input.args,
     env: process.env,
   });
   child.stdout?.setEncoding("utf8");

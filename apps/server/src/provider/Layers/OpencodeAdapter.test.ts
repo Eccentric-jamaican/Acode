@@ -84,6 +84,26 @@ function createOpenCodeFixture(input?: {
       };
     },
   );
+  const providerList = vi.fn(async function (this: { readonly marker?: string }) {
+    if (input?.requireMethodThisBinding && this.marker !== "provider-api") {
+      throw new Error("provider.list lost method binding");
+    }
+    return {
+      all: [
+        {
+          id: "openai",
+          name: "OpenAI",
+          models: {
+            "gpt-5": { id: "gpt-5", name: "GPT-5" },
+          },
+        },
+      ],
+      connected: ["openai"],
+      default: {
+        openai: "gpt-5",
+      },
+    };
+  });
 
   const commandApi = input?.requireMethodThisBinding
     ? {
@@ -114,12 +134,20 @@ function createOpenCodeFixture(input?: {
       }
     : { subscribe: eventSubscribe };
 
+  const providerApi = input?.requireMethodThisBinding
+    ? {
+        marker: "provider-api",
+        list: providerList,
+      }
+    : { list: providerList };
+
   const createRuntimeImpl: typeof createOpencode = async () => ({
     server: { url: "http://127.0.0.1:43000", close: serverClose },
     client: {
       command: commandApi,
       session: sessionApi,
       event: eventApi,
+      provider: providerApi,
     } as unknown as OpencodeClient,
   });
   const createRuntime = vi.fn(createRuntimeImpl);
@@ -131,6 +159,7 @@ function createOpenCodeFixture(input?: {
     sessionPromptAsync,
     sessionCommand,
     eventSubscribe,
+    providerList,
     serverClose,
   };
 }
@@ -395,6 +424,13 @@ describe("OpencodeAdapter native commands", () => {
             { name: "review", description: "Run review checks" },
           ]);
 
+          if (!adapter.listModels) {
+            throw new Error("OpenCode adapter did not expose listModels.");
+          }
+
+          const models = yield* adapter.listModels();
+          expect(models.models).toEqual([{ slug: "openai/gpt-5", name: "OpenAI · GPT-5" }]);
+
           yield* adapter.sendTurn({
             threadId,
             input: "/review check binding",
@@ -410,6 +446,7 @@ describe("OpencodeAdapter native commands", () => {
 
     expect(fixture.sessionCreate).toHaveBeenCalledTimes(1);
     expect(fixture.commandList).toHaveBeenCalledTimes(1);
+    expect(fixture.providerList).toHaveBeenCalledTimes(1);
     expect(fixture.sessionCommand).toHaveBeenCalledTimes(1);
     expect(fixture.eventSubscribe).toHaveBeenCalledTimes(1);
     expect(events.some((event) => event.type === "runtime.warning")).toBe(false);

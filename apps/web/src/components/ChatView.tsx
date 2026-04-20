@@ -62,6 +62,7 @@ import {
 import {
   providerCommandsQueryOptions,
   providerComposerCapabilitiesQueryOptions,
+  providerModelsQueryOptions,
   providerSkillsQueryOptions,
   supportsNativeSlashCommandDiscovery,
   supportsSkillDiscovery,
@@ -797,9 +798,20 @@ export default function ChatView({
     selectedProvider === "codex" ? composerDraft.codexFastMode : false;
   const selectedOpencodeVariant = selectedProvider === "opencode" ? composerDraft.opencodeVariant : null;
   const selectedOpencodeAgent = selectedProvider === "opencode" ? composerDraft.opencodeAgent : null;
+  const opencodeRuntimeModelsQuery = useQuery(
+    providerModelsQueryOptions({
+      provider: "opencode",
+      enabled: true,
+    }),
+  );
   const modelOptionsByProvider = useMemo(
-    () => getCustomModelOptionsByProvider(settings, providerStatuses),
-    [providerStatuses, settings],
+    () =>
+      getCustomModelOptionsByProvider(
+        settings,
+        providerStatuses,
+        opencodeRuntimeModelsQuery.data?.models ?? [],
+      ),
+    [opencodeRuntimeModelsQuery.data?.models, providerStatuses, settings],
   );
   const selectedModel = useMemo(() => {
     const draftModel = composerDraft.model;
@@ -6016,10 +6028,12 @@ function getCustomModelOptionsByProvider(settings: {
   customCodexModels: readonly string[];
   customOpencodeModels: readonly string[];
   customClaudeModels: readonly string[];
-}, providerStatuses: readonly ServerProviderStatus[]): Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>> {
+}, providerStatuses: readonly ServerProviderStatus[], opencodeRuntimeModels: ReadonlyArray<{ slug: string; name: string }>): Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>> {
   const opencodeProvider = providerStatuses.find((provider) => provider.provider === "opencode");
   const opencodeOptions =
-    opencodeProvider?.models && opencodeProvider.models.length > 0
+    opencodeRuntimeModels.length > 0
+      ? opencodeRuntimeModels
+      : opencodeProvider?.models && opencodeProvider.models.length > 0
       ? opencodeProvider.models.map((model) => ({ slug: model.slug, name: model.name }))
       : getAppModelOptions("opencode", settings.customOpencodeModels);
   return {

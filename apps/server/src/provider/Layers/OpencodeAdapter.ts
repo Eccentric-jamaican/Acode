@@ -7,6 +7,7 @@ import {
   type ProviderComposerCapabilities,
   type ProviderListCommandsInput,
   type ProviderListCommandsResult,
+  type ProviderListModelsResult,
   type ProviderNativeCommandDescriptor,
   type ProviderListSkillsInput,
   type ProviderListSkillsResult,
@@ -1988,7 +1989,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
       supportsNativeSlashCommandDiscovery: true,
       supportsPluginMentions: false,
       supportsPluginDiscovery: false,
-      supportsRuntimeModelList: false,
+      supportsRuntimeModelList: true,
     };
 
     const getComposerCapabilities: NonNullable<OpencodeAdapterShape["getComposerCapabilities"]> = () =>
@@ -2022,6 +2023,63 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           threadId: discoveryThreadId,
           cwd: input.cwd,
         });
+      });
+
+    const listModels: NonNullable<OpencodeAdapterShape["listModels"]> = () =>
+      Effect.gen(function* () {
+        const discoveryThreadId =
+          [...sessions.values()][0]?.threadId ?? ThreadId.makeUnsafe("discovery");
+        const directory = [...sessions.values()][0]?.cwd ?? serverConfig.cwd;
+        const providerList = yield* requestJson<unknown>({
+          threadId: discoveryThreadId,
+          methodName: "provider.list",
+          httpMethod: "GET",
+          path: "/provider",
+          directory,
+          body: undefined,
+        });
+
+        const providerListRecord = asObject(providerList);
+        const connected = new Set(
+          (asArray(providerListRecord?.connected) ?? []).flatMap((value) =>
+            typeof value === "string" ? [value] : [],
+          ),
+        );
+        const allProviders = asArray(providerListRecord?.all) ?? [];
+        const models = allProviders
+          .flatMap((providerValue) => {
+            const provider = asObject(providerValue);
+            const providerId = asString(provider?.id);
+            const providerName = asString(provider?.name) ?? providerId;
+            if (!providerId || !providerName || !connected.has(providerId)) {
+              return [];
+            }
+            const providerModels = asObject(provider?.models) ?? {};
+            return Object.values(providerModels).flatMap((modelValue) => {
+              const model = asObject(modelValue);
+              const modelId = asString(model?.id);
+              const modelName = asString(model?.name) ?? modelId;
+              if (!modelId || !modelName) {
+                return [];
+              }
+              return [
+                {
+                  slug: `${providerId}/${modelId}`,
+                  name: `${providerName} · ${modelName}`,
+                },
+              ];
+            });
+          })
+          .toSorted((left, right) => left.name.localeCompare(right.name))
+          .filter((model, index, collection) =>
+            collection.findIndex((candidate) => candidate.slug === model.slug) === index,
+          );
+
+        return {
+          models,
+          source: "runtime",
+          cached: false,
+        } satisfies ProviderListModelsResult;
       });
 
     const stopAll: OpencodeAdapterShape["stopAll"] = () =>
@@ -2061,7 +2119,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         supportsNativeSlashCommandDiscovery: true,
         supportsPluginMentions: false,
         supportsPluginDiscovery: false,
-        supportsRuntimeModelList: false,
+        supportsRuntimeModelList: true,
       },
       startSession,
       sendTurn,
@@ -2077,6 +2135,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
       getComposerCapabilities,
       listSkills,
       listCommands,
+      listModels,
       streamEvents: Stream.fromQueue(queue),
     } satisfies OpencodeAdapterShape;
   });
