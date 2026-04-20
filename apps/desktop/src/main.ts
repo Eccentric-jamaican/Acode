@@ -786,14 +786,21 @@ function initializePackagedLogging(): void {
 }
 
 function captureBackendOutput(child: ChildProcess.ChildProcess): void {
-  if (!app.isPackaged || backendLogSink === null) return;
-  const writeChunk = (chunk: unknown): void => {
-    if (!backendLogSink) return;
+  const writeChunk =
+    (target: "stdout" | "stderr") =>
+    (chunk: unknown): void => {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
-    backendLogSink.write(buffer);
+    if (!app.isPackaged) {
+      if (target === "stdout") {
+        process.stdout.write(buffer);
+      } else {
+        process.stderr.write(buffer);
+      }
+    }
+    backendLogSink?.write(buffer);
   };
-  child.stdout?.on("data", writeChunk);
-  child.stderr?.on("data", writeChunk);
+  child.stdout?.on("data", writeChunk("stdout"));
+  child.stderr?.on("data", writeChunk("stderr"));
 }
 
 initializePackagedLogging();
@@ -1484,7 +1491,9 @@ function createWindowsToastOptions(input: DesktopNotificationPayload): Record<st
 }
 
 async function showWindowsRichNotification(input: DesktopNotificationPayload): Promise<boolean> {
-  if (process.platform !== "win32" || windowsRichToastDisabledForSession !== null) {
+  // In local dev, PowerToast falls back to a PowerShell bootstrap path that is
+  // flaky on some Windows setups. Use Electron's built-in notification instead.
+  if (process.platform !== "win32" || windowsRichToastDisabledForSession !== null || isDevelopment) {
     return false;
   }
 
@@ -1726,7 +1735,6 @@ function startBackend(): void {
     return;
   }
 
-  const captureBackendLogs = app.isPackaged && backendLogSink !== null;
   const child = ChildProcess.spawn(process.execPath, [backendEntry], {
     cwd: resolveBackendCwd(),
     // In Electron main, process.execPath points to the Electron binary.
@@ -1735,7 +1743,7 @@ function startBackend(): void {
       ...backendEnv(),
       ELECTRON_RUN_AS_NODE: "1",
     },
-    stdio: captureBackendLogs ? ["ignore", "pipe", "pipe"] : "inherit",
+    stdio: ["ignore", "pipe", "pipe"],
   });
   backendProcess = child;
   let backendSessionClosed = false;

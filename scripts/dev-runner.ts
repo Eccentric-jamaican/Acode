@@ -33,6 +33,9 @@ const MODE_ARGS = {
   "dev:desktop": [
     "run",
     "dev",
+    "--ui=stream",
+    "--output-logs=full",
+    "--log-order=stream",
     "--filter=@t3tools/desktop",
     "--filter=@t3tools/web",
     "--filter=t3",

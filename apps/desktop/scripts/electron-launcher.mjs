@@ -240,6 +240,9 @@ export function resolveElectronPath() {
   const electronBinaryPath = require("electron");
 
   if (process.platform === "win32") {
+    if (isDevelopment) {
+      return electronBinaryPath;
+    }
     return buildWindowsLauncher(electronBinaryPath);
   }
 

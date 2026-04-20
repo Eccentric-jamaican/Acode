@@ -305,7 +305,7 @@ function asFunction(
   if (typeof value !== "function") {
     throw new Error(`Injected OpenCode runtime client is missing '${key}' function.`);
   }
-  return value as (...args: ReadonlyArray<unknown>) => Promise<unknown>;
+  return value.bind(record) as (...args: ReadonlyArray<unknown>) => Promise<unknown>;
 }
 
 function decodePathSegment(path: string, index: number): string {

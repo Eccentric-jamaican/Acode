@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type { createOpencode, OpencodeClient } from "@opencode-ai/sdk";
-import { DEFAULT_SERVER_SETTINGS, ThreadId } from "@t3tools/contracts";
+import { DEFAULT_SERVER_SETTINGS, ThreadId, type ProviderRuntimeEvent } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vitest";
 
-import { Effect, Layer } from "effect";
+import { Effect, Fiber, Layer, Stream } from "effect";
 
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -36,14 +36,26 @@ function createAbortableStream(signal?: AbortSignal): AsyncIterable<unknown> {
 
 function createOpenCodeFixture(input?: {
   readonly commands?: ReadonlyArray<{ name: string; description?: string }>;
+  readonly requireMethodThisBinding?: boolean;
 }) {
   const commands = [...(input?.commands ?? [{ name: "review", description: "Run review checks" }])];
   const serverClose = vi.fn(() => undefined);
-  const commandList = vi.fn(async (_options?: unknown) => commands);
-  const sessionCreate = vi.fn(async (_options?: unknown) => ({ id: "session-1" }));
-  const sessionPromptAsync = vi.fn(async (_options?: unknown) => undefined);
+  const commandList = vi.fn(async function (this: { readonly commands?: typeof commands }, _options?: unknown) {
+    return this.commands ?? commands;
+  });
+  const sessionCreate = vi.fn(async function (this: { readonly sessionId?: string }, _options?: unknown) {
+    return { id: this.sessionId ?? "session-1" };
+  });
+  const sessionPromptAsync = vi.fn(async function (this: { readonly canPrompt?: boolean }, _options?: unknown) {
+    if (input?.requireMethodThisBinding && this.canPrompt !== true) {
+      throw new Error("session.promptAsync lost method binding");
+    }
+    return undefined;
+  });
   const sessionCommand = vi.fn(
-    async (_options?: {
+    async function (
+      this: { readonly canCommand?: boolean },
+      _options?: {
       body?: {
         command?: string;
         arguments?: string;
@@ -51,24 +63,63 @@ function createOpenCodeFixture(input?: {
         model?: string;
       };
       path?: { id?: string };
-    }) => ({ info: { id: "msg-1" }, parts: [] }),
+      },
+    ) {
+      if (input?.requireMethodThisBinding && this.canCommand !== true) {
+        throw new Error("session.command lost method binding");
+      }
+      return { info: { id: "msg-1" }, parts: [] };
+    },
   );
   const eventSubscribe = vi.fn(
-    async (options?: { signal?: AbortSignal }) => ({
-      stream: createAbortableStream(options?.signal),
-    }),
+    async function (
+      this: { readonly marker?: string },
+      options?: { signal?: AbortSignal },
+    ) {
+      if (input?.requireMethodThisBinding && this.marker !== "event-api") {
+        throw new Error("event.subscribe lost method binding");
+      }
+      return {
+        stream: createAbortableStream(options?.signal),
+      };
+    },
   );
+
+  const commandApi = input?.requireMethodThisBinding
+    ? {
+        commands,
+        list: commandList,
+      }
+    : { list: commandList };
+
+  const sessionApi = input?.requireMethodThisBinding
+    ? {
+        sessionId: "session-1",
+        canPrompt: true,
+        canCommand: true,
+        create: sessionCreate,
+        promptAsync: sessionPromptAsync,
+        command: sessionCommand,
+      }
+    : {
+        create: sessionCreate,
+        promptAsync: sessionPromptAsync,
+        command: sessionCommand,
+      };
+
+  const eventApi = input?.requireMethodThisBinding
+    ? {
+        marker: "event-api",
+        subscribe: eventSubscribe,
+      }
+    : { subscribe: eventSubscribe };
 
   const createRuntimeImpl: typeof createOpencode = async () => ({
     server: { url: "http://127.0.0.1:43000", close: serverClose },
     client: {
-      command: { list: commandList },
-      session: {
-        create: sessionCreate,
-        promptAsync: sessionPromptAsync,
-        command: sessionCommand,
-      },
-      event: { subscribe: eventSubscribe },
+      command: commandApi,
+      session: sessionApi,
+      event: eventApi,
     } as unknown as OpencodeClient,
   });
   const createRuntime = vi.fn(createRuntimeImpl);
@@ -301,5 +352,66 @@ describe("OpencodeAdapter native commands", () => {
         binaryPath: "opencode",
       }),
     );
+  });
+
+  it("binds injected SDK methods to their owning objects", async () => {
+    const fixture = createOpenCodeFixture({
+      requireMethodThisBinding: true,
+    });
+    const events: ProviderRuntimeEvent[] = [];
+
+    await runWithFixture(
+      fixture,
+      Effect.gen(function* () {
+        const adapter = yield* OpencodeAdapter;
+        const collector = yield* Stream.runForEach(
+          adapter.streamEvents,
+          (event) =>
+            Effect.sync(() => {
+              events.push(event);
+            }),
+        ).pipe(Effect.forkChild);
+
+        try {
+          const threadId = asThreadId("thread-bound-methods");
+          yield* adapter.startSession({
+            threadId,
+            provider: "opencode",
+            cwd: process.cwd(),
+            model: "openai/gpt-4.1",
+            runtimeMode: "full-access",
+          });
+
+          if (!adapter.listCommands) {
+            throw new Error("OpenCode adapter did not expose listCommands.");
+          }
+
+          const commands = yield* adapter.listCommands({
+            provider: "opencode",
+            cwd: process.cwd(),
+          });
+
+          expect(commands.commands).toEqual([
+            { name: "review", description: "Run review checks" },
+          ]);
+
+          yield* adapter.sendTurn({
+            threadId,
+            input: "/review check binding",
+          });
+
+          yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 25)));
+          yield* adapter.stopAll();
+        } finally {
+          yield* Fiber.interrupt(collector);
+        }
+      }),
+    );
+
+    expect(fixture.sessionCreate).toHaveBeenCalledTimes(1);
+    expect(fixture.commandList).toHaveBeenCalledTimes(1);
+    expect(fixture.sessionCommand).toHaveBeenCalledTimes(1);
+    expect(fixture.eventSubscribe).toHaveBeenCalledTimes(1);
+    expect(events.some((event) => event.type === "runtime.warning")).toBe(false);
   });
 });
