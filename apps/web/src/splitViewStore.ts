@@ -14,6 +14,7 @@ export type SplitViewPane = "left" | "right";
 
 export interface SplitViewPanePanelState {
   panel: "browser" | "diff" | null;
+  filesOpen: boolean;
   diffTurnId: TurnId | null;
   diffFilePath: string | null;
   hasOpenedPanel: boolean;
@@ -72,6 +73,7 @@ function clampRatio(value: number): number {
 function createDefaultPanePanelState(): SplitViewPanePanelState {
   return {
     panel: null,
+    filesOpen: false,
     diffTurnId: null,
     diffFilePath: null,
     hasOpenedPanel: false,

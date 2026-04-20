@@ -2,7 +2,7 @@ import path from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Effect, FileSystem, Layer } from "effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { CheckpointDiffQueryLive } from "./checkpointing/Layers/CheckpointDiffQuery";
 import { CheckpointStoreLive } from "./checkpointing/Layers/CheckpointStore";
@@ -20,16 +20,16 @@ import { ProviderRuntimeIngestionLive } from "./orchestration/Layers/ProviderRun
 import { TaskLifecycleReactorLive } from "./orchestration/Layers/TaskLifecycleReactor";
 import { ErrorInboxRepositoryLive } from "./errorInbox/Layers/ErrorInboxRepository";
 import { ErrorInboxServiceLive } from "./errorInbox/Layers/ErrorInbox";
-import { ProviderUnsupportedError } from "./provider/Errors";
 import { makeCodexAdapterLive } from "./provider/Layers/CodexAdapter";
 import { makeOpencodeAdapterLive } from "./provider/Layers/OpencodeAdapter";
 import { makeClaudeAdapterLive } from "./provider/Layers/ClaudeAdapter";
+import { OpenCodeProviderLive } from "./provider/Layers/OpenCodeProvider";
+import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry";
 import { ProviderDiscoveryServiceLive } from "./provider/Layers/ProviderDiscoveryService";
+import { ProviderHealthLive } from "./provider/Layers/ProviderHealth";
 import { ProviderAdapterRegistryLive } from "./provider/Layers/ProviderAdapterRegistry";
 import { makeProviderServiceLive } from "./provider/Layers/ProviderService";
 import { ProviderSessionDirectoryLive } from "./provider/Layers/ProviderSessionDirectory";
-import { CodexAdapter } from "./provider/Services/CodexAdapter";
-import { ProviderDiscoveryService } from "./provider/Services/ProviderDiscoveryService";
 import { ProviderService } from "./provider/Services/ProviderService";
 import { makeEventNdjsonLogger } from "./provider/Layers/EventNdjsonLogger";
 import { ServerRuntimeStartupLive } from "./serverRuntimeStartup";
@@ -45,11 +45,7 @@ import { BunPtyAdapterLive } from "./terminal/Layers/BunPTY";
 import { NodePtyAdapterLive } from "./terminal/Layers/NodePTY";
 import { AnalyticsService } from "./telemetry/Services/AnalyticsService";
 
-export function makeServerProviderLayer(): Layer.Layer<
-  ProviderService | ProviderDiscoveryService | CodexAdapter,
-  ProviderUnsupportedError,
-  SqlClient.SqlClient | ServerConfig | FileSystem.FileSystem | AnalyticsService
-> {
+export function makeServerProviderLayer() {
   return Effect.gen(function* () {
     const { stateDir } = yield* ServerConfig;
     const providerLogsDir = path.join(stateDir, "logs", "provider");
@@ -70,6 +66,7 @@ export function makeServerProviderLayer(): Layer.Layer<
     const claudeAdapterLayer = makeClaudeAdapterLive(
       nativeEventLogger ? { nativeEventLogger } : undefined,
     );
+    const openCodeProviderLayer = OpenCodeProviderLive;
     const adapterRegistryLayer = ProviderAdapterRegistryLive.pipe(
       Layer.provide(codexAdapterLayer),
       Layer.provide(opencodeAdapterLayer),
@@ -82,7 +79,16 @@ export function makeServerProviderLayer(): Layer.Layer<
     const providerDiscoveryLayer = ProviderDiscoveryServiceLive.pipe(
       Layer.provide(adapterRegistryLayer),
     );
-    return Layer.mergeAll(providerServiceLayer, providerDiscoveryLayer, codexAdapterLayer);
+    const providerRegistryLayer = ProviderRegistryLive.pipe(
+      Layer.provide(openCodeProviderLayer),
+      Layer.provide(ProviderHealthLive),
+    );
+    return Layer.mergeAll(
+      providerServiceLayer,
+      providerDiscoveryLayer,
+      providerRegistryLayer,
+      codexAdapterLayer,
+    );
   }).pipe(Layer.unwrap);
 }
 

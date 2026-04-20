@@ -98,6 +98,15 @@ function hasExternalScheme(path: string): boolean {
   return !POSITION_ONLY_PATTERN.test(rest);
 }
 
+function stripEditorPositionSuffix(path: string): string {
+  return path.replace(POSITION_SUFFIX_PATTERN, "");
+}
+
+function normalizeForPathComparison(path: string): string {
+  const normalized = path.replaceAll("\\", "/").replace(/\/+$/, "");
+  return /^[A-Za-z]:/.test(normalized) ? normalized[0]!.toLowerCase() + normalized.slice(1) : normalized;
+}
+
 export function resolveMarkdownFileLinkTarget(
   href: string | undefined,
   cwd?: string,
@@ -131,4 +140,26 @@ export function resolveMarkdownFileLinkTarget(
 
   if (!cwd) return null;
   return resolvePathLinkTarget(pathWithPosition, cwd);
+}
+
+export function resolveMarkdownFileViewerPath(
+  href: string | undefined,
+  cwd?: string,
+): string | null {
+  if (!cwd) {
+    return null;
+  }
+  const targetPath = resolveMarkdownFileLinkTarget(href, cwd);
+  if (!targetPath) {
+    return null;
+  }
+  const normalizedCwd = normalizeForPathComparison(cwd);
+  const normalizedTarget = normalizeForPathComparison(stripEditorPositionSuffix(targetPath));
+  if (normalizedTarget === normalizedCwd) {
+    return null;
+  }
+  if (!normalizedTarget.startsWith(`${normalizedCwd}/`)) {
+    return null;
+  }
+  return normalizedTarget.slice(normalizedCwd.length + 1);
 }

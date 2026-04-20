@@ -1,9 +1,9 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
-import { useCallback, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useCallback, useMemo, useState } from "react";
 import { PROVIDER_DISPLAY_NAMES, type ProviderKind } from "@t3tools/contracts";
 import { getModelOptions, normalizeModelSlug } from "@t3tools/shared/model";
-import { ZapIcon } from "lucide-react";
+import { ArchiveIcon, ArchiveRestoreIcon, Trash2Icon, ZapIcon } from "lucide-react";
 
 import {
   APP_SERVICE_TIER_OPTIONS,
@@ -15,7 +15,7 @@ import {
 import AppPageShell from "../components/AppPageShell";
 import { isElectronRuntime } from "../env";
 import { useTheme } from "../hooks/useTheme";
-import { cn } from "../lib/utils";
+import { cn, newCommandId } from "../lib/utils";
 import { serverConfigQueryOptions } from "../lib/serverReactQuery";
 import { ensureNativeApi } from "../nativeApi";
 import { SETTINGS_SECTION_IDS } from "../settingsSections";
@@ -25,6 +25,7 @@ import { Input } from "../components/ui/input";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../components/ui/select";
 import { Switch } from "../components/ui/switch";
 import { SidebarInsetTrigger } from "~/components/ui/sidebar";
+import { useStore } from "../store";
 
 const THEME_OPTIONS = [
   {
@@ -124,6 +125,7 @@ function SettingsRouteView() {
   const usesDesktopAppChrome = isElectronRuntime();
   const { theme, setTheme, resolvedTheme } = useTheme();
   const { settings, defaults, updateSettings } = useAppSettings();
+  const queryClient = useQueryClient();
   const serverConfigQuery = useQuery(serverConfigQueryOptions());
   const [isOpeningKeybindings, setIsOpeningKeybindings] = useState(false);
   const [openKeybindingsError, setOpenKeybindingsError] = useState<string | null>(null);
@@ -144,9 +146,12 @@ function SettingsRouteView() {
   const newThreadSuggestionsEnabled = settings.newThreadSuggestionsEnabled;
   const newThreadSuggestionModel = settings.newThreadSuggestionModel;
   const keybindingsConfigPath = serverConfigQuery.data?.keybindingsConfigPath ?? null;
+  const opencodeServerSettings = serverConfigQuery.data?.settings?.providers.opencode ?? null;
+  const threads = useStore((store) => store.threads);
+  const projects = useStore((store) => store.projects);
   const suggestionModelOptions = getSuggestionModelOptions({
     customCodexModels: settings.customCodexModels,
-    customOpencodeModels: settings.customOpencodeModels,
+    customOpencodeModels: opencodeServerSettings?.customModels ?? [],
     customClaudeModels: settings.customClaudeModels,
     selectedModel: settings.newThreadSuggestionModel,
   });
@@ -168,9 +173,33 @@ function SettingsRouteView() {
       });
   }, [keybindingsConfigPath]);
 
+  const updateOpenCodeServerSettings = useCallback(
+    async (
+      patch: Partial<{
+        enabled: boolean;
+        binaryPath: string;
+        serverUrl: string;
+        serverPassword: string;
+        customModels: string[];
+      }>,
+    ) => {
+      const api = ensureNativeApi();
+      await api.server.updateSettings({
+        providers: {
+          opencode: patch,
+        },
+      });
+      await queryClient.invalidateQueries({ queryKey: ["server", "config"] });
+    },
+    [queryClient],
+  );
+
   const addCustomModel = useCallback((provider: ProviderKind) => {
     const customModelInput = customModelInputByProvider[provider];
-    const customModels = getCustomModelsForProvider(settings, provider);
+    const customModels =
+      provider === "opencode"
+        ? (opencodeServerSettings?.customModels ?? [])
+        : getCustomModelsForProvider(settings, provider);
     const normalized = normalizeModelSlug(customModelInput, provider);
     if (!normalized) {
       setCustomModelErrorByProvider((existing) => ({
@@ -201,27 +230,109 @@ function SettingsRouteView() {
       return;
     }
 
-    updateSettings(patchCustomModels(provider, [...customModels, normalized]));
-    setCustomModelInputByProvider((existing) => ({
-      ...existing,
-      [provider]: "",
-    }));
-    setCustomModelErrorByProvider((existing) => ({
-      ...existing,
-      [provider]: null,
-    }));
-  }, [customModelInputByProvider, settings, updateSettings]);
+    const write =
+      provider === "opencode"
+        ? updateOpenCodeServerSettings({ customModels: [...customModels, normalized] })
+        : Promise.resolve(
+            updateSettings(patchCustomModels(provider, [...customModels, normalized])),
+          );
+    void write.then(() => {
+      setCustomModelInputByProvider((existing) => ({
+        ...existing,
+        [provider]: "",
+      }));
+      setCustomModelErrorByProvider((existing) => ({
+        ...existing,
+        [provider]: null,
+      }));
+    });
+  }, [customModelInputByProvider, opencodeServerSettings?.customModels, settings, updateOpenCodeServerSettings, updateSettings]);
 
   const removeCustomModel = useCallback(
     (provider: ProviderKind, slug: string) => {
-      const customModels = getCustomModelsForProvider(settings, provider);
-      updateSettings(patchCustomModels(provider, customModels.filter((model) => model !== slug)));
+      const customModels =
+        provider === "opencode"
+          ? (opencodeServerSettings?.customModels ?? [])
+          : getCustomModelsForProvider(settings, provider);
+      if (provider === "opencode") {
+        void updateOpenCodeServerSettings({
+          customModels: customModels.filter((model) => model !== slug),
+        });
+      } else {
+        updateSettings(patchCustomModels(provider, customModels.filter((model) => model !== slug)));
+      }
       setCustomModelErrorByProvider((existing) => ({
         ...existing,
         [provider]: null,
       }));
     },
-    [settings, updateSettings],
+    [opencodeServerSettings?.customModels, settings, updateOpenCodeServerSettings, updateSettings],
+  );
+
+  const archivedGroups = useMemo(
+    () =>
+      projects
+        .map((project) => ({
+          project,
+          threads: threads
+            .filter((thread) => thread.projectId === project.id && thread.archivedAt != null)
+            .toSorted((left, right) =>
+              (right.archivedAt ?? right.updatedAt).localeCompare(left.archivedAt ?? left.updatedAt),
+            ),
+        }))
+        .filter((group) => group.threads.length > 0),
+    [projects, threads],
+  );
+
+  const unarchiveThread = useCallback(async (threadId: string) => {
+    const api = ensureNativeApi();
+    await api.orchestration.dispatchCommand({
+      type: "thread.unarchive",
+      commandId: newCommandId(),
+      threadId: threadId as never,
+    });
+  }, []);
+
+  const deleteArchivedThread = useCallback(
+    async (threadId: string, threadTitle: string) => {
+      const api = ensureNativeApi();
+      const confirmed = settings.confirmThreadDelete
+        ? await api.dialogs.confirm(
+            [`Delete archived thread "${threadTitle}"?`, "This action cannot be undone."].join("\n"),
+          )
+        : true;
+      if (!confirmed) {
+        return;
+      }
+
+      await api.orchestration.dispatchCommand({
+        type: "thread.delete",
+        commandId: newCommandId(),
+        threadId: threadId as never,
+      });
+    },
+    [settings.confirmThreadDelete],
+  );
+
+  const handleArchivedThreadContextMenu = useCallback(
+    async (threadId: string, threadTitle: string, position: { x: number; y: number }) => {
+      const api = ensureNativeApi();
+      const clicked = await api.contextMenu.show(
+        [
+          { id: "restore", label: "Restore" },
+          { id: "delete", label: "Delete", destructive: true },
+        ],
+        position,
+      );
+      if (clicked === "restore") {
+        await unarchiveThread(threadId);
+        return;
+      }
+      if (clicked === "delete") {
+        await deleteArchivedThread(threadId, threadTitle);
+      }
+    },
+    [deleteArchivedThread, unarchiveThread],
   );
 
   return (
@@ -362,6 +473,85 @@ function SettingsRouteView() {
             </section>
 
             <section
+              className="scroll-mt-4 rounded-2xl border border-border bg-card p-5"
+            >
+              <div className="mb-4">
+                <h2 className="text-sm font-medium text-foreground">OpenCode Server</h2>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Configure how T3 Code connects to OpenCode for provider sessions and model
+                  discovery.
+                </p>
+              </div>
+
+              <div className="space-y-4">
+                <div className="flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
+                  <div>
+                    <p className="text-sm font-medium text-foreground">Enable OpenCode</p>
+                    <p className="text-xs text-muted-foreground">
+                      Disable this to hide OpenCode from new provider sessions.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={opencodeServerSettings?.enabled ?? true}
+                    onCheckedChange={(checked) => {
+                      void updateOpenCodeServerSettings({ enabled: Boolean(checked) });
+                    }}
+                    aria-label="Enable OpenCode"
+                  />
+                </div>
+
+                <label className="block space-y-1">
+                  <span className="text-xs font-medium text-foreground">Binary path</span>
+                  <Input
+                    value={opencodeServerSettings?.binaryPath ?? "opencode"}
+                    onChange={(event) => {
+                      void updateOpenCodeServerSettings({ binaryPath: event.target.value });
+                    }}
+                    placeholder="opencode"
+                    spellCheck={false}
+                  />
+                  <span className="text-xs text-muted-foreground">
+                    Leave blank to use <code>opencode</code> from your PATH.
+                  </span>
+                </label>
+
+                <label className="block space-y-1">
+                  <span className="text-xs font-medium text-foreground">Server URL</span>
+                  <Input
+                    value={opencodeServerSettings?.serverUrl ?? ""}
+                    onChange={(event) => {
+                      void updateOpenCodeServerSettings({ serverUrl: event.target.value });
+                    }}
+                    placeholder="http://127.0.0.1:4096"
+                    spellCheck={false}
+                  />
+                  <span className="text-xs text-muted-foreground">
+                    Leave blank to let T3 Code spawn the OpenCode server locally when needed.
+                  </span>
+                </label>
+
+                <label className="block space-y-1">
+                  <span className="text-xs font-medium text-foreground">Server password</span>
+                  <Input
+                    type="password"
+                    autoComplete="off"
+                    value={opencodeServerSettings?.serverPassword ?? ""}
+                    onChange={(event) => {
+                      void updateOpenCodeServerSettings({
+                        serverPassword: event.target.value,
+                      });
+                    }}
+                    placeholder="Optional password"
+                    spellCheck={false}
+                  />
+                  <span className="text-xs text-muted-foreground">
+                    Used only when the configured OpenCode server requires authentication.
+                  </span>
+                </label>
+              </div>
+            </section>
+
+            <section
               id={SETTINGS_SECTION_IDS.models}
               className="scroll-mt-4 rounded-2xl border border-border bg-card p-5"
             >
@@ -413,7 +603,10 @@ function SettingsRouteView() {
 
                 {MODEL_PROVIDER_SETTINGS.map((providerSettings) => {
                   const provider = providerSettings.provider;
-                  const customModels = getCustomModelsForProvider(settings, provider);
+                  const customModels =
+                    provider === "opencode"
+                      ? (opencodeServerSettings?.customModels ?? [])
+                      : getCustomModelsForProvider(settings, provider);
                   const customModelInput = customModelInputByProvider[provider];
                   const customModelError = customModelErrorByProvider[provider] ?? null;
                   return (
@@ -488,14 +681,18 @@ function SettingsRouteView() {
                               <Button
                                 size="xs"
                                 variant="outline"
-                                onClick={() =>
+                                onClick={() => {
+                                  if (provider === "opencode") {
+                                    void updateOpenCodeServerSettings({ customModels: [] });
+                                    return;
+                                  }
                                   updateSettings(
                                     patchCustomModels(
                                       provider,
                                       [...getDefaultCustomModelsForProvider(defaults, provider)],
                                     ),
-                                  )
-                                }
+                                  );
+                                }}
                               >
                                 Reset custom models
                               </Button>
@@ -812,7 +1009,26 @@ function SettingsRouteView() {
                 />
               </div>
 
-              {settings.confirmThreadDelete !== defaults.confirmThreadDelete ? (
+              <div className="mt-3 flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
+                <div>
+                  <p className="text-sm font-medium text-foreground">Confirm thread archive</p>
+                  <p className="text-xs text-muted-foreground">
+                    Ask for confirmation before archiving a thread.
+                  </p>
+                </div>
+                <Switch
+                  checked={settings.confirmThreadArchive}
+                  onCheckedChange={(checked) =>
+                    updateSettings({
+                      confirmThreadArchive: Boolean(checked),
+                    })
+                  }
+                  aria-label="Confirm thread archive"
+                />
+              </div>
+
+              {settings.confirmThreadDelete !== defaults.confirmThreadDelete ||
+              settings.confirmThreadArchive !== defaults.confirmThreadArchive ? (
                 <div className="mt-3 flex justify-end">
                   <Button
                     size="xs"
@@ -820,6 +1036,7 @@ function SettingsRouteView() {
                     onClick={() =>
                       updateSettings({
                         confirmThreadDelete: defaults.confirmThreadDelete,
+                        confirmThreadArchive: defaults.confirmThreadArchive,
                       })
                     }
                   >
@@ -827,6 +1044,78 @@ function SettingsRouteView() {
                   </Button>
                 </div>
               ) : null}
+            </section>
+
+            <section
+              id={SETTINGS_SECTION_IDS.archived}
+              className="scroll-mt-4 rounded-2xl border border-border bg-card p-5"
+            >
+              <div className="mb-4">
+                <h2 className="text-sm font-medium text-foreground">Archived threads</h2>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Restore archived threads to the sidebar or delete them permanently.
+                </p>
+              </div>
+
+              {archivedGroups.length === 0 ? (
+                <div className="flex items-center gap-3 rounded-lg border border-border bg-background px-4 py-4 text-sm text-muted-foreground">
+                  <ArchiveIcon className="size-5" />
+                  <span>No archived threads yet.</span>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {archivedGroups.map(({ project, threads: projectThreads }) => (
+                    <div key={project.id} className="rounded-xl border border-border bg-background">
+                      <div className="border-b border-border px-4 py-3 text-sm font-medium text-foreground">
+                        {project.name}
+                      </div>
+                      <div className="divide-y divide-border">
+                        {projectThreads.map((thread) => (
+                          <div
+                            key={thread.id}
+                            className="flex items-center justify-between gap-4 px-4 py-3"
+                            onContextMenu={(event) => {
+                              event.preventDefault();
+                              void handleArchivedThreadContextMenu(thread.id, thread.title, {
+                                x: event.clientX,
+                                y: event.clientY,
+                              });
+                            }}
+                          >
+                            <div className="min-w-0">
+                              <div className="truncate text-sm text-foreground">{thread.title}</div>
+                              <div className="mt-1 text-xs text-muted-foreground">
+                                Archived{" "}
+                                {thread.archivedAt
+                                  ? new Date(thread.archivedAt).toLocaleString()
+                                  : "recently"}
+                              </div>
+                            </div>
+                            <div className="flex shrink-0 items-center gap-2">
+                              <Button
+                                size="xs"
+                                variant="outline"
+                                onClick={() => void unarchiveThread(thread.id)}
+                              >
+                                <ArchiveRestoreIcon className="mr-1 size-3.5" />
+                                Restore
+                              </Button>
+                              <Button
+                                size="xs"
+                                variant="outline"
+                                onClick={() => void deleteArchivedThread(thread.id, thread.title)}
+                              >
+                                <Trash2Icon className="mr-1 size-3.5" />
+                                Delete
+                              </Button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </section>
           </div>
         </div>

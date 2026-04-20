@@ -19,6 +19,7 @@ import {
 
 export const ComposerExtrasMenu = memo(function ComposerExtrasMenu(props: {
   interactionMode: ProviderInteractionMode;
+  showInteractionModeToggle?: boolean;
   supportsFastMode: boolean;
   fastModeEnabled: boolean;
   onAddPhotos: (files: File[]) => void;
@@ -35,6 +36,8 @@ export const ComposerExtrasMenu = memo(function ComposerExtrasMenu(props: {
     }
     event.target.value = "";
   };
+
+  const showInteractionModeToggle = props.showInteractionModeToggle ?? true;
 
   return (
     <>
@@ -71,19 +74,23 @@ export const ComposerExtrasMenu = memo(function ComposerExtrasMenu(props: {
             Add image
           </MenuItem>
 
-          <MenuSeparator />
-          <MenuCheckboxItem
-            checked={props.interactionMode === "plan"}
-            variant="switch"
-            onCheckedChange={(checked) => {
-              props.onSetPlanMode(checked === true);
-            }}
-          >
-            <span className="inline-flex items-center gap-2">
-              <ListTodoIcon className="size-4 shrink-0" />
-              Plan mode
-            </span>
-          </MenuCheckboxItem>
+          {showInteractionModeToggle ? (
+            <>
+              <MenuSeparator />
+              <MenuCheckboxItem
+                checked={props.interactionMode === "plan"}
+                variant="switch"
+                onCheckedChange={(checked) => {
+                  props.onSetPlanMode(checked === true);
+                }}
+              >
+                <span className="inline-flex items-center gap-2">
+                  <ListTodoIcon className="size-4 shrink-0" />
+                  Plan mode
+                </span>
+              </MenuCheckboxItem>
+            </>
+          ) : null}
 
           {props.supportsFastMode ? (
             <>

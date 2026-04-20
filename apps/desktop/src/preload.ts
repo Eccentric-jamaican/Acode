@@ -13,6 +13,8 @@ const UPDATE_DOWNLOAD_CHANNEL = "desktop:update-download";
 const UPDATE_INSTALL_CHANNEL = "desktop:update-install";
 const NOTIFICATIONS_IS_SUPPORTED_CHANNEL = "desktop:notifications-is-supported";
 const NOTIFICATIONS_SHOW_CHANNEL = "desktop:notifications-show";
+const NOTIFICATIONS_ACTION_CHANNEL = "desktop:notifications-action";
+const NOTIFICATIONS_CONSUME_PENDING_ACTIONS_CHANNEL = "desktop:notifications-consume-pending-actions";
 const BROWSER_GET_STATE_CHANNEL = "desktop:browser-get-state";
 const BROWSER_OPEN_CHANNEL = "desktop:browser-open";
 const BROWSER_CLOSE_PANE_CHANNEL = "desktop:browser-close-pane";
@@ -64,6 +66,18 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   notifications: {
     isSupported: () => ipcRenderer.invoke(NOTIFICATIONS_IS_SUPPORTED_CHANNEL),
     show: (input) => ipcRenderer.invoke(NOTIFICATIONS_SHOW_CHANNEL, input),
+    consumePendingActions: () => ipcRenderer.invoke(NOTIFICATIONS_CONSUME_PENDING_ACTIONS_CHANNEL),
+    onAction: (listener) => {
+      const wrappedListener = (_event: Electron.IpcRendererEvent, payload: unknown) => {
+        if (typeof payload !== "object" || payload === null) return;
+        listener(payload as Parameters<typeof listener>[0]);
+      };
+
+      ipcRenderer.on(NOTIFICATIONS_ACTION_CHANNEL, wrappedListener);
+      return () => {
+        ipcRenderer.removeListener(NOTIFICATIONS_ACTION_CHANNEL, wrappedListener);
+      };
+    },
   },
   browser: {
     getState: (input) => ipcRenderer.invoke(BROWSER_GET_STATE_CHANNEL, input),

@@ -11,8 +11,10 @@ import { useComposerDraftStore } from "../composerDraftStore";
 import { useDisposableThreadLifecycle } from "../hooks/useDisposableThreadLifecycle";
 import {
   parseDiffRouteSearch,
+  resolveFilesRailOpen,
   resolveRightPanelMode,
   type ResolvedRightPanelMode,
+  withFilesRailOpen,
   withRightPanelMode,
   stripDiffSearchParams,
   type ChatRightPanel,
@@ -26,6 +28,7 @@ import { Sidebar, SidebarProvider, SidebarRail, SidebarInset } from "~/component
 import { Button } from "~/components/ui/button";
 import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogPanel, DialogPopup, DialogTitle } from "~/components/ui/dialog";
 import { ArrowLeftRight } from "lucide-react";
+import { WorkspaceFilesRail } from "../components/WorkspaceFilesRail";
 import {
   useSplitViewStore,
   selectSplitView,
@@ -40,6 +43,9 @@ import { resolveActiveSplitView, isSplitRoute } from "../splitViewRoute";
 const DiffPanel = lazy(() => import("../components/DiffPanel"));
 const DIFF_INLINE_LAYOUT_MEDIA_QUERY = "(max-width: 1180px)";
 const DIFF_INLINE_DEFAULT_WIDTH = "clamp(28rem,48vw,44rem)";
+const FILES_RAIL_WIDTH = "22rem";
+const FILES_RAIL_WIDTH_PX = 22 * 16;
+const VIEWER_PANEL_MIN_WIDTH_PX = 24 * 16;
 const SPLIT_PANE_PANEL_DEFAULT_WIDTH_PX = 22 * 16;
 const SPLIT_PANE_CHAT_MIN_WIDTH = 20 * 16;
 const SINGLE_PANEL_MIN_WIDTH = 26 * 16;
@@ -49,16 +55,23 @@ const RIGHT_PANEL_SIDEBAR_WIDTH_STORAGE_KEY = "chat_right_panel_width";
 function resolveThreadBrowserContext(input: {
   threadId: ThreadId;
   threads: ReturnType<typeof useStore.getState>["threads"];
+  projects: ReturnType<typeof useStore.getState>["projects"];
   draftThreadsByThreadId: ReturnType<typeof useComposerDraftStore.getState>["draftThreadsByThreadId"];
 }): {
   projectId: ProjectId | null;
   runtimeMode: RuntimeMode | null;
+  cwd: string | null;
 } {
   const activeThread = input.threads.find((thread) => thread.id === input.threadId) ?? null;
   const activeDraftThread = input.draftThreadsByThreadId[input.threadId] ?? null;
+  const projectId = activeThread?.projectId ?? activeDraftThread?.projectId ?? null;
+  const activeProject = projectId
+    ? (input.projects.find((project) => project.id === projectId) ?? null)
+    : null;
   return {
-    projectId: activeThread?.projectId ?? activeDraftThread?.projectId ?? null,
+    projectId,
     runtimeMode: activeThread?.runtimeMode ?? activeDraftThread?.runtimeMode ?? null,
+    cwd: activeThread?.worktreePath ?? activeProject?.cwd ?? null,
   };
 }
 
@@ -103,6 +116,70 @@ const DiffLoadingFallback = (props: { inline: boolean }) => {
     </aside>
   );
 };
+
+function ViewerPanelSurface(props: {
+  panelMode: ChatRightPanel | null;
+  threadId: ThreadId;
+  cwd: string | null;
+  threadBrowserContext: {
+    projectId: ProjectId | null;
+    runtimeMode: RuntimeMode | null;
+    cwd: string | null;
+  };
+  filesOpen: boolean;
+  railOverlay?: boolean;
+  onClosePanel: () => void;
+  onRevealFile?: (path: string) => void;
+}) {
+  if (props.panelMode === null) {
+    if (!props.filesOpen) {
+      return null;
+    }
+    return props.railOverlay ? (
+      <div className="absolute inset-y-0 right-0 z-30 w-[min(82vw,22rem)] border-l border-border/50 shadow-xl">
+        <WorkspaceFilesRail threadId={props.threadId} cwd={props.cwd} onRevealFile={props.onRevealFile} />
+      </div>
+    ) : (
+      <WorkspaceFilesRail threadId={props.threadId} cwd={props.cwd} onRevealFile={props.onRevealFile} />
+    );
+  }
+
+  if (props.panelMode === "browser") {
+    return (
+      <IntegratedBrowserPane
+        activeProjectId={props.threadBrowserContext?.projectId ?? null}
+        activeThreadId={props.threadId}
+        activeRuntimeMode={props.threadBrowserContext?.runtimeMode ?? null}
+        open={true}
+        layout="panel"
+        onRequestOpen={() => {}}
+        onRequestClose={props.onClosePanel}
+      />
+    );
+  }
+
+  return (
+    <div className="relative flex h-full min-w-0 flex-1 overflow-hidden">
+      <div
+        className="flex-1 overflow-hidden"
+        style={{ minWidth: `${VIEWER_PANEL_MIN_WIDTH_PX}px` }}
+      >
+        <Suspense fallback={<DiffLoadingFallback inline />}>
+          <DiffPanel mode={props.railOverlay ? "sheet" : "sidebar"} />
+        </Suspense>
+      </div>
+      {props.filesOpen ? (
+        props.railOverlay ? (
+          <div className="absolute inset-y-0 right-0 z-30 w-[min(82vw,22rem)] border-l border-border/50 shadow-xl">
+            <WorkspaceFilesRail threadId={props.threadId} cwd={props.cwd} onRevealFile={props.onRevealFile} />
+          </div>
+        ) : (
+          <WorkspaceFilesRail threadId={props.threadId} cwd={props.cwd} onRevealFile={props.onRevealFile} />
+        )
+      ) : null}
+    </div>
+  );
+}
 
 function canComposerHandlePanelWidth(input: {
   nextWidth: number;
@@ -154,27 +231,33 @@ function canComposerHandlePanelWidth(input: {
 
 const PanePanelInlineSidebar = (props: {
   panelOpen: boolean;
+  filesOpen: boolean;
   onClosePanel: () => void;
   onOpenPanel: () => void;
+  onRevealFile?: (path: string) => void;
   renderPanelContent: boolean;
   panel: ChatRightPanel | null | undefined;
   threadId: ThreadId | null;
-  threadBrowserContext?: {
+  threadBrowserContext: {
     projectId: ProjectId | null;
     runtimeMode: RuntimeMode | null;
+    cwd: string | null;
   };
   paneScopeId?: string;
 }) => {
   const {
     panelOpen,
+    filesOpen,
     onClosePanel,
     onOpenPanel,
+    onRevealFile,
     renderPanelContent,
     panel,
     threadId,
     threadBrowserContext,
     paneScopeId,
   } = props;
+  const filesOnly = panel === null && filesOpen;
   const onOpenChange = useCallback(
     (open: boolean) => {
       if (open) {
@@ -187,6 +270,13 @@ const PanePanelInlineSidebar = (props: {
   );
   const shouldAcceptInlineSidebarWidth = useCallback(
     ({ nextWidth, wrapper }: { nextWidth: number; wrapper: HTMLElement }) => {
+      const minimumWidth =
+        panel === "diff" && filesOpen
+          ? VIEWER_PANEL_MIN_WIDTH_PX + FILES_RAIL_WIDTH_PX
+          : SINGLE_PANEL_MIN_WIDTH;
+      if (nextWidth < minimumWidth) {
+        return false;
+      }
       const previousSidebarWidth = wrapper.style.getPropertyValue("--sidebar-width");
       return canComposerHandlePanelWidth({
         nextWidth,
@@ -203,7 +293,7 @@ const PanePanelInlineSidebar = (props: {
         },
       });
     },
-    [paneScopeId],
+    [filesOpen, paneScopeId, panel],
   );
 
   return (
@@ -212,34 +302,35 @@ const PanePanelInlineSidebar = (props: {
       open={panelOpen}
       onOpenChange={onOpenChange}
       className="w-auto min-h-0 flex-none bg-transparent"
-      style={{ "--sidebar-width": DIFF_INLINE_DEFAULT_WIDTH } as React.CSSProperties}
+      style={{ "--sidebar-width": filesOnly ? FILES_RAIL_WIDTH : DIFF_INLINE_DEFAULT_WIDTH } as React.CSSProperties}
     >
       <Sidebar
         side="right"
         collapsible="offcanvas"
         className="border-l border-border/50 bg-card text-foreground"
-        resizable={{
-          minWidth: SINGLE_PANEL_MIN_WIDTH,
-          shouldAcceptWidth: shouldAcceptInlineSidebarWidth,
-          storageKey: RIGHT_PANEL_SIDEBAR_WIDTH_STORAGE_KEY,
-        }}
+        resizable={
+          filesOnly
+            ? false
+            : {
+                minWidth:
+                  panel === "diff" && filesOpen
+                    ? VIEWER_PANEL_MIN_WIDTH_PX + FILES_RAIL_WIDTH_PX
+                    : SINGLE_PANEL_MIN_WIDTH,
+                shouldAcceptWidth: shouldAcceptInlineSidebarWidth,
+                storageKey: RIGHT_PANEL_SIDEBAR_WIDTH_STORAGE_KEY,
+              }
+        }
       >
         {renderPanelContent && threadId ? (
-          panel === "browser" ? (
-            <IntegratedBrowserPane
-              activeProjectId={threadBrowserContext?.projectId ?? null}
-              activeThreadId={threadId}
-              activeRuntimeMode={threadBrowserContext?.runtimeMode ?? null}
-              open={true}
-              layout="panel"
-              onRequestOpen={() => {}}
-              onRequestClose={onClosePanel}
-            />
-        ) : (
-          <Suspense fallback={<DiffLoadingFallback inline />}>
-            <DiffPanel mode="sidebar" />
-          </Suspense>
-        )
+          <ViewerPanelSurface
+            panelMode={panel ?? null}
+            threadId={threadId}
+            cwd={threadBrowserContext?.cwd ?? null}
+            threadBrowserContext={threadBrowserContext}
+            filesOpen={filesOpen}
+            onClosePanel={onClosePanel}
+            onRevealFile={onRevealFile}
+          />
       ) : null}
         <SidebarRail />
       </Sidebar>
@@ -254,16 +345,19 @@ function SplitPaneEmbeddedPanel(props: {
   pane: SplitViewPane;
   paneScopeId: string;
   panelOpen: boolean;
+  filesOpen: boolean;
   panel: ChatRightPanel | null | undefined;
   threadId: ThreadId | null;
   onClosePanel: () => void;
+  onRevealFile?: (path: string) => void;
   panelState: Pick<SplitViewPanePanelState, "panel" | "diffTurnId" | "diffFilePath">;
   onUpdatePanelState: (
-    patch: Partial<Pick<SplitViewPanePanelState, "panel" | "diffTurnId" | "diffFilePath">>,
+    patch: Partial<Pick<SplitViewPanePanelState, "panel" | "filesOpen" | "diffTurnId" | "diffFilePath">>,
   ) => void;
 }) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const threads = useStore((store) => store.threads);
+  const projects = useStore((store) => store.projects);
   const draftThreadsByThreadId = useComposerDraftStore((store) => store.draftThreadsByThreadId);
   const storageKey = `${RIGHT_PANEL_SIDEBAR_WIDTH_STORAGE_KEY}:${props.splitViewId}:${props.pane}`;
   const [panelWidth, setPanelWidth] = useState<number>(() => {
@@ -276,10 +370,11 @@ function SplitPaneEmbeddedPanel(props: {
         ? resolveThreadBrowserContext({
             threadId: props.threadId,
             threads,
+            projects,
             draftThreadsByThreadId,
           })
-        : { projectId: null, runtimeMode: null },
-    [draftThreadsByThreadId, props.threadId, threads],
+        : { projectId: null, runtimeMode: null, cwd: null },
+    [draftThreadsByThreadId, projects, props.threadId, threads],
   );
 
   useEffect(() => {
@@ -291,6 +386,13 @@ function SplitPaneEmbeddedPanel(props: {
     (nextWidth: number) => {
       const wrapper = wrapperRef.current;
       if (!wrapper) return true;
+      const minimumWidth =
+        props.panel === "diff" && props.filesOpen
+          ? VIEWER_PANEL_MIN_WIDTH_PX + FILES_RAIL_WIDTH_PX
+          : SINGLE_PANEL_MIN_WIDTH;
+      if (nextWidth < minimumWidth) {
+        return false;
+      }
       return canComposerHandlePanelWidth({
         nextWidth,
         paneScopeId: props.paneScopeId,
@@ -302,7 +404,7 @@ function SplitPaneEmbeddedPanel(props: {
         },
       });
     },
-    [panelWidth, props.paneScopeId],
+    [panelWidth, props.filesOpen, props.paneScopeId, props.panel],
   );
 
   const startResize = useCallback(
@@ -315,14 +417,15 @@ function SplitPaneEmbeddedPanel(props: {
       event.stopPropagation();
       const startX = event.clientX;
       const startWidth = panelWidth;
-      const maxWidth = Math.max(
-        SINGLE_PANEL_MIN_WIDTH,
-        parent.clientWidth - SPLIT_PANE_CHAT_MIN_WIDTH,
-      );
+      const minimumWidth =
+        props.panel === "diff" && props.filesOpen
+          ? VIEWER_PANEL_MIN_WIDTH_PX + FILES_RAIL_WIDTH_PX
+          : SINGLE_PANEL_MIN_WIDTH;
+      const maxWidth = Math.max(minimumWidth, parent.clientWidth - SPLIT_PANE_CHAT_MIN_WIDTH);
 
       const onPointerMove = (moveEvent: PointerEvent) => {
         const delta = startX - moveEvent.clientX;
-        const nextWidth = Math.max(SINGLE_PANEL_MIN_WIDTH, Math.min(maxWidth, startWidth + delta));
+        const nextWidth = Math.max(minimumWidth, Math.min(maxWidth, startWidth + delta));
         if (!shouldAcceptEmbeddedWidth(nextWidth)) {
           return;
         }
@@ -340,37 +443,54 @@ function SplitPaneEmbeddedPanel(props: {
       window.addEventListener("pointermove", onPointerMove);
       window.addEventListener("pointerup", onPointerUp);
     },
-    [panelWidth, shouldAcceptEmbeddedWidth, storageKey],
+    [panelWidth, props.filesOpen, props.panel, shouldAcceptEmbeddedWidth, storageKey],
   );
 
   if (!props.panelOpen || !props.threadId) {
     return null;
   }
 
+  const filesOnly = props.panel === null && props.filesOpen;
+  const minimumPanelWidth =
+    props.panel === "diff" && props.filesOpen
+      ? VIEWER_PANEL_MIN_WIDTH_PX + FILES_RAIL_WIDTH_PX
+      : SINGLE_PANEL_MIN_WIDTH;
+  const effectivePanelWidth = filesOnly
+    ? FILES_RAIL_WIDTH_PX
+    : Math.max(panelWidth, minimumPanelWidth);
+
   return (
     <div
       ref={wrapperRef}
       className="relative flex h-full min-h-0 min-w-0 flex-none border-l border-border/50 bg-card text-foreground"
-      style={{ width: `${panelWidth}px` } as React.CSSProperties}
+      style={{ width: `${effectivePanelWidth}px` } as React.CSSProperties}
     >
-      <div
-        className="absolute inset-y-0 left-0 z-20 w-2 -translate-x-1/2 cursor-col-resize bg-transparent before:absolute before:inset-y-0 before:left-1/2 before:w-px before:-translate-x-1/2 before:bg-border/65"
-        onPointerDown={startResize}
-      />
+      {!filesOnly ? (
+        <div
+          className="absolute inset-y-0 left-0 z-20 w-2 -translate-x-1/2 cursor-col-resize bg-transparent before:absolute before:inset-y-0 before:left-1/2 before:w-px before:-translate-x-1/2 before:bg-border/65"
+          onPointerDown={startResize}
+        />
+      ) : null}
       {props.panel === "browser" ? (
-        <IntegratedBrowserPane
-          activeProjectId={threadBrowserContext.projectId}
-          activeThreadId={props.threadId}
-          activeRuntimeMode={threadBrowserContext.runtimeMode}
-          open={true}
-          layout="panel"
-          onRequestOpen={() => {}}
-          onRequestClose={props.onClosePanel}
+        <ViewerPanelSurface
+          panelMode="browser"
+          threadId={props.threadId}
+          cwd={threadBrowserContext.cwd}
+          threadBrowserContext={threadBrowserContext}
+          filesOpen={false}
+          onClosePanel={props.onClosePanel}
+          onRevealFile={props.onRevealFile}
         />
       ) : (
-        <Suspense fallback={<DiffLoadingFallback inline />}>
-          <DiffPanel mode="sidebar" />
-        </Suspense>
+        <ViewerPanelSurface
+          panelMode={props.panel ?? null}
+          threadId={props.threadId}
+          cwd={threadBrowserContext.cwd}
+          threadBrowserContext={threadBrowserContext}
+          filesOpen={props.filesOpen}
+          onClosePanel={props.onClosePanel}
+          onRevealFile={props.onRevealFile}
+        />
       )}
     </div>
   );
@@ -447,10 +567,12 @@ function SplitPaneSurface(props: {
   onFocus: () => void;
   onToggleDiff: () => void;
   onToggleBrowser: () => void;
+  onToggleFiles: () => void;
+  onOpenFileViewer: (path: string) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onClosePanel: () => void;
   onUpdatePanelState: (
-    patch: Partial<Pick<SplitViewPanePanelState, "panel" | "diffTurnId" | "diffFilePath">>,
+    patch: Partial<Pick<SplitViewPanePanelState, "panel" | "filesOpen" | "diffTurnId" | "diffFilePath">>,
   ) => void;
   onMaximize: () => void;
   onChooseThread: () => void;
@@ -458,7 +580,7 @@ function SplitPaneSurface(props: {
 }) {
   const paneScopeId = `${props.splitView.id}:${props.pane}`;
   const panelState = props.pane === "left" ? props.splitView.leftPanel : props.splitView.rightPanel;
-  const panelOpen = panelState.panel !== null;
+  const panelOpen = panelState.panel !== null || panelState.filesOpen;
   const shouldRenderPanelContent = panelOpen || panelState.hasOpenedPanel;
   const otherPaneThreadId =
     props.pane === "left" ? props.splitView.rightThreadId : props.splitView.leftThreadId;
@@ -503,6 +625,8 @@ function SplitPaneSurface(props: {
             panelState={panelState}
             onToggleDiffPanel={props.onToggleDiff}
             onToggleBrowserPanel={props.onToggleBrowser}
+            onToggleFilesPanel={props.onToggleFiles}
+            onOpenFileViewerPanel={props.onOpenFileViewer}
             onOpenTurnDiffPanel={props.onOpenTurnDiff}
             onMaximizeSurface={props.onMaximize}
           />
@@ -522,9 +646,11 @@ function SplitPaneSurface(props: {
         pane={props.pane}
         paneScopeId={paneScopeId}
         panelOpen={panelOpen && shouldRenderPanelContent}
+        filesOpen={panelState.filesOpen}
         panel={panelState.panel}
         threadId={props.threadId}
         onClosePanel={props.onClosePanel}
+        onRevealFile={props.onOpenFileViewer}
         panelState={panelState}
         onUpdatePanelState={props.onUpdatePanelState}
       />
@@ -634,7 +760,7 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
   const updatePanePanelState = useCallback(
     (
       pane: SplitViewPane,
-      patch: Partial<Pick<SplitViewPanePanelState, "panel" | "diffTurnId" | "diffFilePath">>,
+      patch: Partial<Pick<SplitViewPanePanelState, "panel" | "filesOpen" | "diffTurnId" | "diffFilePath">>,
     ) => {
       if (!activeSplitView) return;
       const previousState =
@@ -664,8 +790,21 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
         pane === "left" ? activeSplitView.leftPanel : activeSplitView.rightPanel;
       updatePanePanelState(pane, {
         panel: previousState.panel === panel ? null : panel,
+        filesOpen: panel === "browser" ? false : previousState.filesOpen,
         diffTurnId: panel === "diff" ? previousState.diffTurnId : null,
         diffFilePath: panel === "diff" ? previousState.diffFilePath : null,
+      });
+    },
+    [activeSplitView, updatePanePanelState],
+  );
+
+  const togglePaneFiles = useCallback(
+    (pane: SplitViewPane) => {
+      if (!activeSplitView) return;
+      const previousState =
+        pane === "left" ? activeSplitView.leftPanel : activeSplitView.rightPanel;
+      updatePanePanelState(pane, {
+        filesOpen: !previousState.filesOpen,
       });
     },
     [activeSplitView, updatePanePanelState],
@@ -675,6 +814,7 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
     (pane: SplitViewPane) => {
       updatePanePanelState(pane, {
         panel: null,
+        filesOpen: false,
       });
     },
     [updatePanePanelState],
@@ -686,6 +826,15 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
         panel: "diff",
         diffTurnId: turnId,
         diffFilePath: filePath ?? null,
+      });
+    },
+    [updatePanePanelState],
+  );
+
+  const openPaneFileViewer = useCallback(
+    (pane: SplitViewPane, _path: string) => {
+      updatePanePanelState(pane, {
+        panel: "diff",
       });
     },
     [updatePanePanelState],
@@ -823,6 +972,8 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
             onFocus={() => setPaneFocus("left")}
             onToggleDiff={() => togglePanePanel("left", "diff")}
             onToggleBrowser={() => togglePanePanel("left", "browser")}
+            onToggleFiles={() => togglePaneFiles("left")}
+            onOpenFileViewer={(path) => openPaneFileViewer("left", path)}
             onOpenTurnDiff={(turnId, filePath) => openPaneTurnDiff("left", turnId, filePath)}
             onClosePanel={() => closePanePanel("left")}
             onUpdatePanelState={(patch) => updatePanePanelState("left", patch)}
@@ -852,6 +1003,8 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
             onFocus={() => setPaneFocus("right")}
             onToggleDiff={() => togglePanePanel("right", "diff")}
             onToggleBrowser={() => togglePanePanel("right", "browser")}
+            onToggleFiles={() => togglePaneFiles("right")}
+            onOpenFileViewer={(path) => openPaneFileViewer("right", path)}
             onOpenTurnDiff={(turnId, filePath) => openPaneTurnDiff("right", turnId, filePath)}
             onClosePanel={() => closePanePanel("right")}
             onUpdatePanelState={(patch) => updatePanePanelState("right", patch)}
@@ -926,9 +1079,11 @@ function SingleChatSurface(props: {
   threadId: ThreadId;
   projectId: ProjectId | null;
   panelMode: ResolvedRightPanelMode;
+  filesOpen: boolean;
   threadBrowserContext: {
     projectId: ProjectId | null;
     runtimeMode: RuntimeMode | null;
+    cwd: string | null;
   };
   onSplitSurface?: () => void;
 }) {
@@ -936,7 +1091,7 @@ function SingleChatSurface(props: {
   const shouldUseDiffSheet = useMediaQuery(DIFF_INLINE_LAYOUT_MEDIA_QUERY);
   const createSplitView = useSplitViewStore((store) => store.createFromThread);
   const activePanel = props.panelMode === "none" ? null : props.panelMode;
-  const panelOpen = activePanel !== null;
+  const panelOpen = activePanel !== null || props.filesOpen;
   const [hasOpenedPanel, setHasOpenedPanel] = useState(panelOpen);
   const [lastOpenPanel, setLastOpenPanel] = useState<ChatRightPanel>(activePanel ?? "browser");
 
@@ -960,10 +1115,36 @@ function SingleChatSurface(props: {
         const rest = stripDiffSearchParams(previous);
         return lastOpenPanel === "browser"
           ? { ...rest, panel: "browser" }
-          : { ...rest, panel: "diff", diff: "1" };
+          : { ...rest, panel: "diff", diff: "1", ...(props.filesOpen ? { files: "1" } : {}) };
       },
     });
-  }, [lastOpenPanel, navigate, props.threadId]);
+  }, [lastOpenPanel, navigate, props.filesOpen, props.threadId]);
+
+  const openFileViewer = useCallback(
+    (_path: string) => {
+      void navigate({
+        to: "/$threadId",
+        params: { threadId: props.threadId },
+        replace: true,
+        search: (previous) => {
+          const next = withRightPanelMode(previous as Record<string, unknown>, "diff");
+          return props.filesOpen ? withFilesRailOpen(next, true) : next;
+        },
+      });
+    },
+    [navigate, props.filesOpen, props.threadId],
+  );
+
+  const toggleFiles = useCallback(() => {
+    void navigate({
+      to: "/$threadId",
+      params: { threadId: props.threadId },
+      search: (previous) => {
+        const currentlyOpen = resolveFilesRailOpen(parseDiffRouteSearch(previous as Record<string, unknown>));
+        return withFilesRailOpen(previous as Record<string, unknown>, !currentlyOpen);
+      },
+    });
+  }, [navigate, props.threadId]);
 
   const handleSplitSurface = useCallback(() => {
     if (!props.projectId) return;
@@ -980,10 +1161,10 @@ function SingleChatSurface(props: {
   }, [createSplitView, navigate, props.projectId, props.threadId]);
 
   useEffect(() => {
-    if (panelOpen) {
+    if (panelOpen || props.filesOpen) {
       setHasOpenedPanel(true);
     }
-  }, [panelOpen]);
+  }, [panelOpen, props.filesOpen]);
 
   useEffect(() => {
     if (activePanel) {
@@ -991,7 +1172,8 @@ function SingleChatSurface(props: {
     }
   }, [activePanel]);
 
-  const shouldRenderPanelContent = activePanel !== null && (panelOpen || hasOpenedPanel);
+  const shouldRenderPanelContent =
+    (activePanel !== null || props.filesOpen) && (panelOpen || hasOpenedPanel);
 
   if (!shouldUseDiffSheet) {
     return (
@@ -1001,12 +1183,15 @@ function SingleChatSurface(props: {
             key={props.threadId}
             threadId={props.threadId}
             onSplitSurface={handleSplitSurface}
+            onToggleFilesPanel={toggleFiles}
           />
         </SidebarInset>
         <PanePanelInlineSidebar
           panelOpen={panelOpen}
+          filesOpen={props.filesOpen}
           onClosePanel={closePanel}
           onOpenPanel={openPanel}
+          onRevealFile={openFileViewer}
           renderPanelContent={shouldRenderPanelContent}
           panel={activePanel}
           threadId={props.threadId}
@@ -1023,6 +1208,7 @@ function SingleChatSurface(props: {
           key={props.threadId}
           threadId={props.threadId}
           onSplitSurface={handleSplitSurface}
+          onToggleFilesPanel={toggleFiles}
         />
       </SidebarInset>
       <RightPanelSheet panelOpen={panelOpen} onClosePanel={closePanel}>
@@ -1038,9 +1224,16 @@ function SingleChatSurface(props: {
               onRequestClose={closePanel}
             />
           ) : (
-            <Suspense fallback={<DiffLoadingFallback inline={false} />}>
-              <DiffPanel mode="sheet" />
-            </Suspense>
+            <ViewerPanelSurface
+              panelMode="diff"
+              threadId={props.threadId}
+              cwd={props.threadBrowserContext.cwd}
+              threadBrowserContext={props.threadBrowserContext}
+              filesOpen={props.filesOpen}
+              railOverlay
+              onClosePanel={closePanel}
+              onRevealFile={openFileViewer}
+            />
           )
         ) : null}
       </RightPanelSheet>
@@ -1050,6 +1243,7 @@ function SingleChatSurface(props: {
 
 function ChatThreadRouteView() {
   const threadsHydrated = useStore((store) => store.threadsHydrated);
+  const hydrationError = useStore((store) => store.hydrationError);
   const navigate = useNavigate();
   const threadId = Route.useParams({
     select: (params) => ThreadId.makeUnsafe(params.threadId),
@@ -1073,6 +1267,7 @@ function ChatThreadRouteView() {
   const threadBrowserContext = resolveThreadBrowserContext({
     threadId,
     threads,
+    projects,
     draftThreadsByThreadId,
   });
   const routeThreadExists = threadExists || draftThreadExists;
@@ -1081,6 +1276,7 @@ function ChatThreadRouteView() {
     threadsCount: threads.length,
   });
   const panelMode = resolveRightPanelMode(search);
+  const filesOpen = resolveFilesRailOpen(search);
   const splitView = useSplitViewStore(selectSplitView(search.splitViewId ?? null));
   const activeProjectId = threadBrowserContext.projectId;
 
@@ -1182,7 +1378,7 @@ function ChatThreadRouteView() {
   }, [panelMode]);
 
   if (!threadsHydrated) {
-    return <ChatHomeSurface variant="hydrating" />;
+    return <ChatHomeSurface variant={hydrationError ? "error" : "hydrating"} />;
   }
 
   if (splitView && search.splitViewId) {
@@ -1198,6 +1394,7 @@ function ChatThreadRouteView() {
       threadId={threadId}
       projectId={activeProjectId}
       panelMode={panelMode}
+      filesOpen={filesOpen}
       threadBrowserContext={threadBrowserContext}
     />
   );

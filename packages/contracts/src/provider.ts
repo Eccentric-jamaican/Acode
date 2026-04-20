@@ -137,6 +137,8 @@ export const ProviderEvent = Schema.Struct({
   createdAt: IsoDateTime,
   method: TrimmedNonEmptyStringSchema,
   message: Schema.optional(TrimmedNonEmptyStringSchema),
+  providerThreadId: Schema.optional(TrimmedNonEmptyStringSchema),
+  providerParentThreadId: Schema.optional(TrimmedNonEmptyStringSchema),
   turnId: Schema.optional(TurnId),
   itemId: Schema.optional(ProviderItemId),
   requestId: Schema.optional(ApprovalRequestId),

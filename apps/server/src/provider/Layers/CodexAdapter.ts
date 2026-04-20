@@ -36,6 +36,7 @@ import {
   CodexAppServerManager,
   type CodexAppServerStartSessionInput,
 } from "../../codexAppServerManager.ts";
+import { isNonFatalCodexErrorMessage } from "../../codexErrorClassification.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -110,6 +111,16 @@ function asArray(value: unknown): unknown[] | undefined {
 
 function asNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function providerErrorMapsToWarning(event: ProviderEvent): boolean {
+  return (
+    event.kind === "error" &&
+    (event.method === "process/stderr" ||
+      (event.method === "error" &&
+        typeof event.message === "string" &&
+        isNonFatalCodexErrorMessage(event.message)))
+  );
 }
 
 function toTurnStatus(value: unknown): "completed" | "failed" | "cancelled" | "interrupted" {
@@ -450,6 +461,8 @@ function providerRefsFromEvent(
   event: ProviderEvent,
 ): ProviderRuntimeEvent["providerRefs"] | undefined {
   const refs: Record<string, string> = {};
+  if (event.providerThreadId) refs.providerThreadId = event.providerThreadId;
+  if (event.providerParentThreadId) refs.providerParentThreadId = event.providerParentThreadId;
   if (event.turnId) refs.providerTurnId = event.turnId;
   if (event.itemId) refs.providerItemId = event.itemId;
   if (event.requestId) refs.providerRequestId = event.requestId;
@@ -545,13 +558,14 @@ function mapToRuntimeEvents(
     if (!event.message) {
       return [];
     }
+    const treatAsWarning = providerErrorMapsToWarning(event);
     return [
       {
         ...runtimeEventBase(event, canonicalThreadId),
-        type: "runtime.error",
+        type: treatAsWarning ? "runtime.warning" : "runtime.error",
         payload: {
           message: event.message,
-          class: "provider_error",
+          ...(!treatAsWarning ? { class: "provider_error" as const } : {}),
           ...(event.payload !== undefined ? { detail: event.payload } : {}),
         },
       },
@@ -1217,13 +1231,14 @@ function mapToRuntimeEvents(
   if (event.method === "error") {
     const message =
       asString(asObject(payload?.error)?.message) ?? event.message ?? "Provider runtime error";
+    const treatAsWarning = isNonFatalCodexErrorMessage(message);
     return [
       {
-        type: "runtime.error",
+        type: treatAsWarning ? "runtime.warning" : "runtime.error",
         ...runtimeEventBase(event, canonicalThreadId),
         payload: {
           message,
-          class: "provider_error",
+          ...(!treatAsWarning ? { class: "provider_error" as const } : {}),
           ...(event.payload !== undefined ? { detail: event.payload } : {}),
         },
       },

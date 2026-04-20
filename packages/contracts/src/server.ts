@@ -3,6 +3,8 @@ import { IsoDateTime, TrimmedNonEmptyString } from "./baseSchemas";
 import { KeybindingRule, ResolvedKeybindingsConfig } from "./keybindings";
 import { EditorId } from "./editor";
 import { ProviderKind } from "./orchestration";
+import { ModelCapabilities } from "./model";
+import { ServerSettings } from "./settings";
 import {
   ErrorInboxEntry,
   ServerErrorInboxUpdatedPayload,
@@ -15,6 +17,7 @@ import {
   ServerSetErrorInboxEntryResolutionInput,
   ServerSetErrorInboxEntryResolutionResult,
 } from "./errorInbox";
+import { ServerSettingsPatch } from "./settings";
 
 const KeybindingsMalformedConfigIssue = Schema.Struct({
   kind: Schema.Literal("keybindings.malformed-config"),
@@ -48,10 +51,21 @@ export type ServerProviderAuthStatus = typeof ServerProviderAuthStatus.Type;
 export const ServerProviderStatus = Schema.Struct({
   provider: ProviderKind,
   status: ServerProviderStatusState,
+  enabled: Schema.optional(Schema.Boolean),
+  installed: Schema.optional(Schema.Boolean),
+  version: Schema.optional(Schema.NullOr(TrimmedNonEmptyString)),
   available: Schema.Boolean,
   authStatus: ServerProviderAuthStatus,
   checkedAt: IsoDateTime,
   message: Schema.optional(TrimmedNonEmptyString),
+  models: Schema.optional(Schema.Array(
+    Schema.Struct({
+      slug: TrimmedNonEmptyString,
+      name: TrimmedNonEmptyString,
+      isCustom: Schema.Boolean,
+      capabilities: Schema.NullOr(ModelCapabilities),
+    }),
+  )),
 });
 export type ServerProviderStatus = typeof ServerProviderStatus.Type;
 
@@ -144,6 +158,7 @@ export const ServerConfig = Schema.Struct({
   providers: ServerProviderStatuses,
   providerAccounts: ServerProviderAccounts,
   availableEditors: Schema.Array(EditorId),
+  settings: Schema.optional(ServerSettings),
 });
 export type ServerConfig = typeof ServerConfig.Type;
 
@@ -182,6 +197,18 @@ export type ServerLogoutProviderInput = typeof ServerLogoutProviderInput.Type;
 export const ServerLogoutProviderResult = Schema.Struct({});
 export type ServerLogoutProviderResult = typeof ServerLogoutProviderResult.Type;
 
+export const ServerGetSettingsInput = Schema.Struct({});
+export type ServerGetSettingsInput = typeof ServerGetSettingsInput.Type;
+
+export const ServerGetSettingsResult = ServerSettings;
+export type ServerGetSettingsResult = typeof ServerGetSettingsResult.Type;
+
+export const ServerUpdateSettingsInput = ServerSettingsPatch;
+export type ServerUpdateSettingsInput = typeof ServerUpdateSettingsInput.Type;
+
+export const ServerUpdateSettingsResult = ServerSettings;
+export type ServerUpdateSettingsResult = typeof ServerUpdateSettingsResult.Type;
+
 export const ServerNewThreadSuggestionCandidate = Schema.Struct({
   id: TrimmedNonEmptyString,
   prompt: TrimmedNonEmptyString,
@@ -211,6 +238,7 @@ export type ServerUpsertKeybindingResult = typeof ServerUpsertKeybindingResult.T
 export const ServerConfigUpdatedPayload = Schema.Struct({
   issues: ServerConfigIssues,
   providers: ServerProviderStatuses,
+  settings: Schema.optional(ServerSettings),
 });
 export type ServerConfigUpdatedPayload = typeof ServerConfigUpdatedPayload.Type;
 

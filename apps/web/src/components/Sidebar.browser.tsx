@@ -296,6 +296,26 @@ function applyDispatchCommand(command: ClientOrchestrationCommand): { sequence: 
       },
     };
   }
+  if (command.type === "thread.archive") {
+    const nextUpdatedAt = new Date(Date.parse(NOW_ISO) + nextSequence * 1_000).toISOString();
+    fixture = {
+      ...fixture,
+      snapshot: {
+        ...fixture.snapshot,
+        snapshotSequence: nextSequence,
+        updatedAt: nextUpdatedAt,
+        threads: fixture.snapshot.threads.map((thread) =>
+          thread.id === command.threadId
+            ? {
+                ...thread,
+                archivedAt: nextUpdatedAt,
+                updatedAt: nextUpdatedAt,
+              }
+            : thread,
+        ),
+      },
+    };
+  }
 
   return { sequence: nextSequence++ };
 }
@@ -354,6 +374,37 @@ const worker = setupWorker(
                   payload: {
                     threadId: command.threadId,
                     isPinned: command.isPinned,
+                    updatedAt:
+                      fixture.snapshot.threads.find((thread) => thread.id === command.threadId)
+                        ?.updatedAt ?? NOW_ISO,
+                  },
+                },
+              }),
+            );
+          }
+          if (command.type === "thread.archive") {
+            client.send(
+              JSON.stringify({
+                type: "push",
+                channel: ORCHESTRATION_WS_CHANNELS.domainEvent,
+                data: {
+                  sequence: result.sequence,
+                  eventId: `event-${result.sequence}`,
+                  aggregateKind: "thread",
+                  aggregateId: command.threadId,
+                  occurredAt:
+                    fixture.snapshot.threads.find((thread) => thread.id === command.threadId)
+                      ?.updatedAt ?? NOW_ISO,
+                  commandId: command.commandId,
+                  causationEventId: null,
+                  correlationId: command.commandId,
+                  metadata: {},
+                  type: "thread.archived",
+                  payload: {
+                    threadId: command.threadId,
+                    archivedAt:
+                      fixture.snapshot.threads.find((thread) => thread.id === command.threadId)
+                        ?.archivedAt ?? NOW_ISO,
                     updatedAt:
                       fixture.snapshot.threads.find((thread) => thread.id === command.threadId)
                         ?.updatedAt ?? NOW_ISO,
@@ -1840,5 +1891,115 @@ describe("Sidebar browser", () => {
       });
 
     await mounted.cleanup();
+  });
+
+  it("auto-reveals an active subagent child thread alongside its parent", async () => {
+    const parentThreadId = "thread-parent" as ThreadId;
+    const childThreadId = "subagent:thread-parent:child-provider-1" as ThreadId;
+    fixture = {
+      ...fixture,
+      snapshot: {
+        ...fixture.snapshot,
+        threads: [
+          makeThreadEntry(parentThreadId, PROJECT_ID, "Parent thread"),
+          makeThreadEntry(childThreadId, PROJECT_ID, "Locke [explorer]", {
+            parentThreadId,
+            subagentAgentId: "agent-1",
+            subagentNickname: "Locke",
+            subagentRole: "explorer",
+          } as Partial<OrchestrationReadModel["threads"][number]>),
+        ],
+      },
+      welcome: {
+        ...fixture.welcome,
+        bootstrapThreadId: childThreadId,
+      },
+    };
+
+    const mounted = await mountSidebarApp({ initialEntries: [`/${childThreadId}`] });
+
+    try {
+      await expect.element(page.getByTestId(`sidebar-thread-${parentThreadId}`)).toBeVisible();
+      await expect.element(page.getByTestId(`sidebar-thread-${childThreadId}`)).toBeVisible();
+      await expect
+        .poll(
+          () => document.body.textContent?.includes("Locke") ?? false,
+        )
+        .toBe(true);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("archives a regular thread from the inline hover action", async () => {
+    const mounted = await mountSidebarApp();
+
+    try {
+      const threadRow = page.getByTestId(`sidebar-thread-${THREAD_ID}`);
+      await threadRow.hover();
+      await expect.element(page.getByTestId(`sidebar-thread-archive-${THREAD_ID}`)).toBeVisible();
+
+      await page.getByTestId(`sidebar-thread-archive-${THREAD_ID}`).click();
+      await expect
+        .element(page.getByTestId(`sidebar-thread-archive-confirm-${THREAD_ID}`))
+        .toBeVisible();
+
+      await page.getByTestId(`sidebar-thread-archive-confirm-${THREAD_ID}`).click();
+
+      await expect
+        .poll(
+          () =>
+            fixture.snapshot.threads.find((thread) => thread.id === THREAD_ID)?.archivedAt ?? null,
+        )
+        .not.toBe(null);
+      await expect.element(page.getByTestId(`sidebar-thread-${THREAD_ID}`)).not.toBeInTheDocument();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("shows the inline archive action for pinned and nested subagent rows", async () => {
+    const pinnedThreadId = "thread-pinned" as ThreadId;
+    const parentThreadId = "thread-parent-archive" as ThreadId;
+    const childThreadId = "subagent:thread-parent-archive:child-provider-archive" as ThreadId;
+    fixture = {
+      ...fixture,
+      snapshot: {
+        ...fixture.snapshot,
+        threads: [
+          makeThreadEntry(pinnedThreadId, PROJECT_ID, "Pinned thread", {
+            isPinned: true,
+            pinnedAt: NOW_ISO,
+          } as Partial<OrchestrationReadModel["threads"][number]>),
+          makeThreadEntry(parentThreadId, PROJECT_ID, "Parent thread"),
+          makeThreadEntry(childThreadId, PROJECT_ID, "Scout [researcher]", {
+            parentThreadId,
+            subagentAgentId: "agent-archive",
+            subagentNickname: "Scout",
+            subagentRole: "researcher",
+          } as Partial<OrchestrationReadModel["threads"][number]>),
+        ],
+      },
+      welcome: {
+        ...fixture.welcome,
+        bootstrapThreadId: childThreadId,
+      },
+    };
+
+    const mounted = await mountSidebarApp({ initialEntries: [`/${childThreadId}`] });
+
+    try {
+      await page.getByTestId(`sidebar-pinned-thread-${pinnedThreadId}`).hover();
+      await expect
+        .element(page.getByTestId(`sidebar-thread-archive-${pinnedThreadId}`))
+        .toBeVisible();
+
+      await page.getByTestId(`sidebar-thread-${childThreadId}`).hover();
+      await expect
+        .element(page.getByTestId(`sidebar-thread-archive-${childThreadId}`))
+        .toBeVisible();
+    } finally {
+      await mounted.cleanup();
+    }
   });
 });

@@ -1,6 +1,7 @@
 import { Data, Deferred, Effect, Exit, Layer, Queue, Ref, Scope, ServiceMap } from "effect";
 
 import { OrchestrationReactor } from "./orchestration/Services/OrchestrationReactor";
+import { ServerSettingsService } from "./serverSettings";
 
 export class ServerRuntimeStartupError extends Data.TaggedError("ServerRuntimeStartupError")<{
   readonly message: string;
@@ -86,6 +87,7 @@ export const makeCommandGate = Effect.gen(function* () {
 
 const makeServerRuntimeStartup = Effect.gen(function* () {
   const orchestrationReactor = yield* OrchestrationReactor;
+  const serverSettings = yield* Effect.serviceOption(ServerSettingsService);
 
   const commandGate = yield* makeCommandGate;
   const httpListening = yield* Deferred.make<void>();
@@ -94,6 +96,20 @@ const makeServerRuntimeStartup = Effect.gen(function* () {
   yield* Effect.addFinalizer(() => Scope.close(reactorScope, Exit.void));
 
   const startup = Effect.gen(function* () {
+    if (serverSettings._tag === "Some") {
+      yield* Effect.logDebug("startup phase: starting server settings runtime");
+      yield* serverSettings.value.start.pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("failed to start server settings runtime", {
+            path: error.settingsPath,
+            detail: error.detail,
+            cause: error.cause,
+          }),
+        ),
+        Effect.forkScoped,
+      );
+    }
+
     yield* Effect.logDebug("startup phase: starting orchestration reactors");
     yield* orchestrationReactor.start.pipe(Scope.provide(reactorScope));
     yield* Effect.logDebug("startup phase: orchestration reactors started");

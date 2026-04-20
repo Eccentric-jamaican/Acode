@@ -10,6 +10,7 @@ import {
   type CodexModelOptions,
   type ModelCapabilities,
   type ModelSlug,
+  type OpenCodeModelOptions,
   type ProviderKind,
   CodexReasoningEffort,
 } from "@t3tools/contracts";
@@ -60,6 +61,8 @@ export function getModelCapabilities(
     supportsFastMode: false,
     supportsThinkingToggle: false,
     promptInjectedEffortLevels: [],
+    variantOptions: [],
+    agentOptions: [],
   };
 }
 
@@ -204,6 +207,33 @@ export function normalizeClaudeModelOptions(
     ...(thinking === false ? { thinking: false } : {}),
     ...(effort ? { effort } : {}),
     ...(fastMode ? { fastMode: true } : {}),
+  };
+  return Object.keys(nextOptions).length > 0 ? nextOptions : undefined;
+}
+
+function resolveNamedOption(
+  options: ReadonlyArray<{ value: string; isDefault?: boolean | undefined }> | undefined,
+  raw: string | null | undefined,
+): string | undefined {
+  if (!options || options.length === 0) {
+    return raw ?? undefined;
+  }
+  if (raw && options.some((option) => option.value === raw)) {
+    return raw;
+  }
+  return options.find((option) => option.isDefault)?.value;
+}
+
+export function normalizeOpenCodeModelOptions(
+  model: string | null | undefined,
+  modelOptions: OpenCodeModelOptions | null | undefined,
+): OpenCodeModelOptions | undefined {
+  const caps = getModelCapabilities("opencode", model);
+  const variant = resolveNamedOption(caps.variantOptions, trimOrNull(modelOptions?.variant));
+  const agent = resolveNamedOption(caps.agentOptions, trimOrNull(modelOptions?.agent));
+  const nextOptions: OpenCodeModelOptions = {
+    ...(variant ? { variant } : {}),
+    ...(agent ? { agent } : {}),
   };
   return Object.keys(nextOptions).length > 0 ? nextOptions : undefined;
 }

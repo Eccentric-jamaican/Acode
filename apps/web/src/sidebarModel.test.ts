@@ -2,13 +2,17 @@ import { ProjectId, ThreadId, TurnId } from "@t3tools/contracts";
 import { describe, expect, it } from "vitest";
 
 import {
+  buildSidebarThreadHierarchy,
   buildChronologicalThreadList,
   getVisibleThreadsForProject,
   groupThreadsByProject,
+  includeAncestorThreads,
   isRelevantThread,
   orderProjectsForSidebar,
   pruneMissingProjectIds,
+  sortPinnedThreadsForSidebar,
   sortThreadsForSidebar,
+  splitPinnedThreads,
 } from "./sidebarModel";
 import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type Project, type Thread } from "./types";
 
@@ -45,6 +49,7 @@ function makeThread(id: string, overrides: Partial<Thread> = {}): Thread {
     branch: null,
     worktreePath: null,
     isPinned: false,
+    pinnedAt: null,
     turnDiffSummaries: [],
     activities: [],
     ...overrides,
@@ -89,7 +94,7 @@ describe("isRelevantThread", () => {
 });
 
 describe("sortThreadsForSidebar", () => {
-  it("keeps pinned threads first before applying timestamp sort", () => {
+  it("sorts by timestamp without pin promotion", () => {
     const threads = sortThreadsForSidebar(
       [
         makeThread("unpinned-new", { createdAt: "2026-03-03T00:00:00.000Z" }),
@@ -102,8 +107,8 @@ describe("sortThreadsForSidebar", () => {
     );
 
     expect(threads.map((thread) => thread.id)).toEqual([
-      ThreadId.makeUnsafe("pinned-old"),
       ThreadId.makeUnsafe("unpinned-new"),
+      ThreadId.makeUnsafe("pinned-old"),
     ]);
   });
 
@@ -187,6 +192,74 @@ describe("thread grouping helpers", () => {
     ]);
     expect(buildChronologicalThreadList(threads, { threadSort: "updated" }).map((thread) => thread.id))
       .toEqual([ThreadId.makeUnsafe("thread-2"), ThreadId.makeUnsafe("thread-1")]);
+  });
+
+  it("keeps parent threads when a subagent child is selected as relevant", () => {
+    const parent = makeThread("thread-parent");
+    const child = makeThread("thread-child", {
+      parentThreadId: ThreadId.makeUnsafe("thread-parent"),
+    });
+
+    const result = includeAncestorThreads([parent, child], [child]);
+
+    expect(result.map((thread) => thread.id)).toEqual([
+      ThreadId.makeUnsafe("thread-parent"),
+      ThreadId.makeUnsafe("thread-child"),
+    ]);
+  });
+
+  it("builds a sidebar hierarchy with child threads nested under visible parents", () => {
+    const parent = makeThread("thread-parent");
+    const child = makeThread("thread-child", {
+      parentThreadId: ThreadId.makeUnsafe("thread-parent"),
+    });
+    const orphan = makeThread("thread-orphan", {
+      parentThreadId: ThreadId.makeUnsafe("missing-parent"),
+    });
+
+    const result = buildSidebarThreadHierarchy([parent, child, orphan]);
+
+    expect(result.topLevelThreads.map((thread) => thread.id)).toEqual([
+      ThreadId.makeUnsafe("thread-parent"),
+      ThreadId.makeUnsafe("thread-orphan"),
+    ]);
+    expect(result.childThreadsByParentId.get(ThreadId.makeUnsafe("thread-parent"))?.map((thread) => thread.id)).toEqual([
+      ThreadId.makeUnsafe("thread-child"),
+    ]);
+  });
+});
+
+describe("pinned thread helpers", () => {
+  it("sorts pinned threads by most recently pinned", () => {
+    const threads = sortPinnedThreadsForSidebar([
+      makeThread("thread-1", {
+        isPinned: true,
+        pinnedAt: "2026-03-01T00:00:00.000Z",
+      }),
+      makeThread("thread-2", {
+        isPinned: true,
+        pinnedAt: "2026-03-03T00:00:00.000Z",
+      }),
+    ]);
+
+    expect(threads.map((thread) => thread.id)).toEqual([
+      ThreadId.makeUnsafe("thread-2"),
+      ThreadId.makeUnsafe("thread-1"),
+    ]);
+  });
+
+  it("splits pinned threads out of the project thread lists", () => {
+    const result = splitPinnedThreads([
+      makeThread("thread-1", { isPinned: true, pinnedAt: "2026-03-03T00:00:00.000Z" }),
+      makeThread("thread-2"),
+    ]);
+
+    expect(result.pinnedThreads.map((thread) => thread.id)).toEqual([
+      ThreadId.makeUnsafe("thread-1"),
+    ]);
+    expect(result.unpinnedThreads.map((thread) => thread.id)).toEqual([
+      ThreadId.makeUnsafe("thread-2"),
+    ]);
   });
 });
 

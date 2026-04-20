@@ -98,6 +98,10 @@ export interface Thread {
   projectId: ProjectId;
   origin: "user" | "task";
   taskId: TaskId | null;
+  parentThreadId?: ThreadId | null;
+  subagentAgentId?: string | null;
+  subagentNickname?: string | null;
+  subagentRole?: string | null;
   title: string;
   model: string;
   runtimeMode: RuntimeMode;
@@ -113,6 +117,8 @@ export interface Thread {
   branch: string | null;
   worktreePath: string | null;
   isPinned: boolean;
+  pinnedAt?: string | null;
+  archivedAt?: string | null;
   turnDiffSummaries: TurnDiffSummary[];
   activities: OrchestrationThreadActivity[];
   handoff?: ContractThreadHandoff | null;

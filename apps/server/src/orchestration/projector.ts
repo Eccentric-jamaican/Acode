@@ -22,6 +22,7 @@ import {
   TaskMetaUpdatedPayload,
   TaskStateSetPayload,
   ThreadActivityAppendedPayload,
+  ThreadArchivedPayload,
   ThreadCreatedPayload,
   ThreadDeletedPayload,
   ThreadInteractionModeSetPayload,
@@ -31,6 +32,7 @@ import {
   ThreadRevertedPayload,
   ThreadSessionSetPayload,
   ThreadTurnDiffCompletedPayload,
+  ThreadUnarchivedPayload,
 } from "./Schemas.ts";
 
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id" | "projectId">>;
@@ -449,6 +451,10 @@ export function projectEvent(
             projectId: payload.projectId,
             origin: payload.origin,
             taskId: payload.taskId,
+            parentThreadId: payload.parentThreadId,
+            subagentAgentId: payload.subagentAgentId,
+            subagentNickname: payload.subagentNickname,
+            subagentRole: payload.subagentRole,
             title: payload.title,
             model: payload.model,
             runtimeMode: payload.runtimeMode,
@@ -456,6 +462,8 @@ export function projectEvent(
             branch: payload.branch,
             worktreePath: payload.worktreePath,
             isPinned: payload.isPinned,
+            pinnedAt: payload.pinnedAt,
+            archivedAt: payload.archivedAt,
             latestTurn: null,
             createdAt: payload.createdAt,
             updatedAt: payload.updatedAt,
@@ -489,6 +497,28 @@ export function projectEvent(
         })),
       );
 
+    case "thread.archived":
+      return decodeForEvent(ThreadArchivedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            archivedAt: payload.archivedAt,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.unarchived":
+      return decodeForEvent(ThreadUnarchivedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            archivedAt: null,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
     case "thread.meta-updated":
       return decodeForEvent(ThreadMetaUpdatedPayload, event.payload, event.type, "payload").pipe(
         Effect.map((payload) => ({
@@ -497,6 +527,15 @@ export function projectEvent(
             ...(payload.title !== undefined ? { title: payload.title } : {}),
             ...(payload.model !== undefined ? { model: payload.model } : {}),
             ...(payload.isPinned !== undefined ? { isPinned: payload.isPinned } : {}),
+            ...(payload.pinnedAt !== undefined ? { pinnedAt: payload.pinnedAt } : {}),
+            ...(payload.parentThreadId !== undefined ? { parentThreadId: payload.parentThreadId } : {}),
+            ...(payload.subagentAgentId !== undefined
+              ? { subagentAgentId: payload.subagentAgentId }
+              : {}),
+            ...(payload.subagentNickname !== undefined
+              ? { subagentNickname: payload.subagentNickname }
+              : {}),
+            ...(payload.subagentRole !== undefined ? { subagentRole: payload.subagentRole } : {}),
             ...(payload.branch !== undefined ? { branch: payload.branch } : {}),
             ...(payload.worktreePath !== undefined ? { worktreePath: payload.worktreePath } : {}),
             updatedAt: payload.updatedAt,

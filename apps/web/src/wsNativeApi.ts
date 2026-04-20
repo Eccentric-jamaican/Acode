@@ -242,6 +242,8 @@ export function createWsNativeApi(): NativeApi {
     },
     projects: {
       searchEntries: (input) => transport.request(WS_METHODS.projectsSearchEntries, input),
+      listDirectory: (input) => transport.request(WS_METHODS.projectsListDirectory, input),
+      readFile: (input) => transport.request(WS_METHODS.projectsReadFile, input),
       writeFile: (input) => transport.request(WS_METHODS.projectsWriteFile, input),
     },
     shell: {
@@ -286,6 +288,7 @@ export function createWsNativeApi(): NativeApi {
     },
     server: {
       getConfig: () => transport.request(WS_METHODS.serverGetConfig),
+      getSettings: () => transport.request(WS_METHODS.serverGetSettings),
       getErrorInbox: () => transport.request(WS_METHODS.serverGetErrorInbox),
       reportClientDiagnostic: (input) =>
         transport.request(WS_METHODS.serverReportClientDiagnostic, input),
@@ -300,6 +303,7 @@ export function createWsNativeApi(): NativeApi {
       logoutProvider: (input) => transport.request(WS_METHODS.serverLogoutProvider, input),
       suggestNewThreadTasks: (input) =>
         transport.request(WS_METHODS.serverSuggestNewThreadTasks, input),
+      updateSettings: (input) => transport.request(WS_METHODS.serverUpdateSettings, input),
       onErrorInboxUpdated: (callback) => onServerErrorInboxUpdated(callback),
     },
     provider: {

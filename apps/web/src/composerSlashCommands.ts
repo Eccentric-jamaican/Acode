@@ -161,7 +161,7 @@ export function getAvailableComposerSlashCommands(input: {
   const canOfferReviewCommand = input.canOfferReviewCommand ?? true;
   const canOfferForkCommand = input.canOfferForkCommand ?? true;
   const availableCommands: ComposerSlashCommand[] =
-    input.provider === "codex"
+    input.provider === "codex" || input.provider === "opencode"
       ? [
           "clear",
           "model",
@@ -252,7 +252,7 @@ export function parseFastSlashCommandAction(text: string): FastSlashCommandActio
 
 export function buildSubagentsPrompt(existingPrompt: string): string {
   const cannedPrompt =
-    "Run subagents for different tasks. Delegate distinct work in parallel when helpful and then synthesize the results.";
+    "Run subagents for different tasks. Delegate distinct work in parallel when helpful and then synthesize the results. If you fork full history/context to subagents, do not specify agent_type, model, or reasoning_effort on the spawn call; let those inherit from the parent.";
   const trimmedPrompt = existingPrompt.trim();
   return trimmedPrompt.length > 0 ? `${trimmedPrompt}\n\n${cannedPrompt}` : cannedPrompt;
 }

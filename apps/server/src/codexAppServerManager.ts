@@ -1149,7 +1149,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     context: CodexSessionContext,
     notification: JsonRpcNotification,
   ): void {
-    const route = this.readRouteFields(notification.params);
+    const route = this.readRouteFields(notification.params, context.session.resumeCursor);
     const textDelta =
       notification.method === "item/agentMessage/delta"
         ? this.readString(notification.params, "delta")
@@ -1162,6 +1162,10 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       threadId: context.session.threadId,
       createdAt: new Date().toISOString(),
       method: notification.method,
+      ...(route.providerThreadId ? { providerThreadId: route.providerThreadId } : {}),
+      ...(route.providerParentThreadId
+        ? { providerParentThreadId: route.providerParentThreadId }
+        : {}),
       turnId: route.turnId,
       itemId: route.itemId,
       textDelta,
@@ -1211,7 +1215,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
   }
 
   private handleServerRequest(context: CodexSessionContext, request: JsonRpcRequest): void {
-    const route = this.readRouteFields(request.params);
+    const route = this.readRouteFields(request.params, context.session.resumeCursor);
     const requestKind = this.requestKindForMethod(request.method);
     let requestId: ApprovalRequestId | undefined;
     if (requestKind) {
@@ -1251,6 +1255,10 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       threadId: context.session.threadId,
       createdAt: new Date().toISOString(),
       method: request.method,
+      ...(route.providerThreadId ? { providerThreadId: route.providerThreadId } : {}),
+      ...(route.providerParentThreadId
+        ? { providerParentThreadId: route.providerParentThreadId }
+        : {}),
       turnId: route.turnId,
       itemId: route.itemId,
       requestId,
@@ -1427,21 +1435,40 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     };
   }
 
-  private readRouteFields(params: unknown): {
+  private readRouteFields(
+    params: unknown,
+    resumeCursor?: unknown,
+  ): {
+    providerThreadId?: string;
+    providerParentThreadId?: string;
     turnId?: TurnId;
     itemId?: ProviderItemId;
   } {
     const route: {
+      providerThreadId?: string;
+      providerParentThreadId?: string;
       turnId?: TurnId;
       itemId?: ProviderItemId;
     } = {};
 
+    const providerThreadId = normalizeProviderThreadId(
+      this.readString(params, "threadId") ?? this.readString(this.readObject(params, "thread"), "id"),
+    );
+    const providerParentThreadId = readResumeCursorThreadId(resumeCursor);
     const turnId = toTurnId(
       this.readString(params, "turnId") ?? this.readString(this.readObject(params, "turn"), "id"),
     );
     const itemId = toProviderItemId(
       this.readString(params, "itemId") ?? this.readString(this.readObject(params, "item"), "id"),
     );
+
+    if (providerThreadId) {
+      route.providerThreadId = providerThreadId;
+    }
+
+    if (providerParentThreadId) {
+      route.providerParentThreadId = providerParentThreadId;
+    }
 
     if (turnId) {
       route.turnId = turnId;

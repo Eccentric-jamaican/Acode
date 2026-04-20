@@ -45,6 +45,20 @@
       "browser": "./src/chatThreads.ts",
       "import": "./src/chatThreads.ts",
       "default": "./src/chatThreads.ts"
+    },
+    "./serverSettings": {
+      "types": "./src/serverSettings.ts",
+      "development": "./src/serverSettings.ts",
+      "browser": "./src/serverSettings.ts",
+      "import": "./src/serverSettings.ts",
+      "default": "./src/serverSettings.ts"
+    },
+    "./subagents": {
+      "types": "./src/subagents.ts",
+      "development": "./src/subagents.ts",
+      "browser": "./src/subagents.ts",
+      "import": "./src/subagents.ts",
+      "default": "./src/subagents.ts"
     }
   },
   "scripts": {

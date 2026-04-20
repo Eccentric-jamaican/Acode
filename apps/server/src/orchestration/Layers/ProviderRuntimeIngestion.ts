@@ -11,6 +11,14 @@ import {
   type OrchestrationThreadActivity,
   type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
+import {
+  buildSubagentIdentityDirectory,
+  collectSubagentProviderThreadIds,
+  extractSubagentIdentityHints,
+  mergeSubagentIdentityHints,
+  resolveSubagentIdentityFromDirectory,
+  type ParsedSubagentIdentityHint,
+} from "@t3tools/shared/subagents";
 import { Cache, Cause, Duration, Effect, Layer, Option, Queue, Ref, Stream } from "effect";
 
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
@@ -69,6 +77,14 @@ function truncateDetail(value: string, limit = 180): string {
   return value.length > limit ? `${value.slice(0, limit - 3)}...` : value;
 }
 
+function nonEmptyTrimmed(value: string | null | undefined): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 function normalizeProposedPlanMarkdown(planMarkdown: string | undefined): string | undefined {
   const trimmed = planMarkdown?.trim();
   if (!trimmed) {
@@ -102,6 +118,154 @@ function runtimePayloadRecord(event: ProviderRuntimeEvent): Record<string, unkno
     return undefined;
   }
   return payload as Record<string, unknown>;
+}
+
+function asObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function subagentThreadId(parentThreadId: ThreadId, providerThreadId: string): ThreadId {
+  return ThreadId.makeUnsafe(`subagent:${parentThreadId}:${providerThreadId}`);
+}
+
+function subagentThreadTitle(identity: {
+  nickname?: string | undefined;
+  role?: string | undefined;
+  providerThreadId?: string | undefined;
+}): string {
+  if (identity.nickname && identity.role) {
+    return `${identity.nickname} [${identity.role}]`;
+  }
+  if (identity.nickname) {
+    return identity.nickname;
+  }
+  if (identity.role) {
+    return `Subagent [${identity.role}]`;
+  }
+  return identity.providerThreadId ? `Subagent ${identity.providerThreadId}` : "Subagent";
+}
+
+function isGenericSubagentThreadTitle(title: string | null | undefined): boolean {
+  const normalized = title?.trim().toLowerCase() ?? "";
+  return (
+    normalized.length === 0 ||
+    normalized === "subagent" ||
+    normalized.startsWith("subagent ") ||
+    normalized === "agent" ||
+    normalized === "thread"
+  );
+}
+
+function stripLightweightMarkdownLabel(text: string): string {
+  let next = text.trim();
+  next = next.replace(/^[>\-+*]\s+/, "");
+  next = next.replace(/^#{1,6}\s+/, "");
+  next = next.replace(/^\[(.+?)\]\([^)]+\)$/, "$1");
+  for (;;) {
+    const updated = next
+      .replace(/^\*\*(.+)\*\*$/, "$1")
+      .replace(/^__(.+)__$/, "$1")
+      .replace(/^\*(.+)\*$/, "$1")
+      .replace(/^_(.+)_$/, "$1")
+      .replace(/^`(.+)`$/, "$1")
+      .trim();
+    if (updated === next) {
+      break;
+    }
+    next = updated;
+  }
+  return next;
+}
+
+function deriveSubagentThreadTitleFromAssistantText(text: string | undefined): string | undefined {
+  const normalized = text?.trim().replace(/\s+/g, " ");
+  if (!normalized) {
+    return undefined;
+  }
+  const firstSentence = normalized.split(/(?<=[.!?])\s+/, 1)[0] ?? normalized;
+  const candidate = stripLightweightMarkdownLabel(firstSentence.trim());
+  if (candidate.length === 0) {
+    return undefined;
+  }
+  if (candidate.length <= 72) {
+    return candidate;
+  }
+  const truncated = candidate.slice(0, 69).trimEnd();
+  const wordBoundary = truncated.lastIndexOf(" ");
+  const collapsed =
+    wordBoundary >= 40 ? truncated.slice(0, wordBoundary).trimEnd() : truncated;
+  return `${collapsed}...`;
+}
+
+function eventSubagentSourceRecords(event: ProviderRuntimeEvent): Record<string, unknown>[] {
+  const records: Record<string, unknown>[] = [];
+  const pushRecord = (value: unknown) => {
+    const record = asObject(value);
+    if (!record) {
+      return;
+    }
+    records.push(record);
+  };
+
+  const payload = runtimePayloadRecord(event);
+  pushRecord(payload);
+  pushRecord(payload?.data);
+  pushRecord(asObject(payload?.data)?.item);
+  pushRecord(event.raw?.payload);
+  pushRecord(asObject(event.raw?.payload)?.item);
+
+  return records;
+}
+
+function extractSubagentIdentity(
+  event: ProviderRuntimeEvent,
+  providerThreadId: string,
+): ParsedSubagentIdentityHint | undefined {
+  const merged = new Map<string, ParsedSubagentIdentityHint>();
+  for (const record of eventSubagentSourceRecords(event)) {
+    const hints = extractSubagentIdentityHints(record);
+    const directory = buildSubagentIdentityDirectory(hints);
+    const resolved = resolveSubagentIdentityFromDirectory(directory, { providerThreadId });
+    if (resolved?.providerThreadId) {
+      merged.set(
+        resolved.providerThreadId,
+        mergeSubagentIdentityHints(merged.get(resolved.providerThreadId), resolved),
+      );
+    }
+    for (const hint of hints) {
+      if (hint.providerThreadId === providerThreadId) {
+        merged.set(providerThreadId, mergeSubagentIdentityHints(merged.get(providerThreadId), hint));
+      }
+    }
+  }
+  return merged.get(providerThreadId);
+}
+
+function actualEventProviderThreadId(event: ProviderRuntimeEvent): string | undefined {
+  const providerThreadId = asString(event.providerRefs?.providerThreadId);
+  if (providerThreadId) {
+    return providerThreadId;
+  }
+  const payload = runtimePayloadRecord(event);
+  const payloadData = asObject(payload?.data);
+  const payloadItem = asObject(payloadData?.item);
+  const rawPayload = asObject(event.raw?.payload);
+  const rawItem = asObject(rawPayload?.item);
+
+  return (
+    asString(payload?.providerThreadId) ??
+    asString(payload?.threadId) ??
+    asString(payloadData?.providerThreadId) ??
+    asString(payloadData?.threadId) ??
+    asString(payloadItem?.providerThreadId) ??
+    asString(payloadItem?.threadId) ??
+    asString(rawPayload?.providerThreadId) ??
+    asString(rawPayload?.threadId) ??
+    asString(rawItem?.providerThreadId) ??
+    asString(rawItem?.threadId)
+  );
 }
 
 function normalizeRuntimeTurnState(
@@ -403,13 +567,14 @@ function runtimeEventToActivities(
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
       }
+      const summary = nonEmptyTrimmed(event.payload.title) ?? "Tool updated";
       return [
         {
           id: event.eventId,
           createdAt: event.createdAt,
           tone: "tool",
           kind: "tool.updated",
-          summary: event.payload.title ?? "Tool updated",
+          summary,
           payload: {
             itemType: event.payload.itemType,
             ...(event.payload.status ? { status: event.payload.status } : {}),
@@ -426,13 +591,14 @@ function runtimeEventToActivities(
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
       }
+      const summary = nonEmptyTrimmed(event.payload.title) ?? "Tool";
       return [
         {
           id: event.eventId,
           createdAt: event.createdAt,
           tone: "tool",
           kind: "tool.completed",
-          summary: event.payload.title ?? "Tool",
+          summary,
           payload: {
             itemType: event.payload.itemType,
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
@@ -448,13 +614,14 @@ function runtimeEventToActivities(
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
       }
+      const title = nonEmptyTrimmed(event.payload.title) ?? "Tool";
       return [
         {
           id: event.eventId,
           createdAt: event.createdAt,
           tone: "tool",
           kind: "tool.started",
-          summary: `${event.payload.title ?? "Tool"} started`,
+          summary: `${title} started`,
           payload: {
             itemType: event.payload.itemType,
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
@@ -634,7 +801,7 @@ const make = Effect.gen(function* () {
 
       if (!shouldDispatchComplete) {
         yield* clearAssistantMessageState(input.messageId);
-        return;
+        return "";
       }
 
       if ((input.emitFinalDelta ?? true) && text.length > 0) {
@@ -658,6 +825,7 @@ const make = Effect.gen(function* () {
         createdAt: input.createdAt,
       });
       yield* clearAssistantMessageState(input.messageId);
+      return text;
     });
 
   const upsertProposedPlan = (input: {
@@ -770,12 +938,148 @@ const make = Effect.gen(function* () {
   const processRuntimeEvent = (event: ProviderRuntimeEvent) =>
     Effect.gen(function* () {
       const readModel = yield* orchestrationEngine.getReadModel();
-      const thread = readModel.threads.find((entry) => entry.id === event.threadId);
-      if (!thread) return;
+      const parentThread = readModel.threads.find((entry) => entry.id === event.threadId);
+      if (!parentThread) return;
 
       const now = event.createdAt;
+      const ensureSubagentThread = (
+        identity: ParsedSubagentIdentityHint & { providerThreadId: string },
+      ) =>
+        Effect.gen(function* () {
+          const childThreadId = subagentThreadId(parentThread.id, identity.providerThreadId);
+          const existingThread =
+            readModel.threads.find((entry) => entry.id === childThreadId) ?? null;
+          const resolvedModel =
+            identity.model && identity.modelIsRequestedHint !== true
+              ? identity.model
+              : existingThread?.model ?? parentThread.model;
+          const title = subagentThreadTitle(identity);
+
+          if (!existingThread) {
+            yield* orchestrationEngine.dispatch({
+              type: "thread.create",
+              commandId: providerCommandId(event, "subagent-thread-create"),
+              threadId: childThreadId,
+              projectId: parentThread.projectId,
+              origin: "user",
+              taskId: null,
+              parentThreadId: parentThread.id,
+              subagentAgentId: identity.agentId ?? null,
+              subagentNickname: identity.nickname ?? null,
+              subagentRole: identity.role ?? null,
+              title,
+              model: resolvedModel,
+              runtimeMode: parentThread.runtimeMode,
+              interactionMode: parentThread.interactionMode,
+              isPinned: false,
+              pinnedAt: null,
+              branch: parentThread.branch,
+              worktreePath: parentThread.worktreePath,
+              createdAt: now,
+            });
+          } else {
+            yield* orchestrationEngine.dispatch({
+              type: "thread.meta.update",
+              commandId: providerCommandId(event, "subagent-thread-meta-update"),
+              threadId: childThreadId,
+              title,
+              ...(resolvedModel !== existingThread.model ? { model: resolvedModel } : {}),
+              parentThreadId: parentThread.id,
+              ...(identity.agentId !== undefined ? { subagentAgentId: identity.agentId } : {}),
+              ...(identity.nickname !== undefined ? { subagentNickname: identity.nickname } : {}),
+              ...(identity.role !== undefined ? { subagentRole: identity.role } : {}),
+            });
+          }
+
+          return existingThread
+            ? {
+                ...existingThread,
+                title,
+                model: resolvedModel,
+                parentThreadId: parentThread.id,
+                subagentAgentId: identity.agentId ?? existingThread.subagentAgentId ?? null,
+                subagentNickname: identity.nickname ?? existingThread.subagentNickname ?? null,
+                subagentRole: identity.role ?? existingThread.subagentRole ?? null,
+              }
+            : {
+                ...parentThread,
+                id: childThreadId,
+                origin: "user" as const,
+                taskId: null,
+                parentThreadId: parentThread.id,
+                subagentAgentId: identity.agentId ?? null,
+                subagentNickname: identity.nickname ?? null,
+                subagentRole: identity.role ?? null,
+                title,
+                model: resolvedModel,
+                latestTurn: null,
+                messages: [],
+                proposedPlans: [],
+                activities: [],
+                checkpoints: [],
+                session: null,
+                isPinned: false,
+                pinnedAt: null,
+                handoff: parentThread.handoff ?? null,
+                createdAt: now,
+                updatedAt: now,
+                deletedAt: null,
+              };
+        });
+      const collabPayload = event.type === "item.started" || event.type === "item.updated" || event.type === "item.completed"
+        ? event.payload.itemType === "collab_agent_tool_call"
+          ? asObject(runtimePayloadRecord(event)?.data)?.item ?? asObject(runtimePayloadRecord(event)?.data) ?? runtimePayloadRecord(event)
+          : undefined
+        : undefined;
+      if (collabPayload) {
+        const collabPayloadRecord = collabPayload as Record<string, unknown>;
+        const receiverThreadIds = collectSubagentProviderThreadIds(collabPayloadRecord);
+        const identityDirectory = buildSubagentIdentityDirectory(
+          extractSubagentIdentityHints(collabPayloadRecord),
+        );
+        yield* Effect.forEach(
+          receiverThreadIds,
+          (receiverThreadId) => {
+            const resolvedIdentity = resolveSubagentIdentityFromDirectory(identityDirectory, {
+              providerThreadId: receiverThreadId,
+            });
+            const ensuredIdentity: ParsedSubagentIdentityHint & { providerThreadId: string } =
+              resolvedIdentity
+                ? { ...resolvedIdentity, providerThreadId: receiverThreadId }
+                : { providerThreadId: receiverThreadId };
+            return ensureSubagentThread(ensuredIdentity);
+          },
+          { concurrency: 1 },
+        ).pipe(Effect.asVoid);
+      }
+
+      const actualProviderThreadId = actualEventProviderThreadId(event);
+      const actualProviderParentThreadId = asString(event.providerRefs?.providerParentThreadId);
+      const isChildThreadEvent =
+        actualProviderThreadId !== undefined &&
+        actualProviderParentThreadId !== undefined &&
+        actualProviderThreadId !== actualProviderParentThreadId;
+      const routedSubagentThread =
+        isChildThreadEvent && actualProviderThreadId
+          ? yield* (() => {
+              const resolvedIdentity = extractSubagentIdentity(event, actualProviderThreadId);
+              const ensuredIdentity: ParsedSubagentIdentityHint & { providerThreadId: string } =
+                resolvedIdentity
+                  ? { ...resolvedIdentity, providerThreadId: actualProviderThreadId }
+                  : { providerThreadId: actualProviderThreadId };
+              return ensureSubagentThread(ensuredIdentity);
+            })()
+          : undefined;
+      const routedThread =
+        (event.type === "item.started" ||
+          event.type === "item.updated" ||
+          event.type === "item.completed") &&
+        event.payload.itemType === "collab_agent_tool_call"
+          ? parentThread
+          : routedSubagentThread ?? parentThread;
+
       const eventTurnId = toTurnId(event.turnId);
-      const activeTurnId = thread.session?.activeTurnId ?? null;
+      const activeTurnId = routedThread.session?.activeTurnId ?? null;
 
       const conflictsWithActiveTurn =
         activeTurnId !== null && eventTurnId !== undefined && !sameId(activeTurnId, eventTurnId);
@@ -841,23 +1145,23 @@ const make = Effect.gen(function* () {
         })();
         const lastError =
           event.type === "session.state.changed" && event.payload.state === "error"
-            ? (event.payload.reason ?? thread.session?.lastError ?? "Provider session error")
+            ? (event.payload.reason ?? routedThread.session?.lastError ?? "Provider session error")
             : event.type === "turn.completed" && runtimeTurnState(event) === "failed"
-              ? (runtimeTurnErrorMessage(event) ?? thread.session?.lastError ?? "Turn failed")
-              : status === "ready"
+              ? (runtimeTurnErrorMessage(event) ?? routedThread.session?.lastError ?? "Turn failed")
+            : status === "ready"
               ? null
-              : (thread.session?.lastError ?? null);
+              : (routedThread.session?.lastError ?? null);
 
         if (shouldApplyThreadLifecycle) {
           yield* orchestrationEngine.dispatch({
             type: "thread.session.set",
             commandId: providerCommandId(event, "thread-session-set"),
-            threadId: thread.id,
+            threadId: routedThread.id,
             session: {
-              threadId: thread.id,
+              threadId: routedThread.id,
               status,
               providerName: event.provider,
-              runtimeMode: thread.session?.runtimeMode ?? "full-access",
+              runtimeMode: routedThread.session?.runtimeMode ?? "full-access",
               activeTurnId: nextActiveTurnId,
               lastError,
               updatedAt: now,
@@ -880,7 +1184,7 @@ const make = Effect.gen(function* () {
         );
         const turnId = toTurnId(event.turnId);
         if (turnId) {
-          yield* rememberAssistantMessageId(thread.id, turnId, assistantMessageId);
+          yield* rememberAssistantMessageId(routedThread.id, turnId, assistantMessageId);
         }
 
         const assistantDeliveryMode = yield* Ref.get(assistantDeliveryModeRef);
@@ -890,7 +1194,7 @@ const make = Effect.gen(function* () {
             yield* orchestrationEngine.dispatch({
               type: "thread.message.assistant.delta",
               commandId: providerCommandId(event, "assistant-delta-buffer-spill"),
-              threadId: thread.id,
+              threadId: routedThread.id,
               messageId: assistantMessageId,
               delta: spillChunk,
               ...(turnId ? { turnId } : {}),
@@ -901,7 +1205,7 @@ const make = Effect.gen(function* () {
           yield* orchestrationEngine.dispatch({
             type: "thread.message.assistant.delta",
             commandId: providerCommandId(event, "assistant-delta"),
-            threadId: thread.id,
+            threadId: routedThread.id,
             messageId: assistantMessageId,
             delta: assistantDelta,
             ...(turnId ? { turnId } : {}),
@@ -911,8 +1215,8 @@ const make = Effect.gen(function* () {
       }
 
       if (proposedPlanDelta && proposedPlanDelta.length > 0) {
-        const planId = proposedPlanIdFromEvent(event, thread.id);
-        yield* appendBufferedProposedPlan(planId, proposedPlanDelta, now);
+        const routedPlanId = proposedPlanIdFromEvent(event, routedThread.id);
+        yield* appendBufferedProposedPlan(routedPlanId, proposedPlanDelta, now);
       }
 
       const assistantCompletion =
@@ -925,7 +1229,7 @@ const make = Effect.gen(function* () {
       const proposedPlanCompletion =
         event.type === "turn.proposed.completed"
           ? {
-              planId: proposedPlanIdFromEvent(event, thread.id),
+              planId: proposedPlanIdFromEvent(event, routedThread.id),
               turnId: toTurnId(event.turnId),
               planMarkdown: event.payload.planMarkdown,
             }
@@ -935,16 +1239,16 @@ const make = Effect.gen(function* () {
         const assistantMessageId = assistantCompletion.messageId;
         const turnId = toTurnId(event.turnId);
         if (turnId) {
-          yield* rememberAssistantMessageId(thread.id, turnId, assistantMessageId);
+          yield* rememberAssistantMessageId(routedThread.id, turnId, assistantMessageId);
         }
         const assistantDeliveryMode = yield* Ref.get(assistantDeliveryModeRef);
-        const existingAssistantMessage = thread.messages.find(
+        const existingAssistantMessage = routedThread.messages.find(
           (entry) => entry.id === assistantMessageId,
         );
 
-        yield* finalizeAssistantMessage({
+        const finalizedAssistantText = yield* finalizeAssistantMessage({
           event,
-          threadId: thread.id,
+          threadId: routedThread.id,
           messageId: assistantMessageId,
           ...(turnId ? { turnId } : {}),
           createdAt: now,
@@ -958,16 +1262,29 @@ const make = Effect.gen(function* () {
             : {}),
         });
 
+        const derivedSubagentTitle =
+          routedThread.parentThreadId && isGenericSubagentThreadTitle(routedThread.title)
+            ? deriveSubagentThreadTitleFromAssistantText(finalizedAssistantText)
+            : undefined;
+        if (derivedSubagentTitle && derivedSubagentTitle !== routedThread.title) {
+          yield* orchestrationEngine.dispatch({
+            type: "thread.meta.update",
+            commandId: providerCommandId(event, "subagent-thread-title-from-assistant"),
+            threadId: routedThread.id,
+            title: derivedSubagentTitle,
+          });
+        }
+
         if (turnId) {
-          yield* forgetAssistantMessageId(thread.id, turnId, assistantMessageId);
+          yield* forgetAssistantMessageId(routedThread.id, turnId, assistantMessageId);
         }
       }
 
       if (proposedPlanCompletion) {
         yield* finalizeBufferedProposedPlan({
           event,
-          threadId: thread.id,
-          threadProposedPlans: thread.proposedPlans,
+          threadId: routedThread.id,
+          threadProposedPlans: routedThread.proposedPlans,
           planId: proposedPlanCompletion.planId,
           ...(proposedPlanCompletion.turnId ? { turnId: proposedPlanCompletion.turnId } : {}),
           fallbackMarkdown: proposedPlanCompletion.planMarkdown,
@@ -978,31 +1295,31 @@ const make = Effect.gen(function* () {
       if (event.type === "turn.completed") {
         const turnId = toTurnId(event.turnId);
         if (turnId) {
-          const assistantMessageIds = yield* getAssistantMessageIdsForTurn(thread.id, turnId);
+          const assistantMessageIds = yield* getAssistantMessageIdsForTurn(routedThread.id, turnId);
           yield* Effect.forEach(
             assistantMessageIds,
             (assistantMessageId) =>
               finalizeAssistantMessage({
                 event,
-                threadId: thread.id,
+                threadId: routedThread.id,
                 messageId: assistantMessageId,
                 turnId,
                 createdAt: now,
                 commandTag: "assistant-complete-finalize",
                 finalDeltaCommandTag: "assistant-delta-finalize-fallback",
-                hasExistingMessage: thread.messages.some(
+                hasExistingMessage: routedThread.messages.some(
                   (message) => message.id === assistantMessageId,
                 ),
               }),
             { concurrency: 1 },
           ).pipe(Effect.asVoid);
-          yield* clearAssistantMessageIdsForTurn(thread.id, turnId);
+          yield* clearAssistantMessageIdsForTurn(routedThread.id, turnId);
 
           yield* finalizeBufferedProposedPlan({
             event,
-            threadId: thread.id,
-            threadProposedPlans: thread.proposedPlans,
-            planId: proposedPlanIdForTurn(thread.id, turnId),
+            threadId: routedThread.id,
+            threadProposedPlans: routedThread.proposedPlans,
+            planId: proposedPlanIdForTurn(routedThread.id, turnId),
             turnId,
             updatedAt: now,
           });
@@ -1010,7 +1327,7 @@ const make = Effect.gen(function* () {
       }
 
       if (event.type === "session.exited") {
-        yield* clearTurnStateForSession(thread.id);
+        yield* clearTurnStateForSession(routedThread.id);
       }
 
       if (event.type === "runtime.error") {
@@ -1026,12 +1343,12 @@ const make = Effect.gen(function* () {
           yield* orchestrationEngine.dispatch({
             type: "thread.session.set",
             commandId: providerCommandId(event, "runtime-error-session-set"),
-            threadId: thread.id,
+            threadId: routedThread.id,
             session: {
-              threadId: thread.id,
+              threadId: routedThread.id,
               status: "error",
               providerName: event.provider,
-              runtimeMode: thread.session?.runtimeMode ?? "full-access",
+              runtimeMode: routedThread.session?.runtimeMode ?? "full-access",
               activeTurnId: eventTurnId ?? null,
               lastError: runtimeErrorMessage,
               updatedAt: now,
@@ -1046,8 +1363,8 @@ const make = Effect.gen(function* () {
           severity: "error",
           summary: "Provider runtime error",
           detail: runtimeErrorMessage,
-          projectId: thread.projectId,
-          threadId: thread.id,
+          projectId: routedThread.projectId,
+          threadId: routedThread.id,
           turnId: eventTurnId ?? null,
           provider: event.provider,
           context: {
@@ -1063,14 +1380,15 @@ const make = Effect.gen(function* () {
       }
 
       if (event.type === "config.warning") {
+        const summary = nonEmptyTrimmed(event.payload.summary) ?? "Provider config warning";
         yield* errorInbox.capture({
           source: "provider-config",
           category: "config",
           severity: "warning",
-          summary: event.payload.summary,
+          summary,
           detail: event.payload.details ?? null,
-          projectId: thread.projectId,
-          threadId: thread.id,
+          projectId: routedThread.projectId,
+          threadId: routedThread.id,
           turnId: eventTurnId ?? null,
           provider: event.provider,
           context: {
@@ -1089,8 +1407,8 @@ const make = Effect.gen(function* () {
           severity: "warning",
           summary: `MCP OAuth failed${event.payload.name ? `: ${event.payload.name}` : ""}`,
           detail: event.payload.error ?? null,
-          projectId: thread.projectId,
-          threadId: thread.id,
+          projectId: routedThread.projectId,
+          threadId: routedThread.id,
           turnId: eventTurnId ?? null,
           provider: event.provider,
           context: {
@@ -1109,8 +1427,8 @@ const make = Effect.gen(function* () {
           severity: "error",
           summary: "Provider session exited unexpectedly",
           detail: event.payload.reason ?? null,
-          projectId: thread.projectId,
-          threadId: thread.id,
+          projectId: routedThread.projectId,
+          threadId: routedThread.id,
           turnId: eventTurnId ?? null,
           provider: event.provider,
           context: {
@@ -1126,7 +1444,7 @@ const make = Effect.gen(function* () {
         yield* orchestrationEngine.dispatch({
           type: "thread.meta.update",
           commandId: providerCommandId(event, "thread-meta-update"),
-          threadId: thread.id,
+          threadId: routedThread.id,
           title: event.payload.name,
         });
       }
@@ -1140,14 +1458,14 @@ const make = Effect.gen(function* () {
           yield* orchestrationEngine.dispatch({
             type: "thread.turn.diff.complete",
             commandId: providerCommandId(event, "thread-turn-diff-complete"),
-            threadId: thread.id,
+            threadId: routedThread.id,
             turnId,
             completedAt: now,
             checkpointRef: CheckpointRef.makeUnsafe(`provider-diff:${event.eventId}`),
             status: "missing",
             files: [],
             assistantMessageId,
-            checkpointTurnCount: thread.checkpoints.length + 1,
+            checkpointTurnCount: routedThread.checkpoints.length + 1,
             createdAt: now,
           });
         }
@@ -1158,7 +1476,7 @@ const make = Effect.gen(function* () {
         orchestrationEngine.dispatch({
           type: "thread.activity.append",
           commandId: providerCommandId(event, "thread-activity-append"),
-          threadId: thread.id,
+          threadId: routedThread.id,
           activity,
           createdAt: activity.createdAt,
         }),

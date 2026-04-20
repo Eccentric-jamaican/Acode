@@ -22,25 +22,35 @@ export const ClaudeModelOptions = Schema.Struct({
 });
 export type ClaudeModelOptions = typeof ClaudeModelOptions.Type;
 
+export const OpenCodeModelOptions = Schema.Struct({
+  variant: Schema.optional(Schema.String),
+  agent: Schema.optional(Schema.String),
+});
+export type OpenCodeModelOptions = typeof OpenCodeModelOptions.Type;
+
 export const ProviderModelOptions = Schema.Struct({
   codex: Schema.optional(CodexModelOptions),
-  opencode: Schema.optional(CodexModelOptions),
+  opencode: Schema.optional(OpenCodeModelOptions),
   claudeAgent: Schema.optional(ClaudeModelOptions),
 });
 export type ProviderModelOptions = typeof ProviderModelOptions.Type;
 
-export type EffortOption = {
-  readonly value: string;
-  readonly label: string;
-  readonly isDefault?: true;
-};
+export const EffortOption = Schema.Struct({
+  value: Schema.String,
+  label: Schema.String,
+  isDefault: Schema.optional(Schema.Boolean),
+});
+export type EffortOption = typeof EffortOption.Type;
 
-export type ModelCapabilities = {
-  readonly reasoningEffortLevels: readonly EffortOption[];
-  readonly supportsFastMode: boolean;
-  readonly supportsThinkingToggle: boolean;
-  readonly promptInjectedEffortLevels: readonly string[];
-};
+export const ModelCapabilities = Schema.Struct({
+  reasoningEffortLevels: Schema.Array(EffortOption),
+  supportsFastMode: Schema.Boolean,
+  supportsThinkingToggle: Schema.Boolean,
+  promptInjectedEffortLevels: Schema.Array(Schema.String),
+  variantOptions: Schema.optional(Schema.Array(EffortOption)),
+  agentOptions: Schema.optional(Schema.Array(EffortOption)),
+});
+export type ModelCapabilities = typeof ModelCapabilities.Type;
 
 type ModelDefinition = {
   readonly slug: string;

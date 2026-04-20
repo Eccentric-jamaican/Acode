@@ -15,9 +15,19 @@ export interface SidebarProjectGroup {
   threads: Thread[];
 }
 
+export interface SidebarPinnedThreads {
+  pinnedThreads: Thread[];
+  unpinnedThreads: Thread[];
+}
+
 export interface SidebarVisibleProjectThreads {
   hasHiddenThreads: boolean;
   visibleThreads: Thread[];
+}
+
+export interface SidebarThreadHierarchy {
+  topLevelThreads: Thread[];
+  childThreadsByParentId: Map<Thread["id"], Thread[]>;
 }
 
 function hasUnseenCompletion(thread: Thread): boolean {
@@ -100,11 +110,7 @@ export function sortThreadsForSidebar(
   threads: readonly Thread[],
   threadSort: SidebarThreadSort,
 ): Thread[] {
-  return [...threads].sort((left, right) => {
-    if (left.isPinned !== right.isPinned) {
-      return left.isPinned ? -1 : 1;
-    }
-
+  return threads.toSorted((left, right) => {
     const rightTimestamp = getThreadSortTimestamp(right, threadSort);
     const leftTimestamp = getThreadSortTimestamp(left, threadSort);
     const byTimestamp =
@@ -115,6 +121,24 @@ export function sortThreadsForSidebar(
 
     return right.id.localeCompare(left.id);
   });
+}
+
+export function sortPinnedThreadsForSidebar(threads: readonly Thread[]): Thread[] {
+  return threads.toSorted((left, right) => {
+    const rightTimestamp = toSortableTimestamp(right.pinnedAt ?? right.updatedAt) ?? Number.NEGATIVE_INFINITY;
+    const leftTimestamp = toSortableTimestamp(left.pinnedAt ?? left.updatedAt) ?? Number.NEGATIVE_INFINITY;
+    if (rightTimestamp !== leftTimestamp) {
+      return rightTimestamp > leftTimestamp ? 1 : -1;
+    }
+    return right.id.localeCompare(left.id);
+  });
+}
+
+export function splitPinnedThreads(threads: readonly Thread[]): SidebarPinnedThreads {
+  return {
+    pinnedThreads: sortPinnedThreadsForSidebar(threads.filter((thread) => thread.isPinned)),
+    unpinnedThreads: threads.filter((thread) => !thread.isPinned),
+  };
 }
 
 export function pruneMissingProjectIds(
@@ -132,7 +156,7 @@ export function orderProjectsForSidebar(
   const knownOrder = new Map<Project["id"], number>(
     projectOrder.map((projectId, index) => [projectId as Project["id"], index]),
   );
-  return [...projects].sort((left, right) => {
+  return projects.toSorted((left, right) => {
     const leftIndex = knownOrder.get(left.id);
     const rightIndex = knownOrder.get(right.id);
 
@@ -171,6 +195,49 @@ export function groupThreadsByProject(
     project,
     threads: threadsByProjectId.get(project.id) ?? [],
   }));
+}
+
+export function includeAncestorThreads(
+  threads: readonly Thread[],
+  selectedThreads: readonly Thread[],
+): Thread[] {
+  const includedThreadIds = new Set(selectedThreads.map((thread) => thread.id));
+  const threadById = new Map(threads.map((thread) => [thread.id, thread] as const));
+
+  for (const thread of selectedThreads) {
+    let currentParentId = thread.parentThreadId ?? null;
+    while (currentParentId) {
+      const parentThread = threadById.get(currentParentId);
+      if (!parentThread) {
+        break;
+      }
+      includedThreadIds.add(parentThread.id);
+      currentParentId = parentThread.parentThreadId ?? null;
+    }
+  }
+
+  return threads.filter((thread) => includedThreadIds.has(thread.id));
+}
+
+export function buildSidebarThreadHierarchy(threads: readonly Thread[]): SidebarThreadHierarchy {
+  const childThreadsByParentId = new Map<Thread["id"], Thread[]>();
+  const visibleThreadIds = new Set(threads.map((thread) => thread.id));
+  const topLevelThreads: Thread[] = [];
+
+  for (const thread of threads) {
+    if (thread.parentThreadId && visibleThreadIds.has(thread.parentThreadId)) {
+      const existingChildren = childThreadsByParentId.get(thread.parentThreadId) ?? [];
+      existingChildren.push(thread);
+      childThreadsByParentId.set(thread.parentThreadId, existingChildren);
+    } else {
+      topLevelThreads.push(thread);
+    }
+  }
+
+  return {
+    topLevelThreads,
+    childThreadsByParentId,
+  };
 }
 
 export function buildChronologicalThreadList(

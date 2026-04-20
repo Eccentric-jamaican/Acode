@@ -393,10 +393,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             runtimeMode,
             interactionMode: "default",
             isPinned: false,
+            pinnedAt: null,
             branch: null,
             worktreePath: null,
             createdAt: command.createdAt,
             updatedAt: command.createdAt,
+            archivedAt: null,
           },
         });
       }
@@ -650,15 +652,25 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           projectId: command.projectId,
           origin: command.origin ?? "user",
           taskId: command.taskId ?? null,
+          ...(command.parentThreadId !== undefined ? { parentThreadId: command.parentThreadId } : {}),
+          ...(command.subagentAgentId !== undefined
+            ? { subagentAgentId: command.subagentAgentId }
+            : {}),
+          ...(command.subagentNickname !== undefined
+            ? { subagentNickname: command.subagentNickname }
+            : {}),
+          ...(command.subagentRole !== undefined ? { subagentRole: command.subagentRole } : {}),
           title: command.title,
           model: command.model,
           runtimeMode: command.runtimeMode,
           interactionMode: command.interactionMode,
           isPinned: command.isPinned ?? false,
+          pinnedAt: command.pinnedAt ?? null,
           branch: command.branch,
           worktreePath: command.worktreePath,
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
+          archivedAt: null,
         },
       };
     }
@@ -712,10 +724,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           runtimeMode: command.runtimeMode,
           interactionMode: command.interactionMode,
           isPinned: false,
+          pinnedAt: null,
           branch: command.branch,
           worktreePath: command.worktreePath,
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
+          archivedAt: null,
           handoff: {
             sourceThreadId: command.sourceThreadId,
             sourceProvider: inferProviderFromModel(sourceThread.model),
@@ -773,6 +787,52 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           deletedAt: occurredAt,
         },
+        };
+    }
+
+    case "thread.archive": {
+      yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const occurredAt = nowIso();
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.archived",
+        payload: {
+          threadId: command.threadId,
+          archivedAt: occurredAt,
+          updatedAt: occurredAt,
+        },
+      };
+    }
+
+    case "thread.unarchive": {
+      yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const occurredAt = nowIso();
+      return {
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.unarchived",
+        payload: {
+          threadId: command.threadId,
+          unarchivedAt: occurredAt,
+          updatedAt: occurredAt,
+        },
       };
     }
 
@@ -796,6 +856,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.title !== undefined ? { title: command.title } : {}),
           ...(command.model !== undefined ? { model: command.model } : {}),
           ...(command.isPinned !== undefined ? { isPinned: command.isPinned } : {}),
+          ...(command.pinnedAt !== undefined ? { pinnedAt: command.pinnedAt } : {}),
+          ...(command.parentThreadId !== undefined ? { parentThreadId: command.parentThreadId } : {}),
+          ...(command.subagentAgentId !== undefined
+            ? { subagentAgentId: command.subagentAgentId }
+            : {}),
+          ...(command.subagentNickname !== undefined
+            ? { subagentNickname: command.subagentNickname }
+            : {}),
+          ...(command.subagentRole !== undefined ? { subagentRole: command.subagentRole } : {}),
           ...(command.branch !== undefined ? { branch: command.branch } : {}),
           ...(command.worktreePath !== undefined ? { worktreePath: command.worktreePath } : {}),
           updatedAt: occurredAt,

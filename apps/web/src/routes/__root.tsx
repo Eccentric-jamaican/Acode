@@ -141,6 +141,7 @@ function errorDetails(error: unknown): string {
 
 function EventRouter() {
   const syncServerReadModel = useStore((store) => store.syncServerReadModel);
+  const setHydrationError = useStore((store) => store.setHydrationError);
   const syncErrorInbox = useStore((store) => store.syncErrorInbox);
   const upsertErrorInboxEntry = useStore((store) => store.upsertErrorInboxEntry);
   const setProjectExpanded = useStore((store) => store.setProjectExpanded);
@@ -196,7 +197,23 @@ function EventRouter() {
       pending = false;
       try {
         await flushSnapshotSync();
-      } catch {
+        setHydrationError(null);
+      } catch (error) {
+        const detail =
+          error instanceof Error && error.message.trim().length > 0
+            ? error.message
+            : "Unable to restore the orchestration snapshot from the server.";
+        setHydrationError(detail);
+        reportClientDiagnostic({
+          source: "websocket",
+          category: "websocket",
+          severity: "error",
+          summary: "Snapshot hydration failed",
+          detail,
+          context: {
+            route: pathnameRef.current,
+          },
+        });
         // Keep prior state and wait for next domain event to trigger a resync.
       }
       syncing = false;
@@ -263,13 +280,12 @@ function EventRouter() {
       })().catch(() => undefined);
     });
     const unsubServerConfigUpdated = onServerConfigUpdated((payload) => {
+      void queryClient.invalidateQueries({ queryKey: serverQueryKeys.config() });
       const signature = JSON.stringify(payload.issues);
       if (lastConfigIssuesSignatureRef.current === signature) {
         return;
       }
       lastConfigIssuesSignatureRef.current = signature;
-
-      void queryClient.invalidateQueries({ queryKey: serverQueryKeys.config() });
       const issue = payload.issues.find((entry) => entry.kind.startsWith("keybindings."));
       if (!issue) {
         toastManager.add({
@@ -367,6 +383,7 @@ function EventRouter() {
     setProjectExpanded,
     syncErrorInbox,
     syncServerReadModel,
+    setHydrationError,
     upsertErrorInboxEntry,
   ]);
 

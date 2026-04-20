@@ -58,6 +58,7 @@ import { Open, type OpenShape } from "./open";
 import { GitManager, type GitManagerShape } from "./git/Services/GitManager.ts";
 import type { GitCoreShape } from "./git/Services/GitCore.ts";
 import { GitCore } from "./git/Services/GitCore.ts";
+import { ServerSettingsService } from "./serverSettings";
 import { GitCommandError, GitManagerError } from "./git/Errors.ts";
 import { MigrationError } from "@effect/sql-sqlite-bun/SqliteMigrator";
 import { AnalyticsService } from "./telemetry/Services/AnalyticsService.ts";
@@ -545,6 +546,8 @@ describe("WebSocket Server", () => {
       host: undefined,
       cwd: options.cwd ?? "/test/project",
       keybindingsConfigPath: path.join(stateDir, "keybindings.json"),
+      settingsPath: path.join(stateDir, "settings.json"),
+      providerStatusCacheDir: path.join(stateDir, "provider-status"),
       stateDir,
       staticDir: options.staticDir,
       devUrl: options.devUrl ? new URL(options.devUrl) : undefined,
@@ -553,7 +556,8 @@ describe("WebSocket Server", () => {
       autoBootstrapProjectFromCwd: options.autoBootstrapProjectFromCwd ?? false,
       logWebSocketEvents: options.logWebSocketEvents ?? Boolean(options.devUrl),
     } satisfies ServerConfigShape);
-    const baseLayer = Layer.merge(persistenceLayer, serverConfigLayer);
+    const serverSettingsLayer = ServerSettingsService.layerTest();
+    const baseLayer = Layer.mergeAll(persistenceLayer, serverConfigLayer, serverSettingsLayer);
     const providerLayer =
       options.providerLayer ?? makeServerProviderLayer().pipe(Layer.provideMerge(baseLayer));
     const infrastructureLayer = providerLayer;
