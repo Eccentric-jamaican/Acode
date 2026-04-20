@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type { createOpencode, OpencodeClient } from "@opencode-ai/sdk";
-import { ThreadId } from "@t3tools/contracts";
+import { DEFAULT_SERVER_SETTINGS, ThreadId } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vitest";
 
 import { Effect, Layer } from "effect";
 
 import { ServerConfig } from "../../config.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
 import { OpencodeAdapter } from "../Services/OpencodeAdapter.ts";
 import { makeOpencodeAdapterLive } from "./OpencodeAdapter.ts";
 
@@ -86,11 +87,15 @@ function createOpenCodeFixture(input?: {
 async function runWithFixture<A, E>(
   fixture: ReturnType<typeof createOpenCodeFixture>,
   effect: Effect.Effect<A, E, OpencodeAdapter>,
+  options?: {
+    readonly settingsOverrides?: Parameters<typeof ServerSettingsService.layerTest>[0];
+  },
 ): Promise<A> {
   const layer = makeOpencodeAdapterLive({
     createRuntime: fixture.createRuntime,
   }).pipe(
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerSettingsService.layerTest(options?.settingsOverrides)),
     Layer.provideMerge(NodeServices.layer),
   );
   return Effect.runPromise(effect.pipe(Effect.provide(layer), Effect.orDie));
@@ -261,5 +266,40 @@ describe("OpencodeAdapter native commands", () => {
     }
     expect(fixture.sessionPromptAsync).not.toHaveBeenCalled();
     expect(fixture.sessionCommand).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the default OpenCode binary path when settings persist an empty value", async () => {
+    const fixture = createOpenCodeFixture();
+
+    await runWithFixture(
+      fixture,
+      Effect.gen(function* () {
+        const adapter = yield* OpencodeAdapter;
+        const threadId = asThreadId("thread-empty-binary");
+        yield* adapter.startSession({
+          threadId,
+          provider: "opencode",
+          cwd: process.cwd(),
+          model: "openai/gpt-4.1",
+          runtimeMode: "full-access",
+        });
+      }),
+      {
+        settingsOverrides: {
+          providers: {
+            opencode: {
+              ...DEFAULT_SERVER_SETTINGS.providers.opencode,
+              binaryPath: "",
+            },
+          },
+        },
+      },
+    );
+
+    expect(fixture.createRuntime).toHaveBeenCalledWith(
+      expect.objectContaining({
+        binaryPath: "opencode",
+      }),
+    );
   });
 });

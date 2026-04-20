@@ -29,6 +29,7 @@ import { Data, Effect, FileSystem, Layer, Option, Queue, Ref, Stream } from "eff
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import { createLogger } from "../../logger.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import {
   ProviderAdapterProcessError,
@@ -40,6 +41,7 @@ import {
   buildOpenCodeBasicAuthorizationHeader,
   connectToOpenCodeServer,
   createOpenCodeSdkClient,
+  getOpenCodeStartupMetadata,
 } from "../opencodeRuntime.ts";
 import { OpencodeMessageRoleGate } from "./OpencodeMessageRoleGate.ts";
 import { OpencodeAdapter, type OpencodeAdapterShape } from "../Services/OpencodeAdapter.ts";
@@ -48,8 +50,11 @@ import { normalizeInvocationDiffFiles } from "./InvocationDiffNormalization.ts";
 import { discoverSkillsForCwd } from "./SkillDiscovery.ts";
 
 const PROVIDER = "opencode" as const;
-const STARTUP_TIMEOUT_MS = 20_000;
+// Match the slower end of observed OpenCode cold-start behavior on Windows so
+// session startup does not race the server bootstrap.
+const STARTUP_TIMEOUT_MS = 30_000;
 const RECONNECT_DELAY_MS = 700;
+const logger = createLogger("opencode");
 
 export interface OpencodeAdapterLiveOptions {
   readonly host?: string;
@@ -470,6 +475,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           settings.serverPassword.trim().length > 0
             ? settings.serverPassword.trim()
             : undefined;
+        const runtimeStartupStartedAt = Date.now();
 
         const runtimeFromSdk = yield* Effect.tryPromise({
           try: async () => {
@@ -489,14 +495,35 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
               ...(options?.port ? { port: options.port } : {}),
               timeoutMs: STARTUP_TIMEOUT_MS,
             });
+            logger.info("OpenCode runtime connected", {
+              threadId,
+              binaryPath: settings.binaryPath,
+              configuredServerUrl: settings.serverUrl,
+              startupDurationMs: Date.now() - runtimeStartupStartedAt,
+              runtimeUrl: server.url,
+            });
             return { server };
           },
-          catch: (cause) =>
-            processError(
+          catch: (cause) => {
+            const startupMetadata = getOpenCodeStartupMetadata(cause);
+            logger.warn("OpenCode runtime startup failed", {
+              threadId,
+              binaryPath: settings.binaryPath,
+              configuredServerUrl: settings.serverUrl,
+              startupDurationMs:
+                startupMetadata?.startupDurationMs ?? Date.now() - runtimeStartupStartedAt,
+              reason: toMessage(cause, "Failed to connect to OpenCode runtime."),
+              ...(startupMetadata?.hostname ? { hostname: startupMetadata.hostname } : {}),
+              ...(startupMetadata?.port ? { port: startupMetadata.port } : {}),
+              ...(startupMetadata?.stdout ? { stdout: startupMetadata.stdout } : {}),
+              ...(startupMetadata?.stderr ? { stderr: startupMetadata.stderr } : {}),
+            });
+            return processError(
               threadId,
               toMessage(cause, "Failed to connect to OpenCode runtime."),
               cause,
-            ),
+            );
+          },
         });
 
         const runtime: RuntimeHandle = {

@@ -2,12 +2,14 @@ import { Effect, Layer, Option, PubSub, Ref, Stream } from "effect";
 import { DEFAULT_SERVER_SETTINGS, type ServerProviderStatus } from "@t3tools/contracts";
 
 import { ServerConfig } from "../../config";
+import { createLogger } from "../../logger";
 import { ServerSettingsService } from "../../serverSettings";
 import { OpenCodeProvider } from "../Services/OpenCodeProvider";
 import {
   connectToOpenCodeServer,
   createOpenCodeSdkClient,
   flattenOpenCodeModels,
+  getOpenCodeStartupMetadata,
   loadOpenCodeInventory,
   resolveOpenCodeBinaryPath,
   runOpenCodeCommand,
@@ -15,6 +17,7 @@ import {
 import { providerModelsFromSettings } from "../providerSnapshot";
 
 const PROVIDER = "opencode" as const;
+const logger = createLogger("opencode");
 
 const DEFAULT_OPENCODE_MODEL_CAPABILITIES = {
   reasoningEffortLevels: [],
@@ -90,6 +93,7 @@ async function checkOpenCodeProviderStatus(input: {
   }
 
   const isExternalServer = input.serverUrl.trim().length > 0;
+  const startupStartedAt = Date.now();
   try {
     let version: string | null = null;
     const resolvedBinaryPath = resolveOpenCodeBinaryPath(input.binaryPath);
@@ -116,6 +120,13 @@ async function checkOpenCodeProviderStatus(input: {
       const inventory = await loadOpenCodeInventory(client);
       const builtInModels = flattenOpenCodeModels(inventory);
       const connectedCount = inventory.providerList.connected.length;
+      logger.info("OpenCode provider status check succeeded", {
+        externalServer: server.external,
+        binaryPath: resolvedBinaryPath,
+        serverUrl: server.url,
+        startupDurationMs: Date.now() - startupStartedAt,
+        connectedProviders: connectedCount,
+      });
       return {
         provider: PROVIDER,
         status: connectedCount > 0 ? ("ready" as const) : ("warning" as const),
@@ -144,6 +155,17 @@ async function checkOpenCodeProviderStatus(input: {
   } catch (cause) {
     const message =
       cause instanceof Error ? cause.message : "Failed to check OpenCode provider status.";
+    const startupMetadata = getOpenCodeStartupMetadata(cause);
+    logger.warn("OpenCode provider status check failed", {
+      binaryPath: input.binaryPath,
+      configuredServerUrl: input.serverUrl,
+      startupDurationMs: startupMetadata?.startupDurationMs ?? Date.now() - startupStartedAt,
+      reason: message,
+      ...(startupMetadata?.hostname ? { hostname: startupMetadata.hostname } : {}),
+      ...(startupMetadata?.port ? { port: startupMetadata.port } : {}),
+      ...(startupMetadata?.stdout ? { stdout: startupMetadata.stdout } : {}),
+      ...(startupMetadata?.stderr ? { stderr: startupMetadata.stderr } : {}),
+    });
     return {
       provider: PROVIDER,
       status: "error" as const,

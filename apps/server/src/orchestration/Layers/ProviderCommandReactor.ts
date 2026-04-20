@@ -270,7 +270,11 @@ const make = Effect.gen(function* () {
       });
 
     const existingSessionThreadId =
-      thread.session && thread.session.status !== "stopped" ? thread.id : null;
+      thread.session &&
+      thread.session.status !== "stopped" &&
+      thread.session.status !== "error"
+        ? thread.id
+        : null;
     if (existingSessionThreadId) {
       const runtimeModeChanged = thread.runtimeMode !== thread.session?.runtimeMode;
       const providerChanged = options?.provider !== undefined && options.provider !== currentProvider;

@@ -719,6 +719,69 @@ describe("ProviderCommandReactor", () => {
     );
   });
 
+  it("restarts the provider session after a previous turn left the thread session in error", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+    harness.sendTurn.mockImplementationOnce(
+      (_: unknown) => Effect.fail(new Error("simulated sendTurn failure")) as never,
+    );
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-turn-start-first-failure"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-turn-start-first-failure"),
+          role: "user",
+          text: "first try",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const readModel = await Effect.runPromise(harness.engine.getReadModel());
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.makeUnsafe("thread-1"));
+      return thread?.session?.status === "error";
+    });
+
+    expect(harness.startSession.mock.calls.length).toBe(1);
+
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.makeUnsafe("cmd-turn-start-after-error"),
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-turn-start-after-error"),
+          role: "user",
+          text: "second try",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: new Date().toISOString(),
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length >= 2);
+    expect(harness.startSession.mock.calls.length).toBe(2);
+
+    const readModel = await Effect.runPromise(harness.engine.getReadModel());
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.makeUnsafe("thread-1"));
+    const failureDetails = thread?.activities
+      .filter((activity) => activity.kind === "provider.turn.start.failed")
+      .map((activity) => String((activity.payload as { detail?: unknown }).detail ?? ""));
+
+    expect(
+      failureDetails?.some((detail) => detail.includes("no persisted provider binding exists.")),
+    ).toBe(false);
+  });
+
   it("does not restart an existing opencode session for the next turn in the same thread", async () => {
     const harness = await createHarness();
     const now = new Date().toISOString();

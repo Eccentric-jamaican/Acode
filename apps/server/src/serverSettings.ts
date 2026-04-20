@@ -5,7 +5,7 @@ import {
   type ServerSettings as ServerSettingsValue,
   type ServerSettingsPatch,
 } from "@t3tools/contracts";
-import { applyServerSettingsPatch } from "@t3tools/shared/serverSettings";
+import { applyServerSettingsPatch, normalizeServerSettings } from "@t3tools/shared/serverSettings";
 import {
   Effect,
   FileSystem,
@@ -41,14 +41,14 @@ export class ServerSettingsService extends ServiceMap.Service<
     Layer.effect(
       ServerSettingsService,
       Effect.gen(function* () {
-        const settingsRef = yield* Ref.make({
+        const settingsRef = yield* Ref.make(normalizeServerSettings({
           ...DEFAULT_SERVER_SETTINGS,
           ...overrides,
           providers: {
             ...DEFAULT_SERVER_SETTINGS.providers,
             ...(overrides.providers ?? {}),
           },
-        });
+        }));
         return {
           start: Effect.void,
           ready: Effect.void,
@@ -142,7 +142,7 @@ const makeServerSettings = Effect.gen(function* () {
           }),
       ),
     );
-    return yield* decodeSettings(raw);
+    return yield* decodeSettings(raw).pipe(Effect.map(normalizeServerSettings));
   });
 
   const start = loadFromDisk.pipe(

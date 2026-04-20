@@ -22,9 +22,12 @@ import {
 } from "@opencode-ai/sdk/v2";
 
 const DEFAULT_HOSTNAME = "127.0.0.1";
-const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 5_000;
+// Cold OpenCode startup on Windows can take noticeably longer than a few seconds,
+// especially when the CLI initializes its local database and provider state.
+const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 30_000;
 const OPENCODE_SERVER_READY_PREFIX = "opencode server listening";
 const PORT_POLL_INTERVAL_MS = 200;
+const DEFAULT_OPENCODE_BINARY_PATH = "opencode";
 
 const DEFAULT_OPENCODE_MODEL_CAPABILITIES: ModelCapabilities = {
   reasoningEffortLevels: [],
@@ -50,6 +53,78 @@ export interface OpenCodeServerConnection {
   readonly process: ChildProcess | null;
   readonly external: boolean;
   close(): void;
+}
+
+export interface OpenCodeStartupMetadata {
+  binaryPath: string;
+  hostname: string;
+  port: number;
+  startupDurationMs: number;
+  stdout?: string;
+  stderr?: string;
+}
+
+export interface OpenCodeStartupError extends Error {
+  startupMetadata?: OpenCodeStartupMetadata;
+}
+
+function normalizeOpenCodeBinaryCommand(binaryPath: string): string {
+  const trimmed = binaryPath.trim();
+  return trimmed.length > 0 ? trimmed : DEFAULT_OPENCODE_BINARY_PATH;
+}
+
+function toTrimmedOutputSnippet(output: string): string | undefined {
+  const trimmed = output.trim();
+  if (trimmed.length === 0) {
+    return undefined;
+  }
+  const maxChars = 1200;
+  return trimmed.length <= maxChars ? trimmed : trimmed.slice(-maxChars);
+}
+
+function buildOpenCodeStartupError(input: {
+  readonly message: string;
+  readonly binaryPath: string;
+  readonly hostname: string;
+  readonly port: number;
+  readonly startedAt: number;
+  readonly stdout: string;
+  readonly stderr: string;
+  readonly cause?: unknown;
+}): OpenCodeStartupError {
+  const error = new Error(input.message) as OpenCodeStartupError & { cause?: unknown };
+  const startupMetadata: OpenCodeStartupMetadata = {
+    binaryPath: input.binaryPath,
+    hostname: input.hostname,
+    port: input.port,
+    startupDurationMs: Date.now() - input.startedAt,
+  };
+  const stdout = toTrimmedOutputSnippet(input.stdout);
+  const stderr = toTrimmedOutputSnippet(input.stderr);
+  if (stdout !== undefined) {
+    startupMetadata.stdout = stdout;
+  }
+  if (stderr !== undefined) {
+    startupMetadata.stderr = stderr;
+  }
+  error.startupMetadata = startupMetadata;
+  if (input.cause !== undefined) {
+    error.cause = input.cause;
+  }
+  return error;
+}
+
+export function getOpenCodeStartupMetadata(cause: unknown): OpenCodeStartupMetadata | undefined {
+  if (
+    typeof cause === "object" &&
+    cause !== null &&
+    "startupMetadata" in cause &&
+    typeof (cause as { startupMetadata?: unknown }).startupMetadata === "object" &&
+    (cause as { startupMetadata?: unknown }).startupMetadata !== null
+  ) {
+    return (cause as { startupMetadata: OpenCodeStartupMetadata }).startupMetadata;
+  }
+  return undefined;
 }
 
 function parseServerUrlFromOutput(output: string): string | null {
@@ -222,10 +297,12 @@ export async function startOpenCodeServerProcess(input: {
   readonly hostname?: string;
   readonly timeoutMs?: number;
 }): Promise<OpenCodeServerConnection> {
+  const binaryPath = normalizeOpenCodeBinaryCommand(input.binaryPath);
   const hostname = input.hostname ?? DEFAULT_HOSTNAME;
   const port = input.port ?? (await findAvailablePort());
   const timeoutMs = input.timeoutMs ?? DEFAULT_OPENCODE_SERVER_TIMEOUT_MS;
-  const child = spawn(input.binaryPath, ["serve", `--hostname=${hostname}`, `--port=${port}`], {
+  const startedAt = Date.now();
+  const child = spawn(binaryPath, ["serve", `--hostname=${hostname}`, `--port=${port}`], {
     stdio: ["ignore", "pipe", "pipe"],
     shell: process.platform === "win32",
     env: {
@@ -243,7 +320,17 @@ export async function startOpenCodeServerProcess(input: {
   const url = await new Promise<string>((resolve, reject) => {
     const timeout = setTimeout(() => {
       child.kill();
-      reject(new Error(`Timed out waiting for OpenCode server after ${timeoutMs}ms.`));
+      reject(
+        buildOpenCodeStartupError({
+          message: `Timed out waiting for OpenCode server after ${timeoutMs}ms.`,
+          binaryPath,
+          hostname,
+          port,
+          startedAt,
+          stdout,
+          stderr,
+        }),
+      );
     }, timeoutMs);
     let portPoll: NodeJS.Timeout | null = null;
 
@@ -273,20 +360,31 @@ export async function startOpenCodeServerProcess(input: {
     };
     const onError = (error: Error) => {
       cleanup();
-      reject(error);
+      reject(
+        buildOpenCodeStartupError({
+          message: error.message,
+          binaryPath,
+          hostname,
+          port,
+          startedAt,
+          stdout,
+          stderr,
+          cause: error,
+        }),
+      );
     };
     const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
       cleanup();
       reject(
-        new Error(
-          [
-            `OpenCode server exited before startup completed (code=${code ?? "null"}, signal=${signal ?? "null"}).`,
-            stdout.trim() ? `stdout:\n${stdout.trim()}` : null,
-            stderr.trim() ? `stderr:\n${stderr.trim()}` : null,
-          ]
-            .filter(Boolean)
-            .join("\n\n"),
-        ),
+        buildOpenCodeStartupError({
+          message: `OpenCode server exited before startup completed (code=${code ?? "null"}, signal=${signal ?? "null"}).`,
+          binaryPath,
+          hostname,
+          port,
+          startedAt,
+          stdout,
+          stderr,
+        }),
       );
     };
 
@@ -348,7 +446,8 @@ export async function runOpenCodeCommand(input: {
   readonly binaryPath: string;
   readonly args: ReadonlyArray<string>;
 }): Promise<{ stdout: string; stderr: string; code: number }> {
-  const child = spawn(input.binaryPath, [...input.args], {
+  const binaryPath = normalizeOpenCodeBinaryCommand(input.binaryPath);
+  const child = spawn(binaryPath, [...input.args], {
     stdio: ["ignore", "pipe", "pipe"],
     shell: process.platform === "win32",
     env: process.env,
@@ -429,14 +528,19 @@ export function flattenOpenCodeModels(
 }
 
 export function resolveOpenCodeBinaryPath(binaryPath: string): string {
-  if (Path.isAbsolute(binaryPath)) {
-    return binaryPath;
+  const normalizedBinaryPath = normalizeOpenCodeBinaryCommand(binaryPath);
+  if (Path.isAbsolute(normalizedBinaryPath)) {
+    return normalizedBinaryPath;
   }
-  const candidates = execFileSync(process.platform === "win32" ? "where" : "which", [binaryPath], {
-    encoding: "utf8",
-    timeout: 3_000,
-    shell: process.platform === "win32",
-  })
+  const candidates = execFileSync(
+    process.platform === "win32" ? "where" : "which",
+    [normalizedBinaryPath],
+    {
+      encoding: "utf8",
+      timeout: 3_000,
+      shell: process.platform === "win32",
+    },
+  )
     .split(/\r?\n/u)
     .map((entry) => entry.trim())
     .filter((entry) => entry.length > 0);
@@ -445,8 +549,8 @@ export function resolveOpenCodeBinaryPath(binaryPath: string): string {
       candidates.find((entry) => entry.toLowerCase().endsWith(".cmd")) ??
       candidates.find((entry) => entry.toLowerCase().endsWith(".exe")) ??
       candidates[0] ??
-      binaryPath
+      normalizedBinaryPath
     );
   }
-  return candidates[0] ?? binaryPath;
+  return candidates[0] ?? normalizedBinaryPath;
 }
