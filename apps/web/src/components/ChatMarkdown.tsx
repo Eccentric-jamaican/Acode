@@ -35,7 +35,7 @@ interface ChatMarkdownProps {
   cwd: string | undefined;
   isStreaming?: boolean;
   variant?: "assistant" | "user";
-  onOpenFilePath?: (relativePath: string) => void;
+  onOpenFilePath?: ((relativePath: string) => void) | undefined;
 }
 
 const CODE_FENCE_LANGUAGE_REGEX = /(?:^|\s)language-([^\s]+)/;

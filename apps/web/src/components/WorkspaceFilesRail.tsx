@@ -11,7 +11,7 @@ interface WorkspaceFilesRailProps {
   threadId: ThreadId;
   cwd: string | null;
   className?: string;
-  onRevealFile?: (path: string) => void;
+  onRevealFile?: ((path: string) => void) | undefined;
 }
 
 export function WorkspaceFilesRail(props: WorkspaceFilesRailProps) {

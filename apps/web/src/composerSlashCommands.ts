@@ -165,7 +165,7 @@ export function getAvailableComposerSlashCommands(input: {
       ? [
           "clear",
           "model",
-          ...(supportsFastSlashCommand ? (["fast"] as const) : []),
+          ...(input.provider === "codex" && supportsFastSlashCommand ? (["fast"] as const) : []),
           "plan",
           "default",
           ...(canOfferReviewCommand ? (["review"] as const) : []),

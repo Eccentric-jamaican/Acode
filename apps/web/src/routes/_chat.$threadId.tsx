@@ -234,7 +234,7 @@ const PanePanelInlineSidebar = (props: {
   filesOpen: boolean;
   onClosePanel: () => void;
   onOpenPanel: () => void;
-  onRevealFile?: (path: string) => void;
+  onRevealFile: (path: string) => void;
   renderPanelContent: boolean;
   panel: ChatRightPanel | null | undefined;
   threadId: ThreadId | null;
@@ -349,7 +349,7 @@ function SplitPaneEmbeddedPanel(props: {
   panel: ChatRightPanel | null | undefined;
   threadId: ThreadId | null;
   onClosePanel: () => void;
-  onRevealFile?: (path: string) => void;
+  onRevealFile: (path: string) => void;
   panelState: Pick<SplitViewPanePanelState, "panel" | "diffTurnId" | "diffFilePath">;
   onUpdatePanelState: (
     patch: Partial<Pick<SplitViewPanePanelState, "panel" | "filesOpen" | "diffTurnId" | "diffFilePath">>,

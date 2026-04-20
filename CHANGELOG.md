@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.35] - 2026-04-19
+
+### Added
+- Added injected OpenCode runtime client support so alternate runtime wiring can drive command, provider, session, and event APIs without going through the HTTP bridge.
+
+### Changed
+- Expanded the release candidate with the latest session orchestration, checkpoint sidebar, archive, subagent, and desktop progress updates merged after `v0.2.34`.
+- Refined diff and timeline handling around the OpenCode integration path, including safer event subscription flow when an injected runtime client is present.
+- Limited the `/fast` slash command to Codex sessions so OpenCode only surfaces built-in commands it actually supports.
+- Tightened callback typing across chat markdown, workspace file rail, and split chat panel components to keep generated route typing predictable.
+
+### Fixed
+- Fixed OpenCode runtime event streaming for injected clients so the adapter uses the SDK-compatible subscription shape instead of the HTTP runtime code path.
+- Fixed release-prep type regressions in file reveal and proposed-plan component props that were leaking into generated route output.
+
 ## [0.2.29] - 2026-04-08
 
 ### Fixed

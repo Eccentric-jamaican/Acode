@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import {
   EventId,
   DEFAULT_SERVER_SETTINGS,
@@ -58,9 +57,31 @@ export interface OpencodeAdapterLiveOptions {
   readonly createRuntime?: unknown;
 }
 
+type RuntimeFactoryResult = {
+  readonly server: {
+    readonly url: string;
+    readonly close: () => void;
+  };
+  readonly client?: unknown;
+};
+
+type RuntimeFactory = (input: {
+  readonly binaryPath: string;
+  readonly serverUrl?: string | null;
+  readonly hostname?: string;
+  readonly port?: number;
+  readonly timeoutMs?: number;
+}) => Promise<RuntimeFactoryResult>;
+
+type EventSubscriptionResult = {
+  readonly stream: AsyncIterable<unknown>;
+};
+
 interface RuntimeHandle {
   readonly baseUrl: string;
   readonly serverPassword?: string;
+  readonly client?: Record<string, unknown>;
+  readonly usesInjectedClient: boolean;
   readonly close: () => void;
 }
 
@@ -263,6 +284,53 @@ function parseLeadingSlashInvocation(input: string): ParsedSlashInvocation | nul
   };
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+  const record = asObject(value);
+  if (!record) {
+    throw new Error("Injected OpenCode runtime returned an invalid client shape.");
+  }
+  return record;
+}
+
+function asFunction(
+  record: Record<string, unknown>,
+  key: string,
+): (...args: ReadonlyArray<unknown>) => Promise<unknown> {
+  const value = record[key];
+  if (typeof value !== "function") {
+    throw new Error(`Injected OpenCode runtime client is missing '${key}' function.`);
+  }
+  return value as (...args: ReadonlyArray<unknown>) => Promise<unknown>;
+}
+
+function decodePathSegment(path: string, index: number): string {
+  const segments = path.split("/").filter((segment) => segment.length > 0);
+  const value = segments[index];
+  if (!value) {
+    throw new Error(`Cannot parse OpenCode path segment at index ${index} from '${path}'.`);
+  }
+  return decodeURIComponent(value);
+}
+
+function asAsyncIterable(value: unknown): AsyncIterable<unknown> {
+  if (
+    typeof value === "object" &&
+    value !== null &&
+    Symbol.asyncIterator in value &&
+    typeof value[Symbol.asyncIterator] === "function"
+  ) {
+    return value as AsyncIterable<unknown>;
+  }
+  throw new Error("Injected OpenCode runtime returned an invalid event stream.");
+}
+
+function asEventSubscriptionResult(value: unknown): EventSubscriptionResult {
+  const record = asRecord(value);
+  return {
+    stream: asAsyncIterable(record.stream),
+  };
+}
+
 function eventBase(input: {
   readonly threadId: ThreadId;
   readonly type: ProviderRuntimeEvent["type"];
@@ -298,6 +366,10 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
     const services = yield* Effect.services<never>();
     const queue = yield* Queue.unbounded<ProviderRuntimeEvent>();
     const runtimeRef = yield* Ref.make<RuntimeHandle | null>(null);
+    const runtimeFactory =
+      typeof options?.createRuntime === "function"
+        ? (options.createRuntime as RuntimeFactory)
+        : undefined;
 
     const sessions = new Map<ThreadId, RuntimeSession>();
     const commandCacheByCwd = new Map<string, ProviderListCommandsResult>();
@@ -401,6 +473,15 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
 
         const runtimeFromSdk = yield* Effect.tryPromise({
           try: async () => {
+            if (runtimeFactory) {
+              return runtimeFactory({
+                binaryPath: settings.binaryPath,
+                serverUrl: settings.serverUrl,
+                ...(options?.host ? { hostname: options.host } : {}),
+                ...(options?.port ? { port: options.port } : {}),
+                timeoutMs: STARTUP_TIMEOUT_MS,
+              });
+            }
             const server = await connectToOpenCodeServer({
               binaryPath: settings.binaryPath,
               serverUrl: settings.serverUrl,
@@ -421,6 +502,10 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         const runtime: RuntimeHandle = {
           baseUrl: runtimeFromSdk.server.url,
           ...(serverPassword ? { serverPassword } : {}),
+          ...(asObject(runtimeFromSdk)?.client
+            ? { client: asRecord(asObject(runtimeFromSdk)?.client) }
+            : {}),
+          usesInjectedClient: runtimeFactory !== undefined,
           close: runtimeFromSdk.server.close,
         };
         yield* Ref.set(runtimeRef, runtime);
@@ -439,6 +524,60 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         const executeRequest = (runtime: RuntimeHandle) =>
           Effect.tryPromise({
             try: async () => {
+              if (runtime.client) {
+                const client = runtime.client;
+                const bodyRecord = asObject(input.body) ?? {};
+                const command = asRecord(client.command);
+                const session = asRecord(client.session);
+                const provider = asObject(client.provider);
+
+                switch (input.methodName) {
+                  case "command.list":
+                    return (await asFunction(command, "list")({
+                      ...(input.directory ? { directory: input.directory } : {}),
+                    })) as T;
+                  case "provider.list":
+                    if (!provider) {
+                      throw new Error("Injected OpenCode runtime client is missing provider API.");
+                    }
+                    return (await asFunction(provider, "list")()) as T;
+                  case "session.create":
+                    return (await asFunction(session, "create")({
+                      body: bodyRecord,
+                    })) as T;
+                  case "session.get": {
+                    const sessionID = decodePathSegment(input.path, 1);
+                    return (await asFunction(session, "retrieve")({
+                      path: { sessionID },
+                    })) as T;
+                  }
+                  case "session.command": {
+                    const id = decodePathSegment(input.path, 1);
+                    return (await asFunction(session, "command")({
+                      path: { id, sessionID: id },
+                      body: bodyRecord,
+                    })) as T;
+                  }
+                  case "session.prompt_async": {
+                    const id = decodePathSegment(input.path, 1);
+                    return (await asFunction(session, "promptAsync")({
+                      path: { id, sessionID: id },
+                      body: bodyRecord,
+                    })) as T;
+                  }
+                  case "session.abort": {
+                    const id = decodePathSegment(input.path, 1);
+                    return (await asFunction(session, "abort")({
+                      path: { id, sessionID: id },
+                    })) as T;
+                  }
+                  default:
+                    throw new Error(
+                      `Injected OpenCode runtime does not support '${input.methodName}'.`,
+                    );
+                }
+              }
+
               const bodyRecord = asObject(input.body);
               const url = new URL(input.path, runtime.baseUrl);
               if (input.directory) {
@@ -1205,14 +1344,32 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           let runtime: RuntimeHandle | null = null;
           try {
             runtime = await ensureRuntime(threadId).pipe(runWithServices);
-            const eventClient = createOpenCodeSdkClient({
-              baseUrl: runtime.baseUrl,
-              directory,
-              ...(runtime.serverPassword ? { serverPassword: runtime.serverPassword } : {}),
-            });
-            const eventStream = await eventClient.event.subscribe(undefined, {
-              signal: controller.signal,
-            });
+            const eventClient =
+              runtime.client ??
+              createOpenCodeSdkClient({
+                baseUrl: runtime.baseUrl,
+                directory,
+                ...(runtime.serverPassword ? { serverPassword: runtime.serverPassword } : {}),
+              });
+            const eventApi = asRecord(asObject(eventClient)?.event);
+            const subscribe = asFunction(eventApi, "subscribe");
+            const eventStream = runtime.usesInjectedClient
+              ? asEventSubscriptionResult(
+                  await subscribe({
+                    directory,
+                    signal: controller.signal,
+                  }),
+                )
+              : asEventSubscriptionResult(
+                  await subscribe(
+                    {
+                      directory,
+                    },
+                    {
+                      signal: controller.signal,
+                    },
+                  ),
+                );
             for await (const streamEvent of eventStream.stream) {
               if (controller.signal.aborted) {
                 break;

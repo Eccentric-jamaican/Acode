@@ -678,6 +678,7 @@ const ProposedPlanCard = memo(function ProposedPlanCard(props: {
   cwd: string | undefined;
   workspaceRoot: string | undefined;
   sourceId: string;
+  onOpenFilePath?: ((path: string) => void) | undefined;
 }) {
   const { planMarkdown, cwd, workspaceRoot, sourceId } = props;
   const [expanded, setExpanded] = useState(false);
