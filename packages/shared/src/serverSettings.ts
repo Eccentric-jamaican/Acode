@@ -6,8 +6,7 @@ import {
 } from "@t3tools/contracts";
 
 function normalizeOpenCodeBinaryPath(binaryPath: string): string {
-  const trimmed = binaryPath.trim();
-  return trimmed.length > 0 ? trimmed : DEFAULT_SERVER_SETTINGS.providers.opencode.binaryPath;
+  return binaryPath.trim();
 }
 
 export function normalizeServerSettings(current: ServerSettings): ServerSettings {

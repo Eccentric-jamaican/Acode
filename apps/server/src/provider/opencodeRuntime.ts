@@ -73,10 +73,6 @@ function normalizeOpenCodeBinaryCommand(binaryPath: string): string {
   return trimmed.length > 0 ? trimmed : DEFAULT_OPENCODE_BINARY_PATH;
 }
 
-function quoteWindowsCmdSegment(value: string): string {
-  return `"${value.replaceAll('"', '""')}"`;
-}
-
 function spawnOpenCodeProcess(input: {
   readonly binaryPath: string;
   readonly args: ReadonlyArray<string>;
@@ -89,8 +85,7 @@ function spawnOpenCodeProcess(input: {
     });
   }
 
-  const commandLine = [input.binaryPath, ...input.args].map(quoteWindowsCmdSegment).join(" ");
-  return spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", commandLine], {
+  return spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/c", input.binaryPath, ...input.args], {
     stdio: ["ignore", "pipe", "pipe"],
     env: input.env,
     windowsHide: true,

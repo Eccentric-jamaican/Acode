@@ -348,7 +348,7 @@ describe("OpencodeAdapter native commands", () => {
     expect(fixture.sessionCommand).not.toHaveBeenCalled();
   });
 
-  it("falls back to the default OpenCode binary path when settings persist an empty value", async () => {
+  it("preserves a blank OpenCode binary path when settings persist an empty value", async () => {
     const fixture = createOpenCodeFixture();
 
     await runWithFixture(
@@ -378,7 +378,7 @@ describe("OpencodeAdapter native commands", () => {
 
     expect(fixture.createRuntime).toHaveBeenCalledWith(
       expect.objectContaining({
-        binaryPath: "opencode",
+        binaryPath: "",
       }),
     );
   });

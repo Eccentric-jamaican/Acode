@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { PROVIDER_DISPLAY_NAMES, type ProviderKind } from "@t3tools/contracts";
 import { getModelOptions, normalizeModelSlug } from "@t3tools/shared/model";
 import { ArchiveIcon, ArchiveRestoreIcon, Trash2Icon, ZapIcon } from "lucide-react";
@@ -147,6 +147,15 @@ function SettingsRouteView() {
   const newThreadSuggestionModel = settings.newThreadSuggestionModel;
   const keybindingsConfigPath = serverConfigQuery.data?.keybindingsConfigPath ?? null;
   const opencodeServerSettings = serverConfigQuery.data?.settings?.providers.opencode ?? null;
+  const [opencodeBinaryPathDraft, setOpencodeBinaryPathDraft] = useState(
+    opencodeServerSettings?.binaryPath ?? "",
+  );
+  const [opencodeServerUrlDraft, setOpencodeServerUrlDraft] = useState(
+    opencodeServerSettings?.serverUrl ?? "",
+  );
+  const [opencodeServerPasswordDraft, setOpencodeServerPasswordDraft] = useState(
+    opencodeServerSettings?.serverPassword ?? "",
+  );
   const threads = useStore((store) => store.threads);
   const projects = useStore((store) => store.projects);
   const suggestionModelOptions = getSuggestionModelOptions({
@@ -173,6 +182,16 @@ function SettingsRouteView() {
       });
   }, [keybindingsConfigPath]);
 
+  useEffect(() => {
+    setOpencodeBinaryPathDraft(opencodeServerSettings?.binaryPath ?? "");
+    setOpencodeServerUrlDraft(opencodeServerSettings?.serverUrl ?? "");
+    setOpencodeServerPasswordDraft(opencodeServerSettings?.serverPassword ?? "");
+  }, [
+    opencodeServerSettings?.binaryPath,
+    opencodeServerSettings?.serverPassword,
+    opencodeServerSettings?.serverUrl,
+  ]);
+
   const updateOpenCodeServerSettings = useCallback(
     async (
       patch: Partial<{
@@ -193,6 +212,31 @@ function SettingsRouteView() {
     },
     [queryClient],
   );
+
+  const commitOpenCodeBinaryPath = useCallback(() => {
+    if ((opencodeServerSettings?.binaryPath ?? "") === opencodeBinaryPathDraft) {
+      return;
+    }
+    void updateOpenCodeServerSettings({ binaryPath: opencodeBinaryPathDraft });
+  }, [opencodeBinaryPathDraft, opencodeServerSettings?.binaryPath, updateOpenCodeServerSettings]);
+
+  const commitOpenCodeServerUrl = useCallback(() => {
+    if ((opencodeServerSettings?.serverUrl ?? "") === opencodeServerUrlDraft) {
+      return;
+    }
+    void updateOpenCodeServerSettings({ serverUrl: opencodeServerUrlDraft });
+  }, [opencodeServerSettings?.serverUrl, opencodeServerUrlDraft, updateOpenCodeServerSettings]);
+
+  const commitOpenCodeServerPassword = useCallback(() => {
+    if ((opencodeServerSettings?.serverPassword ?? "") === opencodeServerPasswordDraft) {
+      return;
+    }
+    void updateOpenCodeServerSettings({ serverPassword: opencodeServerPasswordDraft });
+  }, [
+    opencodeServerPasswordDraft,
+    opencodeServerSettings?.serverPassword,
+    updateOpenCodeServerSettings,
+  ]);
 
   const addCustomModel = useCallback((provider: ProviderKind) => {
     const customModelInput = customModelInputByProvider[provider];
@@ -503,9 +547,15 @@ function SettingsRouteView() {
                 <label className="block space-y-1">
                   <span className="text-xs font-medium text-foreground">Binary path</span>
                   <Input
-                    value={opencodeServerSettings?.binaryPath ?? "opencode"}
+                    value={opencodeBinaryPathDraft}
                     onChange={(event) => {
-                      void updateOpenCodeServerSettings({ binaryPath: event.target.value });
+                      setOpencodeBinaryPathDraft(event.target.value);
+                    }}
+                    onBlur={commitOpenCodeBinaryPath}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.currentTarget.blur();
+                      }
                     }}
                     placeholder="opencode"
                     spellCheck={false}
@@ -518,9 +568,15 @@ function SettingsRouteView() {
                 <label className="block space-y-1">
                   <span className="text-xs font-medium text-foreground">Server URL</span>
                   <Input
-                    value={opencodeServerSettings?.serverUrl ?? ""}
+                    value={opencodeServerUrlDraft}
                     onChange={(event) => {
-                      void updateOpenCodeServerSettings({ serverUrl: event.target.value });
+                      setOpencodeServerUrlDraft(event.target.value);
+                    }}
+                    onBlur={commitOpenCodeServerUrl}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.currentTarget.blur();
+                      }
                     }}
                     placeholder="http://127.0.0.1:4096"
                     spellCheck={false}
@@ -535,11 +591,15 @@ function SettingsRouteView() {
                   <Input
                     type="password"
                     autoComplete="off"
-                    value={opencodeServerSettings?.serverPassword ?? ""}
+                    value={opencodeServerPasswordDraft}
                     onChange={(event) => {
-                      void updateOpenCodeServerSettings({
-                        serverPassword: event.target.value,
-                      });
+                      setOpencodeServerPasswordDraft(event.target.value);
+                    }}
+                    onBlur={commitOpenCodeServerPassword}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.currentTarget.blur();
+                      }
                     }}
                     placeholder="Optional password"
                     spellCheck={false}
