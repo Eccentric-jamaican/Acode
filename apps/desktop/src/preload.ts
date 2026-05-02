@@ -26,6 +26,9 @@ const BROWSER_BACK_CHANNEL = "desktop:browser-back";
 const BROWSER_FORWARD_CHANNEL = "desktop:browser-forward";
 const BROWSER_RELOAD_CHANNEL = "desktop:browser-reload";
 const BROWSER_KILL_CHANNEL = "desktop:browser-kill";
+const BROWSER_GET_SETTINGS_CHANNEL = "desktop:browser-get-settings";
+const BROWSER_UPDATE_SETTINGS_CHANNEL = "desktop:browser-update-settings";
+const BROWSER_CLEAR_BROWSING_DATA_CHANNEL = "desktop:browser-clear-browsing-data";
 const BROWSER_SET_INSPECT_MODE_CHANNEL = "desktop:browser-set-inspect-mode";
 const BROWSER_CAPTURE_INSPECT_SELECTION_CHANNEL = "desktop:browser-capture-inspect-selection";
 const BROWSER_EVENT_CHANNEL = "desktop:browser-event";
@@ -91,6 +94,9 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     forward: (input) => ipcRenderer.invoke(BROWSER_FORWARD_CHANNEL, input),
     reload: (input) => ipcRenderer.invoke(BROWSER_RELOAD_CHANNEL, input),
     kill: (input) => ipcRenderer.invoke(BROWSER_KILL_CHANNEL, input),
+    getSettings: () => ipcRenderer.invoke(BROWSER_GET_SETTINGS_CHANNEL),
+    updateSettings: (input) => ipcRenderer.invoke(BROWSER_UPDATE_SETTINGS_CHANNEL, input),
+    clearBrowsingData: (input) => ipcRenderer.invoke(BROWSER_CLEAR_BROWSING_DATA_CHANNEL, input),
     setInspectMode: (input) => ipcRenderer.invoke(BROWSER_SET_INSPECT_MODE_CHANNEL, input),
     captureInspectSelection: (input) =>
       ipcRenderer.invoke(BROWSER_CAPTURE_INSPECT_SELECTION_CHANNEL, input),

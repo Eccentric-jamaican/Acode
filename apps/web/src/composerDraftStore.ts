@@ -15,6 +15,7 @@ import {
   DEFAULT_RUNTIME_MODE,
   type ChatImageAttachment,
 } from "./types";
+import type { BrowserInspectCapture } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
@@ -42,6 +43,12 @@ export interface PinnedSelectionDraft {
   plainTextStart: number;
   plainTextEnd: number;
   createdAt: string;
+}
+
+export interface ComposerInspectCaptureDraft {
+  id: string;
+  label: string;
+  capture: BrowserInspectCapture;
 }
 
 interface PersistedComposerThreadDraftState {
@@ -82,6 +89,7 @@ interface ComposerThreadDraftState {
   nonPersistedImageIds: string[];
   persistedAttachments: PersistedComposerImageAttachment[];
   pinnedSelections: PinnedSelectionDraft[];
+  inspectCaptures: ComposerInspectCaptureDraft[];
   provider: ProviderKind | null;
   model: string | null;
   runtimeMode: RuntimeMode | null;
@@ -161,6 +169,9 @@ interface ComposerDraftStoreState {
   addPinnedSelection: (threadId: ThreadId, selection: PinnedSelectionDraft) => void;
   removePinnedSelection: (threadId: ThreadId, pinnedSelectionId: string) => void;
   clearPinnedSelections: (threadId: ThreadId) => void;
+  addInspectCapture: (threadId: ThreadId, capture: ComposerInspectCaptureDraft) => void;
+  removeInspectCapture: (threadId: ThreadId, captureId: string) => void;
+  clearInspectCaptures: (threadId: ThreadId) => void;
   clearPersistedAttachments: (threadId: ThreadId) => void;
   syncPersistedAttachments: (
     threadId: ThreadId,
@@ -180,16 +191,19 @@ const EMPTY_IMAGES: ComposerImageAttachment[] = [];
 const EMPTY_IDS: string[] = [];
 const EMPTY_PERSISTED_ATTACHMENTS: PersistedComposerImageAttachment[] = [];
 const EMPTY_PINNED_SELECTIONS: PinnedSelectionDraft[] = [];
+const EMPTY_INSPECT_CAPTURES: ComposerInspectCaptureDraft[] = [];
 Object.freeze(EMPTY_IMAGES);
 Object.freeze(EMPTY_IDS);
 Object.freeze(EMPTY_PERSISTED_ATTACHMENTS);
 Object.freeze(EMPTY_PINNED_SELECTIONS);
+Object.freeze(EMPTY_INSPECT_CAPTURES);
 const EMPTY_THREAD_DRAFT = Object.freeze({
   prompt: "",
   images: EMPTY_IMAGES,
   nonPersistedImageIds: EMPTY_IDS,
   persistedAttachments: EMPTY_PERSISTED_ATTACHMENTS,
   pinnedSelections: EMPTY_PINNED_SELECTIONS,
+  inspectCaptures: EMPTY_INSPECT_CAPTURES,
   provider: null,
   model: null,
   runtimeMode: null,
@@ -211,6 +225,7 @@ function createEmptyThreadDraft(): ComposerThreadDraftState {
     nonPersistedImageIds: [],
     persistedAttachments: [],
     pinnedSelections: [],
+    inspectCaptures: [],
     provider: null,
     model: null,
     runtimeMode: null,
@@ -234,6 +249,7 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     draft.images.length === 0 &&
     draft.persistedAttachments.length === 0 &&
     draft.pinnedSelections.length === 0 &&
+    draft.inspectCaptures.length === 0 &&
     draft.provider === null &&
     draft.model === null &&
     draft.runtimeMode === null &&
@@ -614,6 +630,7 @@ function toHydratedThreadDraft(
     nonPersistedImageIds: [],
     persistedAttachments: persistedDraft.attachments,
     pinnedSelections: persistedDraft.pinnedSelections ?? [],
+    inspectCaptures: [],
     provider: persistedDraft.provider ?? null,
     model: persistedDraft.model ?? null,
     runtimeMode: persistedDraft.runtimeMode ?? null,
@@ -1273,6 +1290,76 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
           return { draftsByThreadId: nextDraftsByThreadId };
         });
       },
+      addInspectCapture: (threadId, capture) => {
+        if (threadId.length === 0 || capture.id.length === 0) {
+          return;
+        }
+        set((state) => {
+          const existing = state.draftsByThreadId[threadId] ?? createEmptyThreadDraft();
+          if (existing.inspectCaptures.some((entry) => entry.id === capture.id)) {
+            return state;
+          }
+          return {
+            draftsByThreadId: {
+              ...state.draftsByThreadId,
+              [threadId]: {
+                ...existing,
+                inspectCaptures: [...existing.inspectCaptures, capture],
+              },
+            },
+          };
+        });
+      },
+      removeInspectCapture: (threadId, captureId) => {
+        if (threadId.length === 0 || captureId.length === 0) {
+          return;
+        }
+        set((state) => {
+          const current = state.draftsByThreadId[threadId];
+          if (!current) {
+            return state;
+          }
+          const nextInspectCaptures = current.inspectCaptures.filter(
+            (capture) => capture.id !== captureId,
+          );
+          if (nextInspectCaptures.length === current.inspectCaptures.length) {
+            return state;
+          }
+          const nextDraft: ComposerThreadDraftState = {
+            ...current,
+            inspectCaptures: nextInspectCaptures,
+          };
+          const nextDraftsByThreadId = { ...state.draftsByThreadId };
+          if (shouldRemoveDraft(nextDraft)) {
+            delete nextDraftsByThreadId[threadId];
+          } else {
+            nextDraftsByThreadId[threadId] = nextDraft;
+          }
+          return { draftsByThreadId: nextDraftsByThreadId };
+        });
+      },
+      clearInspectCaptures: (threadId) => {
+        if (threadId.length === 0) {
+          return;
+        }
+        set((state) => {
+          const current = state.draftsByThreadId[threadId];
+          if (!current || current.inspectCaptures.length === 0) {
+            return state;
+          }
+          const nextDraft: ComposerThreadDraftState = {
+            ...current,
+            inspectCaptures: [],
+          };
+          const nextDraftsByThreadId = { ...state.draftsByThreadId };
+          if (shouldRemoveDraft(nextDraft)) {
+            delete nextDraftsByThreadId[threadId];
+          } else {
+            nextDraftsByThreadId[threadId] = nextDraft;
+          }
+          return { draftsByThreadId: nextDraftsByThreadId };
+        });
+      },
       clearPersistedAttachments: (threadId) => {
         if (threadId.length === 0) {
           return;
@@ -1366,6 +1453,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             images: [],
             nonPersistedImageIds: [],
             persistedAttachments: [],
+            inspectCaptures: [],
           };
           const nextDraftsByThreadId = { ...state.draftsByThreadId };
           if (shouldRemoveDraft(nextDraft)) {

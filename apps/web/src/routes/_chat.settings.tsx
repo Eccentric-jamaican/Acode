@@ -1,9 +1,16 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { PROVIDER_DISPLAY_NAMES, type ProviderKind } from "@t3tools/contracts";
+import {
+  PROVIDER_DISPLAY_NAMES,
+  type BrowserClearBrowsingDataKind,
+  type BrowserUsePermissionPolicy,
+  type BrowserUseSettings,
+  type BrowserUseSettingsPatch,
+  type ProviderKind,
+} from "@t3tools/contracts";
 import { getModelOptions, normalizeModelSlug } from "@t3tools/shared/model";
-import { ArchiveIcon, ArchiveRestoreIcon, Trash2Icon, ZapIcon } from "lucide-react";
+import { ArchiveIcon, ArchiveRestoreIcon, CheckIcon, PlusIcon, Trash2Icon, XIcon, ZapIcon } from "lucide-react";
 
 import {
   APP_SERVICE_TIER_OPTIONS,
@@ -44,6 +51,43 @@ const THEME_OPTIONS = [
     description: "Always use the dark theme.",
   },
 ] as const;
+
+const DEFAULT_BROWSER_USE_SETTINGS: BrowserUseSettings = {
+  approvalPolicy: "alwaysAsk",
+  historyPolicy: "alwaysAsk",
+  blockedDomains: [],
+  allowedDomains: [],
+};
+
+const BROWSER_PERMISSION_OPTIONS: ReadonlyArray<{
+  value: BrowserUsePermissionPolicy;
+  label: string;
+}> = [
+  { value: "alwaysAsk", label: "Always ask" },
+  { value: "allow", label: "Allow" },
+  { value: "deny", label: "Deny" },
+];
+
+const BROWSING_DATA_OPTIONS: ReadonlyArray<{
+  value: BrowserClearBrowsingDataKind;
+  label: string;
+}> = [
+  { value: "all", label: "Clear all browsing data" },
+  { value: "cookies", label: "Clear cookies" },
+  { value: "cache", label: "Clear cache" },
+  { value: "siteData", label: "Clear site data" },
+];
+
+function normalizeBrowserDomainInput(value: string): string | null {
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/^www\./, "")
+    .split("/")[0]
+    ?.replace(/^\.+|\.+$/g, "");
+  return normalized && normalized.includes(".") ? normalized : null;
+}
 
 const MODEL_PROVIDER_SETTINGS: Array<{
   provider: ProviderKind;
@@ -127,6 +171,11 @@ function SettingsRouteView() {
   const { settings, defaults, updateSettings } = useAppSettings();
   const queryClient = useQueryClient();
   const serverConfigQuery = useQuery(serverConfigQueryOptions());
+  const browserSettingsQuery = useQuery({
+    queryKey: ["desktop-browser", "settings"],
+    queryFn: () => ensureNativeApi().browser.getSettings(),
+    enabled: usesDesktopAppChrome,
+  });
   const [isOpeningKeybindings, setIsOpeningKeybindings] = useState(false);
   const [openKeybindingsError, setOpenKeybindingsError] = useState<string | null>(null);
   const [customModelInputByProvider, setCustomModelInputByProvider] = useState<
@@ -139,6 +188,14 @@ function SettingsRouteView() {
   const [customModelErrorByProvider, setCustomModelErrorByProvider] = useState<
     Partial<Record<ProviderKind, string | null>>
   >({});
+  const [blockedDomainInput, setBlockedDomainInput] = useState("");
+  const [allowedDomainInput, setAllowedDomainInput] = useState("");
+  const [domainError, setDomainError] = useState<string | null>(null);
+  const [selectedBrowsingDataKind, setSelectedBrowsingDataKind] =
+    useState<BrowserClearBrowsingDataKind>("all");
+  const [clearingBrowsingData, setClearingBrowsingData] =
+    useState<BrowserClearBrowsingDataKind | null>(null);
+  const [browsingDataStatus, setBrowsingDataStatus] = useState<string | null>(null);
 
   const codexBinaryPath = settings.codexBinaryPath;
   const codexHomePath = settings.codexHomePath;
@@ -164,6 +221,7 @@ function SettingsRouteView() {
     customClaudeModels: settings.customClaudeModels,
     selectedModel: settings.newThreadSuggestionModel,
   });
+  const browserUseSettings = browserSettingsQuery.data ?? DEFAULT_BROWSER_USE_SETTINGS;
 
   const openKeybindingsFile = useCallback(() => {
     if (!keybindingsConfigPath) return;
@@ -181,6 +239,64 @@ function SettingsRouteView() {
         setIsOpeningKeybindings(false);
       });
   }, [keybindingsConfigPath]);
+
+  const updateBrowserUseSettings = useCallback(
+    async (patch: BrowserUseSettingsPatch) => {
+      const api = ensureNativeApi();
+      await api.browser.updateSettings(patch);
+      await queryClient.invalidateQueries({ queryKey: ["desktop-browser", "settings"] });
+    },
+    [queryClient],
+  );
+
+  const clearBrowsingData = useCallback(async (kind: BrowserClearBrowsingDataKind) => {
+    setBrowsingDataStatus(null);
+    setClearingBrowsingData(kind);
+    try {
+      await ensureNativeApi().browser.clearBrowsingData({ kind });
+      setBrowsingDataStatus(
+        kind === "all" ? "Browsing data cleared." : `${kind === "siteData" ? "Site data" : kind} cleared.`,
+      );
+    } catch (error) {
+      setBrowsingDataStatus(
+        error instanceof Error ? error.message : "Unable to clear browsing data.",
+      );
+    } finally {
+      setClearingBrowsingData(null);
+    }
+  }, []);
+
+  const addBrowserDomain = useCallback(
+    (list: "blockedDomains" | "allowedDomains", value: string) => {
+      const normalized = normalizeBrowserDomainInput(value);
+      if (!normalized) {
+        setDomainError("Enter a valid domain, like example.com.");
+        return;
+      }
+      const current = browserUseSettings[list];
+      if (current.includes(normalized)) {
+        setDomainError("That domain is already saved.");
+        return;
+      }
+      setDomainError(null);
+      void updateBrowserUseSettings({ [list]: [...current, normalized] });
+      if (list === "blockedDomains") {
+        setBlockedDomainInput("");
+      } else {
+        setAllowedDomainInput("");
+      }
+    },
+    [browserUseSettings, updateBrowserUseSettings],
+  );
+
+  const removeBrowserDomain = useCallback(
+    (list: "blockedDomains" | "allowedDomains", domain: string) => {
+      void updateBrowserUseSettings({
+        [list]: browserUseSettings[list].filter((entry) => entry !== domain),
+      });
+    },
+    [browserUseSettings, updateBrowserUseSettings],
+  );
 
   useEffect(() => {
     setOpencodeBinaryPathDraft(opencodeServerSettings?.binaryPath ?? "");
@@ -999,6 +1115,215 @@ function SettingsRouteView() {
                   </Button>
                 </div>
               ) : null}
+            </section>
+
+            <section
+              id={SETTINGS_SECTION_IDS.browserUse}
+              className="scroll-mt-4 rounded-2xl border border-border bg-card p-5"
+            >
+              <div className="mb-4">
+                <h2 className="text-sm font-medium text-foreground">Browser use</h2>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Control in-app browser storage, approvals, and domain rules used by Codex.
+                </p>
+              </div>
+
+              {usesDesktopAppChrome ? (
+                <div className="space-y-5">
+                  <div className="rounded-xl border border-border bg-background">
+                    <div className="flex items-center justify-between gap-3 px-4 py-3">
+                      <div>
+                        <p className="text-sm font-medium text-foreground">Browsing data</p>
+                        <p className="text-xs text-muted-foreground">
+                          Clear cookies, cache, and site storage from the shared in-app browser.
+                        </p>
+                      </div>
+                      <Select
+                        items={BROWSING_DATA_OPTIONS.map((option) => ({
+                          label: option.label,
+                          value: option.value,
+                        }))}
+                        value={selectedBrowsingDataKind}
+                        onValueChange={(value) =>
+                          setSelectedBrowsingDataKind(value as BrowserClearBrowsingDataKind)
+                        }
+                      >
+                        <SelectTrigger className="w-56">
+                          <SelectValue placeholder="Clear browsing data" />
+                        </SelectTrigger>
+                        <SelectPopup alignItemWithTrigger={false}>
+                          {BROWSING_DATA_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {clearingBrowsingData === option.value ? "Clearing..." : option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectPopup>
+                      </Select>
+                      <Button
+                        size="xs"
+                        variant="outline"
+                        disabled={clearingBrowsingData !== null}
+                        onClick={() => void clearBrowsingData(selectedBrowsingDataKind)}
+                      >
+                        Clear
+                      </Button>
+                    </div>
+                    {browsingDataStatus ? (
+                      <div className="border-t border-border px-4 py-2 text-xs text-muted-foreground">
+                        {browsingDataStatus}
+                      </div>
+                    ) : null}
+                  </div>
+
+                  <div className="rounded-xl border border-border bg-background">
+                    <div className="grid gap-3 px-4 py-3 sm:grid-cols-[1fr_220px] sm:items-center">
+                      <div>
+                        <p className="text-sm font-medium text-foreground">Approval</p>
+                        <p className="text-xs text-muted-foreground">
+                          Choose if Codex asks before opening websites.
+                        </p>
+                      </div>
+                      <Select
+                        items={BROWSER_PERMISSION_OPTIONS.map((option) => ({
+                          label: option.label,
+                          value: option.value,
+                        }))}
+                        value={browserUseSettings.approvalPolicy}
+                        onValueChange={(value) =>
+                          void updateBrowserUseSettings({
+                            approvalPolicy: value as BrowserUsePermissionPolicy,
+                          })
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectPopup alignItemWithTrigger={false}>
+                          {BROWSER_PERMISSION_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectPopup>
+                      </Select>
+                    </div>
+                    <div className="grid gap-3 border-t border-border px-4 py-3 sm:grid-cols-[1fr_220px] sm:items-center">
+                      <div>
+                        <p className="text-sm font-medium text-foreground">History</p>
+                        <p className="text-xs text-muted-foreground">
+                          Choose if Codex asks before accessing browser history.
+                        </p>
+                      </div>
+                      <Select
+                        items={BROWSER_PERMISSION_OPTIONS.map((option) => ({
+                          label: option.label,
+                          value: option.value,
+                        }))}
+                        value={browserUseSettings.historyPolicy}
+                        onValueChange={(value) =>
+                          void updateBrowserUseSettings({
+                            historyPolicy: value as BrowserUsePermissionPolicy,
+                          })
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectPopup alignItemWithTrigger={false}>
+                          {BROWSER_PERMISSION_OPTIONS.map((option) => (
+                            <SelectItem key={option.value} value={option.value}>
+                              {option.label}
+                            </SelectItem>
+                          ))}
+                        </SelectPopup>
+                      </Select>
+                    </div>
+                  </div>
+
+                  {(
+                    [
+                      {
+                        key: "blockedDomains",
+                        title: "Blocked domains",
+                        description: "Codex will never open these sites.",
+                        input: blockedDomainInput,
+                        setInput: setBlockedDomainInput,
+                      },
+                      {
+                        key: "allowedDomains",
+                        title: "Allowed domains",
+                        description: "Domains that open without asking.",
+                        input: allowedDomainInput,
+                        setInput: setAllowedDomainInput,
+                      },
+                    ] as const
+                  ).map((list) => (
+                    <div key={list.key} className="space-y-2">
+                      <div className="flex items-end justify-between gap-3">
+                        <div>
+                          <h3 className="text-sm font-medium text-foreground">{list.title}</h3>
+                          <p className="mt-1 text-xs text-muted-foreground">{list.description}</p>
+                        </div>
+                        <form
+                          className="flex min-w-0 items-center gap-2"
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            addBrowserDomain(list.key, list.input);
+                          }}
+                        >
+                          <Input
+                            className="h-8 w-44"
+                            value={list.input}
+                            onChange={(event) => list.setInput(event.target.value)}
+                            placeholder="example.com"
+                            spellCheck={false}
+                          />
+                          <Button size="xs" type="submit">
+                            <PlusIcon className="mr-1 size-3.5" />
+                            Add
+                          </Button>
+                        </form>
+                      </div>
+
+                      <div className="rounded-xl border border-border bg-background">
+                        {browserUseSettings[list.key].length > 0 ? (
+                          <div className="divide-y divide-border">
+                            {browserUseSettings[list.key].map((domain) => (
+                              <div
+                                key={`${list.key}:${domain}`}
+                                className="flex items-center justify-between gap-3 px-4 py-2"
+                              >
+                                <span className="min-w-0 truncate text-sm text-foreground">
+                                  {domain}
+                                </span>
+                                <Button
+                                  size="icon"
+                                  variant="ghost"
+                                  aria-label={`Remove ${domain}`}
+                                  onClick={() => removeBrowserDomain(list.key, domain)}
+                                >
+                                  <XIcon className="size-4" />
+                                </Button>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-center gap-2 px-4 py-4 text-xs text-muted-foreground">
+                            <CheckIcon className="size-4" />
+                            No {list.key === "blockedDomains" ? "blocked" : "allowed"} domains
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+
+                  {domainError ? <p className="text-xs text-destructive">{domainError}</p> : null}
+                </div>
+              ) : (
+                <div className="rounded-lg border border-dashed border-border bg-background px-4 py-4 text-sm text-muted-foreground">
+                  Browser use settings are available in the desktop app.
+                </div>
+              )}
             </section>
 
             <section

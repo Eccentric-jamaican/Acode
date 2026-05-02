@@ -41,6 +41,7 @@ describe("getAppModelOptions", () => {
     const options = getAppModelOptions("codex", ["custom/internal-model"]);
 
     expect(options.map((option) => option.slug)).toEqual([
+      "gpt-5.5",
       "gpt-5.4",
       "gpt-5.4-mini",
       "gpt-5.3-codex",
@@ -155,6 +156,7 @@ describe("resolveAppServiceTier", () => {
 describe("shouldShowFastTierIcon", () => {
   it("shows the fast-tier icon only for supported fast-tier models on fast tier", () => {
     expect(shouldShowFastTierIcon("gpt-5.4", "fast")).toBe(true);
+    expect(shouldShowFastTierIcon("gpt-5.5", "fast")).toBe(true);
     expect(shouldShowFastTierIcon("gpt-5.4-mini", "fast")).toBe(true);
     expect(shouldShowFastTierIcon("gpt-5.4", "auto")).toBe(false);
     expect(shouldShowFastTierIcon("gpt-5.3-codex", "fast")).toBe(false);

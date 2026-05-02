@@ -1,6 +1,5 @@
 import type {
   BrowserPaneBounds,
-  BrowserInspectCapture,
   BrowserSessionSnapshot,
   BrowserTabId,
   ProjectId,
@@ -33,6 +32,7 @@ import { Input } from "~/components/ui/input";
 import { toastManager } from "~/components/ui/toast";
 import { Toggle } from "~/components/ui/toggle";
 import { useComposerDraftStore } from "~/composerDraftStore";
+import { inspectCaptureLabel } from "~/browserInspectCapture";
 import { readNativeApi } from "~/nativeApi";
 import { cn } from "~/lib/utils";
 
@@ -457,38 +457,6 @@ function dataUrlToFile(dataUrl: string, name: string): File {
   return new File([bytes], name, { type: mimeType });
 }
 
-function buildInspectPrompt(capture: BrowserInspectCapture): string {
-  const metadata = {
-    source: {
-      kind: "t3_integrated_browser_inspect_capture",
-      appSurface: "desktop-integrated-browser-pane",
-      projectId: capture.projectId,
-      sessionId: capture.sessionId,
-      capturedAt: capture.capturedAt,
-    },
-    selector: capture.selector,
-    tagName: capture.tagName,
-    url: capture.url,
-    ancestry: capture.ancestry,
-    textSummary: capture.textSummary,
-    accessibilitySummary: capture.accessibilitySummary,
-    sourceUrl: capture.sourceUrl,
-    sourceLocation: capture.sourceLocation,
-    boundingBox: capture.boundingBox,
-    computedStyle: capture.computedStyle,
-  };
-  return [
-    "[T3_BROWSER_INSPECT_CAPTURE]",
-    "Source: This element/DOM context was captured from the T3 integrated browser pane.",
-    "Provenance: Do not assume this came from external Chrome MCP context.",
-    "Use this inspected element as the target for the next edit.",
-    "",
-    "```json",
-    JSON.stringify(metadata, null, 2),
-    "```",
-  ].join("\n");
-}
-
 function createImageAttachment(dataUrl: string) {
   const id =
     typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
@@ -541,8 +509,8 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
   const { settings } = useAppSettings();
   const width = useBrowserPaneStore((state) => state.width);
   const setWidth = useBrowserPaneStore((state) => state.setWidth);
-  const setPrompt = useComposerDraftStore((state) => state.setPrompt);
   const addImage = useComposerDraftStore((state) => state.addImage);
+  const addInspectCapture = useComposerDraftStore((state) => state.addInspectCapture);
   const paneRef = useRef<HTMLDivElement>(null);
   const viewportRef = useRef<HTMLDivElement>(null);
   const [snapshot, setSnapshot] = useState<BrowserSessionSnapshot | null>(null);
@@ -628,11 +596,14 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
           return;
         }
 
-        const prompt = buildInspectPrompt(capture);
-        const currentPrompt =
-          useComposerDraftStore.getState().draftsByThreadId[liveThreadId]?.prompt ?? "";
-        const nextPrompt = currentPrompt.trim().length > 0 ? `${currentPrompt}\n\n${prompt}` : prompt;
-        setPrompt(liveThreadId, nextPrompt);
+        addInspectCapture(liveThreadId, {
+          id:
+            typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+              ? crypto.randomUUID()
+              : `inspect-${Date.now()}`,
+          label: inspectCaptureLabel(capture),
+          capture,
+        });
         addImage(liveThreadId, createImageAttachment(capture.screenshotDataUrl));
 
         if (settings.keepInspectModeAfterCapture) {
@@ -662,7 +633,7 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
           drainCaptureQueue();
         }
       });
-  }, [addImage, api, handleBrowserError, runBrowserAction, setPrompt, settings.keepInspectModeAfterCapture]);
+  }, [addImage, addInspectCapture, api, handleBrowserError, runBrowserAction, settings.keepInspectModeAfterCapture]);
 
   useEffect(() => {
     if (!api?.browser) {

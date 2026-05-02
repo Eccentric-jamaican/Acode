@@ -1,5 +1,6 @@
 import type {
   ProjectListDirectoryResult,
+  ProjectListTreeResult,
   ProjectReadFileResult,
   ProjectSearchEntriesResult,
 } from "@t3tools/contracts";
@@ -12,6 +13,7 @@ export const projectQueryKeys = {
     ["projects", "search-entries", cwd, query, limit] as const,
   listDirectory: (cwd: string | null, relativePath: string | null) =>
     ["projects", "list-directory", cwd, relativePath] as const,
+  listTree: (cwd: string | null) => ["projects", "list-tree", cwd] as const,
   readFile: (cwd: string | null, relativePath: string | null) =>
     ["projects", "read-file", cwd, relativePath] as const,
 };
@@ -25,6 +27,10 @@ const EMPTY_SEARCH_ENTRIES_RESULT: ProjectSearchEntriesResult = {
 const EMPTY_LIST_DIRECTORY_RESULT: ProjectListDirectoryResult = {
   relativePath: null,
   entries: [],
+};
+const EMPTY_LIST_TREE_RESULT: ProjectListTreeResult = {
+  entries: [],
+  truncated: false,
 };
 const EMPTY_READ_FILE_RESULT: ProjectReadFileResult = {
   relativePath: "",
@@ -80,6 +86,28 @@ export function projectListDirectoryQueryOptions(input: {
     enabled: (input.enabled ?? true) && input.cwd !== null,
     staleTime: input.staleTime ?? DEFAULT_SEARCH_ENTRIES_STALE_TIME,
     placeholderData: (previous) => previous ?? EMPTY_LIST_DIRECTORY_RESULT,
+  });
+}
+
+export function projectListTreeQueryOptions(input: {
+  cwd: string | null;
+  enabled?: boolean;
+  staleTime?: number;
+}) {
+  return queryOptions({
+    queryKey: projectQueryKeys.listTree(input.cwd),
+    queryFn: async () => {
+      const api = ensureNativeApi();
+      if (!input.cwd) {
+        throw new Error("Workspace tree is unavailable.");
+      }
+      return api.projects.listTree({
+        cwd: input.cwd,
+      });
+    },
+    enabled: (input.enabled ?? true) && input.cwd !== null,
+    staleTime: input.staleTime ?? DEFAULT_SEARCH_ENTRIES_STALE_TIME,
+    placeholderData: (previous) => previous ?? EMPTY_LIST_TREE_RESULT,
   });
 }
 

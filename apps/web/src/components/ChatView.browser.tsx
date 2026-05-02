@@ -1267,6 +1267,19 @@ function createDesktopBrowserBridge(
     forward: async () => buildSnapshot(),
     reload: async () => buildSnapshot(),
     kill: async () => undefined,
+    getSettings: async () => ({
+      approvalPolicy: "alwaysAsk",
+      historyPolicy: "alwaysAsk",
+      blockedDomains: [],
+      allowedDomains: [],
+    }),
+    updateSettings: async (input) => ({
+      approvalPolicy: input.approvalPolicy ?? "alwaysAsk",
+      historyPolicy: input.historyPolicy ?? "alwaysAsk",
+      blockedDomains: input.blockedDomains ?? [],
+      allowedDomains: input.allowedDomains ?? [],
+    }),
+    clearBrowsingData: async () => undefined,
     setInspectMode: async (input) => {
       tabs = tabs.map((tab) =>
         tab.tabId === activeTabId

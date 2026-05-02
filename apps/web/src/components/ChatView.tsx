@@ -83,10 +83,16 @@ import {
 } from "../diffRouteSearch";
 import {
   type ComposerTrigger,
+  type ComposerSlashCommand,
   detectComposerTrigger,
   expandCollapsedComposerCursor,
   replaceTextRange,
 } from "../composer-logic";
+import {
+  buildBrowserUseComposerPrompt,
+  buildSlashReviewComposerPrompt,
+  buildSubagentsPrompt,
+} from "../composerSlashCommands";
 import {
   derivePendingApprovals,
   derivePendingUserInputs,
@@ -158,6 +164,7 @@ import {
   MessageSquareIcon,
   PanelLeftIcon,
   BoxIcon,
+  MousePointer2Icon,
   PlugIcon,
   PlusIcon,
   Maximize2Icon,
@@ -229,6 +236,7 @@ import {
 } from "../appSettings";
 import {
   type ComposerImageAttachment,
+  type ComposerInspectCaptureDraft,
   type DraftThreadEnvMode,
   type DraftThreadState,
   type PinnedSelectionDraft,
@@ -236,6 +244,7 @@ import {
   useComposerDraftStore,
   useComposerThreadDraft,
 } from "../composerDraftStore";
+import { buildInspectPrompt } from "../browserInspectCapture";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
 import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "./ComposerPromptEditor";
 import { shouldUseCompactComposerFooter } from "./composerFooterLayout";
@@ -298,6 +307,13 @@ type SelectedComposerExtension = {
   label: string;
   mentionName: string;
   iconUrl?: string | undefined;
+};
+
+type SelectedComposerShortcut = {
+  id: string;
+  command: Extract<ComposerSlashCommand, "browser" | "review" | "subagents">;
+  label: string;
+  args: string;
 };
 
 function pluginLabel(plugin: ProviderPluginDescriptor): string {
@@ -424,7 +440,79 @@ function promptWithSelectedComposerExtensions(input: {
   return cleanPrompt ? `${selectedPrompt} ${cleanPrompt}` : selectedPrompt;
 }
 
-  const SelectedComposerExtensionIcon = memo(function SelectedComposerExtensionIcon(props: {
+function selectedComposerShortcutLabel(
+  command: SelectedComposerShortcut["command"],
+): string {
+  switch (command) {
+    case "browser":
+      return "T3 Browser Use";
+    case "review":
+      return "Code Review";
+    case "subagents":
+      return "Subagents";
+  }
+}
+
+function selectedComposerShortcutPrompt(input: {
+  shortcut: SelectedComposerShortcut;
+  projectId?: string | null | undefined;
+}): string {
+  switch (input.shortcut.command) {
+    case "browser":
+      return buildBrowserUseComposerPrompt(input.shortcut.args, { projectId: input.projectId });
+    case "review":
+      return buildSlashReviewComposerPrompt(input.shortcut.args);
+    case "subagents":
+      return buildSubagentsPrompt(input.shortcut.args);
+  }
+}
+
+function promptWithSelectedComposerShortcuts(input: {
+  prompt: string;
+  shortcuts: readonly SelectedComposerShortcut[];
+  projectId?: string | null | undefined;
+}): string {
+  if (input.shortcuts.length === 0) return input.prompt;
+  const shortcutPrompt = input.shortcuts
+    .map((shortcut) => selectedComposerShortcutPrompt({ shortcut, projectId: input.projectId }))
+    .join("\n\n");
+  const cleanPrompt = input.prompt.trim();
+  return cleanPrompt ? `${shortcutPrompt}\n\n${cleanPrompt}` : shortcutPrompt;
+}
+
+function displayPromptWithSelectedComposerShortcuts(input: {
+  prompt: string;
+  shortcuts: readonly SelectedComposerShortcut[];
+}): string {
+  if (input.shortcuts.length === 0) return input.prompt;
+  const shortcutPrompt = input.shortcuts
+    .map((shortcut) => `/${shortcut.command}${shortcut.args ? ` ${shortcut.args}` : ""}`)
+    .join(" ");
+  const cleanPrompt = input.prompt.trim();
+  return cleanPrompt ? `${shortcutPrompt} ${cleanPrompt}` : shortcutPrompt;
+}
+
+function promptWithInspectCaptures(input: {
+  prompt: string;
+  captures: readonly ComposerInspectCaptureDraft[];
+}): string {
+  if (input.captures.length === 0) return input.prompt;
+  const inspectPrompt = input.captures.map((entry) => buildInspectPrompt(entry.capture)).join("\n\n");
+  const cleanPrompt = input.prompt.trim();
+  return cleanPrompt ? `${inspectPrompt}\n\n${cleanPrompt}` : inspectPrompt;
+}
+
+function displayPromptWithInspectCaptures(input: {
+  prompt: string;
+  captures: readonly ComposerInspectCaptureDraft[];
+}): string {
+  if (input.captures.length === 0) return input.prompt;
+  const inspectTokens = input.captures.map(() => "/inspect").join(" ");
+  const cleanPrompt = input.prompt.trim();
+  return cleanPrompt ? `${inspectTokens} ${cleanPrompt}` : inspectTokens;
+}
+
+const SelectedComposerExtensionIcon = memo(function SelectedComposerExtensionIcon(props: {
   extension: SelectedComposerExtension;
 }) {
   const [failedIconUrl, setFailedIconUrl] = useState<string | null>(null);
@@ -447,11 +535,36 @@ function promptWithSelectedComposerExtensions(input: {
   return <Icon className="size-4 shrink-0" />;
 });
 
+const SelectedComposerShortcutIcon = memo(function SelectedComposerShortcutIcon(props: {
+  shortcut: SelectedComposerShortcut;
+}) {
+  const className = "size-4 shrink-0";
+  switch (props.shortcut.command) {
+    case "browser":
+      return <GlobeIcon className={className} />;
+    case "review":
+      return <FilesIcon className={className} />;
+    case "subagents":
+      return <BotIcon className={className} />;
+  }
+});
+
+const SelectedInspectCaptureIcon = memo(function SelectedInspectCaptureIcon() {
+  return <MousePointer2Icon className="size-4 shrink-0" />;
+});
+
 function removeSelectedComposerExtensionById(
   extensions: SelectedComposerExtension[],
   extensionId: string,
 ): SelectedComposerExtension[] {
   return extensions.filter((extension) => extension.id !== extensionId);
+}
+
+function removeSelectedComposerShortcutById(
+  shortcuts: SelectedComposerShortcut[],
+  shortcutId: string,
+): SelectedComposerShortcut[] {
+  return shortcuts.filter((shortcut) => shortcut.id !== shortcutId);
 }
 
 function readLastInvokedScriptByProjectFromStorage(): Record<string, string> {
@@ -544,6 +657,9 @@ type QueuedComposerChatTurn = {
   createdAt: string;
   previewText: string;
   prompt: string;
+  displayText?: string | undefined;
+  shortcuts?: SelectedComposerShortcut[] | undefined;
+  inspectCaptures?: ComposerInspectCaptureDraft[] | undefined;
   images: ComposerImageAttachment[];
   selectedProvider: ProviderKind;
   selectedModel: ModelSlug | null;
@@ -697,6 +813,7 @@ export default function ChatView({
   const composerDraft = useComposerThreadDraft(threadId);
   const prompt = composerDraft.prompt;
   const composerImages = composerDraft.images;
+  const composerInspectCaptures = composerDraft.inspectCaptures;
   const composerPinnedSelections = composerDraft.pinnedSelections;
   const nonPersistedComposerImageIds = composerDraft.nonPersistedImageIds;
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
@@ -717,6 +834,10 @@ export default function ChatView({
   const addComposerDraftImage = useComposerDraftStore((store) => store.addImage);
   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
   const removeComposerDraftImage = useComposerDraftStore((store) => store.removeImage);
+  const removeComposerDraftInspectCapture = useComposerDraftStore(
+    (store) => store.removeInspectCapture,
+  );
+  const addComposerDraftInspectCapture = useComposerDraftStore((store) => store.addInspectCapture);
   const addComposerDraftPinnedSelection = useComposerDraftStore((store) => store.addPinnedSelection);
   const removeComposerDraftPinnedSelection = useComposerDraftStore(
     (store) => store.removePinnedSelection,
@@ -775,6 +896,9 @@ export default function ChatView({
   );
   const [selectedComposerExtensions, setSelectedComposerExtensions] = useState<
     SelectedComposerExtension[]
+  >([]);
+  const [selectedComposerShortcuts, setSelectedComposerShortcuts] = useState<
+    SelectedComposerShortcut[]
   >([]);
   const [queuedComposerTurns, setQueuedComposerTurns] = useState<QueuedComposerTurn[]>([]);
   const [lastInvokedScriptByProjectId, setLastInvokedScriptByProjectId] = useState<
@@ -928,7 +1052,11 @@ export default function ChatView({
       activeThread.session !== null),
   );
   const shouldShowNewThreadLanding = isLocalDraftThread && !hasThreadStarted;
-  const isPromptEmpty = prompt.trim().length === 0 && selectedComposerExtensions.length === 0;
+  const isPromptEmpty =
+    prompt.trim().length === 0 &&
+    selectedComposerExtensions.length === 0 &&
+    selectedComposerShortcuts.length === 0 &&
+    composerInspectCaptures.length === 0;
   const selectedServiceTierSetting = settings.codexServiceTier;
   const selectedServiceTier = resolveAppServiceTier(selectedServiceTierSetting);
   const serverConfigQuery = useQuery(serverConfigQueryOptions());
@@ -979,14 +1107,26 @@ export default function ChatView({
       enabled: true,
     }),
   );
+  const codexRuntimeModelsQuery = useQuery(
+    providerModelsQueryOptions({
+      provider: "codex",
+      enabled: true,
+    }),
+  );
   const modelOptionsByProvider = useMemo(
     () =>
       getCustomModelOptionsByProvider(
         settings,
         providerStatuses,
+        codexRuntimeModelsQuery.data?.models ?? [],
         opencodeRuntimeModelsQuery.data?.models ?? [],
       ),
-    [opencodeRuntimeModelsQuery.data?.models, providerStatuses, settings],
+    [
+      codexRuntimeModelsQuery.data?.models,
+      opencodeRuntimeModelsQuery.data?.models,
+      providerStatuses,
+      settings,
+    ],
   );
   const selectedModel = useMemo(() => {
     const draftModel = composerDraft.model;
@@ -2820,6 +2960,7 @@ export default function ChatView({
       promptRef.current = "";
       clearComposerDraftContent(targetThreadId);
       setSelectedComposerExtensions([]);
+      setSelectedComposerShortcuts([]);
       setComposerHighlightedItemId(null);
       setComposerCursor(0);
       setComposerTrigger(null);
@@ -2832,10 +2973,19 @@ export default function ChatView({
       if (!activeThread) {
         return;
       }
-      const nextPrompt = queuedTurn.kind === "chat" ? queuedTurn.prompt : queuedTurn.text;
+      const nextPrompt =
+        queuedTurn.kind === "chat"
+          ? queuedTurn.displayText ?? queuedTurn.prompt
+          : queuedTurn.text;
       promptRef.current = nextPrompt;
+      setSelectedComposerShortcuts(queuedTurn.kind === "chat" ? (queuedTurn.shortcuts ?? []) : []);
       clearComposerDraftContent(activeThread.id);
       setComposerDraftPrompt(activeThread.id, nextPrompt);
+      if (queuedTurn.kind === "chat") {
+        for (const capture of queuedTurn.inspectCaptures ?? []) {
+          addComposerDraftInspectCapture(activeThread.id, capture);
+        }
+      }
       if (queuedTurn.kind === "chat" && queuedTurn.images.length > 0) {
         addComposerImagesToDraft(queuedTurn.images);
       }
@@ -2867,6 +3017,7 @@ export default function ChatView({
     [
       activeThread,
       addComposerImagesToDraft,
+      addComposerDraftInspectCapture,
       clearComposerDraftContent,
       focusComposer,
       setComposerDraftCodexFastMode,
@@ -2901,13 +3052,40 @@ export default function ChatView({
     }
     const queuedChatTurn = queuedTurn ?? null;
     const composerImagesForSend = queuedChatTurn?.images ?? composerImages;
+    const composerInspectCapturesForSend =
+      queuedChatTurn?.inspectCaptures ?? composerInspectCaptures;
     const selectedProviderForSend = queuedChatTurn?.selectedProvider ?? selectedProvider;
-    const promptForSend =
-      queuedChatTurn?.prompt ??
+    const basePromptForSend =
+      queuedChatTurn?.displayText ??
       promptWithSelectedComposerExtensions({
         prompt: promptRef.current,
         selectedExtensions: selectedComposerExtensions,
         provider: selectedProviderForSend,
+      });
+    const shortcutPromptForSend =
+      queuedChatTurn?.prompt ??
+      promptWithSelectedComposerShortcuts({
+        prompt: basePromptForSend,
+        shortcuts: selectedComposerShortcuts,
+        projectId: activeProject?.id ?? null,
+      });
+    const promptForSend =
+      queuedChatTurn?.prompt ??
+      promptWithInspectCaptures({
+        prompt: shortcutPromptForSend,
+        captures: composerInspectCapturesForSend,
+      });
+    const shortcutDisplayPromptForSend =
+      queuedChatTurn?.displayText ??
+      displayPromptWithSelectedComposerShortcuts({
+        prompt: basePromptForSend,
+        shortcuts: selectedComposerShortcuts,
+      });
+    const displayPromptForSend =
+      queuedChatTurn?.displayText ??
+      displayPromptWithInspectCaptures({
+        prompt: shortcutDisplayPromptForSend,
+        captures: composerInspectCapturesForSend,
       });
     const selectedModelForSend = queuedChatTurn?.selectedModel ?? selectedModel;
     const selectedEffortForSend = queuedChatTurn?.selectedEffort ?? selectedEffort;
@@ -2919,6 +3097,7 @@ export default function ChatView({
     const interactionModeForSend = queuedChatTurn?.interactionMode ?? interactionMode;
     const envModeForSend = queuedChatTurn?.envMode ?? envMode;
     const trimmed = promptForSend.trim();
+    const displayTrimmed = displayPromptForSend.trim();
     if (showPlanFollowUpPrompt && activeProposedPlan) {
       const followUp = resolvePlanFollowUpSubmission({
         draftText: trimmed,
@@ -2962,7 +3141,9 @@ export default function ChatView({
     if (
       queuedChatTurn === null &&
       composerImagesForSend.length === 0 &&
-      selectedComposerExtensions.length === 0
+      selectedComposerExtensions.length === 0 &&
+      selectedComposerShortcuts.length === 0 &&
+      composerInspectCapturesForSend.length === 0
     ) {
       const handledStandaloneSlashCommand = await handleStandaloneSlashCommand(trimmed);
       if (handledStandaloneSlashCommand) {
@@ -2984,10 +3165,13 @@ export default function ChatView({
         kind: "chat",
         createdAt: new Date().toISOString(),
         previewText: buildQueuedComposerPreviewText({
-          trimmedPrompt: trimmed,
+          trimmedPrompt: displayTrimmed,
           images: composerImagesForSend,
         }),
         prompt: promptForSend,
+        displayText: displayPromptForSend,
+        shortcuts: selectedComposerShortcuts,
+        inspectCaptures: composerInspectCapturesForSend,
         images: composerImagesForSend.map(cloneComposerImageForRetry),
         selectedProvider: selectedProviderForSend,
         selectedModel: selectedModelForSend,
@@ -3058,7 +3242,7 @@ export default function ChatView({
         {
           id: messageIdForSend,
           role: "user",
-          text: trimmed || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+          text: displayTrimmed || IMAGE_ONLY_BOOTSTRAP_PROMPT,
           ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
           createdAt: messageCreatedAt,
           streaming: false,
@@ -3108,7 +3292,7 @@ export default function ChatView({
           firstComposerImageName = firstComposerImage.name;
         }
       }
-      let titleSeed = trimmed;
+      let titleSeed = displayTrimmed;
       if (!titleSeed) {
         if (firstComposerImageName) {
           titleSeed = `Image: ${firstComposerImageName}`;
@@ -3192,8 +3376,11 @@ export default function ChatView({
         message: {
           messageId: messageIdForSend,
           role: "user",
-          text: trimmed || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+          text: displayTrimmed || IMAGE_ONLY_BOOTSTRAP_PROMPT,
           attachments: turnAttachments,
+          ...(promptForSend !== displayPromptForSend
+            ? { providerInputText: promptForSend }
+            : {}),
         },
         model: selectedModelForSend || undefined,
         serviceTier: selectedServiceTier,
@@ -4339,6 +4526,26 @@ export default function ChatView({
     onHandoffToWorktree();
   }, [onHandoffToWorktree]);
 
+  const handleShortcutCommand = useCallback(
+    (command: SelectedComposerShortcut["command"], args: string) => {
+      const trimmedArgs = args.trim();
+      const shortcut: SelectedComposerShortcut = {
+        id: `shortcut:${command}:${crypto.randomUUID()}`,
+        command,
+        label: selectedComposerShortcutLabel(command),
+        args: trimmedArgs,
+      };
+      setSelectedComposerShortcuts((existing) => [...existing, shortcut]);
+      promptRef.current = "";
+      setPrompt("");
+      setComposerCursor(0);
+      setComposerTrigger(null);
+      setComposerHighlightedItemId(null);
+      scheduleComposerFocus();
+    },
+    [setPrompt, scheduleComposerFocus],
+  );
+
   const { handleStandaloneSlashCommand, handleSlashCommandSelection } = useComposerSlashCommands({
     selectedProvider,
     providerNativeCommandNames,
@@ -4348,6 +4555,7 @@ export default function ChatView({
     handleClearConversation,
     handleForkCommand,
     handleStatusCommand,
+    handleShortcutCommand,
     setFastModeFromSlash: onCodexFastModeChange,
     editorActions: {
       resolveActiveComposerTrigger,
@@ -4531,9 +4739,20 @@ export default function ChatView({
       !event.ctrlKey &&
       !event.metaKey &&
       promptRef.current.length === 0 &&
-      selectedComposerExtensions.length > 0
+      (selectedComposerExtensions.length > 0 ||
+        selectedComposerShortcuts.length > 0 ||
+        composerInspectCaptures.length > 0)
     ) {
-      setSelectedComposerExtensions((existing) => existing.slice(0, -1));
+      if (selectedComposerExtensions.length > 0) {
+        setSelectedComposerExtensions((existing) => existing.slice(0, -1));
+      } else if (selectedComposerShortcuts.length > 0) {
+        setSelectedComposerShortcuts((existing) => existing.slice(0, -1));
+      } else if (activeThread) {
+        const lastCapture = composerInspectCaptures.at(-1);
+        if (lastCapture) {
+          removeComposerDraftInspectCapture(activeThread.id, lastCapture.id);
+        }
+      }
       return true;
     }
 
@@ -4996,8 +5215,50 @@ export default function ChatView({
 
               {!isComposerApprovalState &&
               pendingUserInputs.length === 0 &&
-              selectedComposerExtensions.length > 0 ? (
+              (selectedComposerExtensions.length > 0 ||
+                selectedComposerShortcuts.length > 0 ||
+                composerInspectCaptures.length > 0) ? (
                 <div className="mb-2 flex items-center gap-2 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                  {composerInspectCaptures.map((capture) => (
+                    <button
+                      type="button"
+                      key={capture.id}
+                      className="group inline-flex shrink-0 items-center gap-1.5 rounded-md px-0.5 py-0.5 text-sm font-medium text-cyan-500 outline-none transition-colors hover:bg-cyan-500/10 focus-visible:ring-2 focus-visible:ring-cyan-400/45 dark:text-cyan-400"
+                      title={`Remove inspected element: ${capture.label}`}
+                      aria-label={`Remove inspected element: ${capture.label}`}
+                      onClick={() => {
+                        if (activeThread) {
+                          removeComposerDraftInspectCapture(activeThread.id, capture.id);
+                        }
+                        scheduleComposerFocus();
+                      }}
+                    >
+                      <SelectedInspectCaptureIcon />
+                      <span className="max-w-52 truncate">Inspect: {capture.label}</span>
+                      <XIcon className="size-3 opacity-0 transition-opacity group-hover:opacity-70 group-focus-visible:opacity-70" />
+                    </button>
+                  ))}
+                  {selectedComposerShortcuts.map((shortcut) => (
+                    <button
+                      type="button"
+                      key={shortcut.id}
+                      className="group inline-flex shrink-0 items-center gap-1.5 rounded-md px-0.5 py-0.5 text-sm font-medium text-emerald-400 outline-none transition-colors hover:bg-emerald-400/10 focus-visible:ring-2 focus-visible:ring-emerald-400/45"
+                      title={`Remove ${shortcut.label}`}
+                      aria-label={`Remove ${shortcut.label}`}
+                      onClick={() => {
+                        setSelectedComposerShortcuts((existing) =>
+                          removeSelectedComposerShortcutById(existing, shortcut.id),
+                        );
+                        scheduleComposerFocus();
+                      }}
+                    >
+                      <SelectedComposerShortcutIcon shortcut={shortcut} />
+                      <span className="max-w-40 truncate">
+                        {shortcut.args ? `${shortcut.label}: ${shortcut.args}` : shortcut.label}
+                      </span>
+                      <XIcon className="size-3 opacity-0 transition-opacity group-hover:opacity-70 group-focus-visible:opacity-70" />
+                    </button>
+                  ))}
                   {selectedComposerExtensions.map((extension) => (
                     <button
                       type="button"
@@ -6343,7 +6604,7 @@ function getCustomModelOptionsByProvider(settings: {
   customCodexModels: readonly string[];
   customOpencodeModels: readonly string[];
   customClaudeModels: readonly string[];
-}, providerStatuses: readonly ServerProviderStatus[], opencodeRuntimeModels: ReadonlyArray<{ slug: string; name: string }>): Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>> {
+}, providerStatuses: readonly ServerProviderStatus[], codexRuntimeModels: ReadonlyArray<{ slug: string; name: string }>, opencodeRuntimeModels: ReadonlyArray<{ slug: string; name: string }>): Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>> {
   const opencodeProvider = providerStatuses.find((provider) => provider.provider === "opencode");
   const opencodeOptions =
     opencodeRuntimeModels.length > 0
@@ -6351,11 +6612,50 @@ function getCustomModelOptionsByProvider(settings: {
       : opencodeProvider?.models && opencodeProvider.models.length > 0
       ? opencodeProvider.models.map((model) => ({ slug: model.slug, name: model.name }))
       : getAppModelOptions("opencode", settings.customOpencodeModels);
+  const codexOptions =
+    codexRuntimeModels.length > 0
+      ? mergeRuntimeAndCustomModelOptions(
+          "codex",
+          codexRuntimeModels,
+          settings.customCodexModels,
+        )
+      : getAppModelOptions("codex", settings.customCodexModels);
   return {
-    codex: getAppModelOptions("codex", settings.customCodexModels),
+    codex: codexOptions,
     opencode: opencodeOptions,
     claudeAgent: getAppModelOptions("claudeAgent", settings.customClaudeModels),
   };
+}
+
+function mergeRuntimeAndCustomModelOptions(
+  provider: ProviderKind,
+  runtimeModels: ReadonlyArray<{ slug: string; name: string }>,
+  customModels: readonly string[],
+): ReadonlyArray<{ slug: string; name: string }> {
+  const seen = new Set<string>();
+  const options: Array<{ slug: string; name: string }> = [];
+  for (const model of runtimeModels) {
+    const normalized = normalizeModelSlug(model.slug, provider);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    options.push({
+      slug: normalized,
+      name: model.name || normalized,
+    });
+  }
+  for (const model of getAppModelOptions(provider, customModels)) {
+    if (seen.has(model.slug)) {
+      continue;
+    }
+    seen.add(model.slug);
+    options.push({
+      slug: model.slug,
+      name: model.name,
+    });
+  }
+  return options;
 }
 
 const PROVIDER_ICON_BY_PROVIDER: Record<ProviderPickerKind, Icon> = {

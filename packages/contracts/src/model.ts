@@ -61,6 +61,21 @@ type ModelDefinition = {
 export const MODEL_OPTIONS_BY_PROVIDER = {
   codex: [
     {
+      slug: "gpt-5.5",
+      name: "GPT-5.5",
+      capabilities: {
+        reasoningEffortLevels: [
+          { value: "xhigh", label: "Extra High" },
+          { value: "high", label: "High" },
+          { value: "medium", label: "Medium", isDefault: true },
+          { value: "low", label: "Low" },
+        ],
+        supportsFastMode: true,
+        supportsThinkingToggle: false,
+        promptInjectedEffortLevels: [],
+      },
+    },
+    {
       slug: "gpt-5.4",
       name: "GPT-5.4",
       capabilities: {
@@ -295,6 +310,7 @@ export const DEFAULT_GIT_TEXT_GENERATION_MODEL = "gpt-5.4-mini" as const;
 
 export const MODEL_SLUG_ALIASES_BY_PROVIDER: Record<ProviderKind, Record<string, ModelSlug>> = {
   codex: {
+    "5.5": "gpt-5.5",
     "5.4": "gpt-5.4",
     "5.4-mini": "gpt-5.4-mini",
     "gpt-5.4-mini": "gpt-5.4-mini",

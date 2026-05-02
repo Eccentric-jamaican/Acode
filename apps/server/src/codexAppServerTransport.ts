@@ -45,6 +45,7 @@ export interface CodexAppServerTransportOptions {
   readonly binaryPath?: string;
   readonly cwd: string;
   readonly homePath?: string;
+  readonly env?: NodeJS.ProcessEnv;
 }
 
 export class CodexAppServerTransport extends EventEmitter<CodexAppServerTransportEvents> {
@@ -60,6 +61,7 @@ export class CodexAppServerTransport extends EventEmitter<CodexAppServerTranspor
       cwd: options.cwd,
       env: {
         ...process.env,
+        ...options.env,
         ...(options.homePath ? { CODEX_HOME: options.homePath } : {}),
       },
       stdio: ["pipe", "pipe", "pipe"],

@@ -8,6 +8,7 @@ export const BUILT_IN_COMPOSER_SLASH_COMMANDS = [
   "review",
   "fork",
   "status",
+  "browser",
   "subagents",
   "fast",
 ] as const;
@@ -65,6 +66,12 @@ const COMPOSER_SLASH_COMMAND_DEFINITIONS: Record<
     command: "status",
     label: "/status",
     description: "Show context usage and rate-limit status",
+    source: "app",
+  },
+  browser: {
+    command: "browser",
+    label: "/browser",
+    description: "Insert a prompt for the T3 in-app browser",
     source: "app",
   },
   subagents: {
@@ -171,6 +178,7 @@ export function getAvailableComposerSlashCommands(input: {
           ...(canOfferReviewCommand ? (["review"] as const) : []),
           ...(canOfferForkCommand ? (["fork"] as const) : []),
           "status",
+          "browser",
           "subagents",
         ]
       : [];
@@ -255,6 +263,30 @@ export function buildSubagentsPrompt(existingPrompt: string): string {
     "Run subagents for different tasks. Delegate distinct work in parallel when helpful and then synthesize the results. If you fork full history/context to subagents, do not specify agent_type, model, or reasoning_effort on the spawn call; let those inherit from the parent.";
   const trimmedPrompt = existingPrompt.trim();
   return trimmedPrompt.length > 0 ? `${trimmedPrompt}\n\n${cannedPrompt}` : cannedPrompt;
+}
+
+export function buildBrowserUseComposerPrompt(
+  args: string,
+  options?: { projectId?: string | null | undefined },
+): string {
+  const trimmedArgs = args.trim();
+  const browserTask =
+    trimmedArgs.length > 0
+      ? `Task: ${trimmedArgs}`
+      : "Task: Inspect the current T3 browser tab and summarize what is visible.";
+  const projectHint =
+    options?.projectId && options.projectId.trim().length > 0
+      ? `Use projectId \`${options.projectId}\` when setting up the browser client.`
+      : "If a projectId is required, ask T3 for the active project id instead of guessing.";
+
+  return [
+    "Use T3 Browser Use for this request. Do not use OpenAI Browser Use, Chrome MCP, `t3_browser` MCP, Playwright, or an external browser unless T3 Browser Use is unavailable and I explicitly approve a fallback.",
+    "Load the client with `const { setupT3BrowserUse } = await import(process.env.T3CODE_BROWSER_USE_CLIENT_PATH); const browser = setupT3BrowserUse({ globals: globalThis, projectId: \"PROJECT_ID\" });`, replacing `PROJECT_ID` with the T3 project id below.",
+    "Use the `browser` object to open tabs, click, type, scroll, inspect snapshots, capture screenshots, and evaluate page state. Prefer `browser.open(url)`, `browser.snapshot()`, `browser.click(selector)`, `browser.fill(selector, value)`, `browser.pressKey(key)`, and `browser.scrollBy(y)`.",
+    "Respect T3 browser settings for approvals, history access, allowed domains, blocked domains, and persisted browsing data.",
+    projectHint,
+    browserTask,
+  ].join("\n\n");
 }
 
 export function buildSlashReviewComposerPrompt(args: string): string {

@@ -118,6 +118,8 @@ function commandMenuTitle(
       return "Code Review";
     case "status":
       return "Status";
+    case "browser":
+      return "T3 Browser";
     case "fork":
       return "Fork";
     case "fast":
@@ -155,6 +157,8 @@ function resolveSlashLikeCommandIcon(commandName: string): ReactElement {
       return <DiffIcon className={className} />;
     case "status":
       return <ActivityIcon className={className} />;
+    case "browser":
+      return <GlobeIcon className={className} />;
     case "fork":
     case "handoff":
       return <ArrowLeftRight className={className} />;

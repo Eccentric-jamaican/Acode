@@ -18,6 +18,7 @@ import type {
 } from "./git";
 import type {
   BrowserActivateTabInput,
+  BrowserClearBrowsingDataInput,
   BrowserCloseTabInput,
   BrowserCreateTabInput,
   BrowserInspectCapture,
@@ -27,12 +28,22 @@ import type {
   BrowserRuntimeEvent,
   BrowserSessionSnapshot,
   BrowserSetInspectModeInput,
+  BrowserUseSettings,
+  BrowserUseSettingsPatch,
 } from "./browser";
 import type {
   ProjectListDirectoryInput,
   ProjectListDirectoryResult,
+  ProjectListTreeInput,
+  ProjectListTreeResult,
   ProjectReadFileInput,
   ProjectReadFileResult,
+  ProjectCreateDirectoryInput,
+  ProjectCreateDirectoryResult,
+  ProjectDeleteEntryInput,
+  ProjectDeleteEntryResult,
+  ProjectRenameEntryInput,
+  ProjectRenameEntryResult,
   ProjectSearchEntriesInput,
   ProjectSearchEntriesResult,
   ProjectWriteFileInput,
@@ -256,6 +267,9 @@ export interface DesktopBridge {
     forward: (input: BrowserProjectInput) => Promise<BrowserSessionSnapshot>;
     reload: (input: BrowserProjectInput) => Promise<BrowserSessionSnapshot>;
     kill: (input: BrowserProjectInput) => Promise<void>;
+    getSettings: () => Promise<BrowserUseSettings>;
+    updateSettings: (input: BrowserUseSettingsPatch) => Promise<BrowserUseSettings>;
+    clearBrowsingData: (input: BrowserClearBrowsingDataInput) => Promise<void>;
     setInspectMode: (input: BrowserSetInspectModeInput) => Promise<BrowserSessionSnapshot>;
     captureInspectSelection: (input: BrowserProjectInput) => Promise<BrowserInspectCapture | null>;
     onEvent: (listener: (event: BrowserRuntimeEvent) => void) => () => void;
@@ -279,8 +293,14 @@ export interface NativeApi {
   projects: {
     searchEntries: (input: ProjectSearchEntriesInput) => Promise<ProjectSearchEntriesResult>;
     listDirectory: (input: ProjectListDirectoryInput) => Promise<ProjectListDirectoryResult>;
+    listTree: (input: ProjectListTreeInput) => Promise<ProjectListTreeResult>;
     readFile: (input: ProjectReadFileInput) => Promise<ProjectReadFileResult>;
     writeFile: (input: ProjectWriteFileInput) => Promise<ProjectWriteFileResult>;
+    createDirectory: (
+      input: ProjectCreateDirectoryInput,
+    ) => Promise<ProjectCreateDirectoryResult>;
+    renameEntry: (input: ProjectRenameEntryInput) => Promise<ProjectRenameEntryResult>;
+    deleteEntry: (input: ProjectDeleteEntryInput) => Promise<ProjectDeleteEntryResult>;
   };
   shell: {
     openInEditor: (cwd: string, editor: EditorId) => Promise<void>;
@@ -365,6 +385,9 @@ export interface NativeApi {
     forward: (input: BrowserProjectInput) => Promise<BrowserSessionSnapshot>;
     reload: (input: BrowserProjectInput) => Promise<BrowserSessionSnapshot>;
     kill: (input: BrowserProjectInput) => Promise<void>;
+    getSettings: () => Promise<BrowserUseSettings>;
+    updateSettings: (input: BrowserUseSettingsPatch) => Promise<BrowserUseSettings>;
+    clearBrowsingData: (input: BrowserClearBrowsingDataInput) => Promise<void>;
     setInspectMode: (input: BrowserSetInspectModeInput) => Promise<BrowserSessionSnapshot>;
     captureInspectSelection: (input: BrowserProjectInput) => Promise<BrowserInspectCapture | null>;
     onEvent: (callback: (event: BrowserRuntimeEvent) => void) => () => void;

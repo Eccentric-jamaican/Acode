@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { buildSubagentsPrompt, getAvailableComposerSlashCommands } from "./composerSlashCommands";
+import {
+  buildBrowserUseComposerPrompt,
+  buildSubagentsPrompt,
+  getAvailableComposerSlashCommands,
+} from "./composerSlashCommands";
 
 describe("getAvailableComposerSlashCommands", () => {
   it("offers the app-level slash menu for opencode", () => {
@@ -20,6 +24,7 @@ describe("getAvailableComposerSlashCommands", () => {
       "review",
       "fork",
       "status",
+      "browser",
       "subagents",
     ]);
   });
@@ -34,6 +39,28 @@ describe("getAvailableComposerSlashCommands", () => {
         providerNativeCommandNames: [],
       }),
     ).not.toContain("fast");
+  });
+
+  it("offers browser command through the T3 Browser Use client", () => {
+    expect(
+      getAvailableComposerSlashCommands({
+        provider: "codex",
+        supportsFastSlashCommand: false,
+        canOfferReviewCommand: true,
+        canOfferForkCommand: true,
+        providerNativeCommandNames: [],
+      }),
+    ).toContain("browser");
+
+    expect(
+      getAvailableComposerSlashCommands({
+        provider: "opencode",
+        supportsFastSlashCommand: false,
+        canOfferReviewCommand: true,
+        canOfferForkCommand: true,
+        providerNativeCommandNames: [],
+      }),
+    ).toContain("browser");
   });
 
   it("filters out built-in commands that collide with opencode native slash commands", () => {
@@ -51,8 +78,24 @@ describe("getAvailableComposerSlashCommands", () => {
       "default",
       "review",
       "fork",
+      "browser",
       "subagents",
     ]);
+  });
+});
+
+describe("buildBrowserUseComposerPrompt", () => {
+  it("scopes browser work to T3 Browser Use", () => {
+    const prompt = buildBrowserUseComposerPrompt("open localhost:3000", {
+      projectId: "project-1",
+    });
+
+    expect(prompt).toContain("T3 Browser Use");
+    expect(prompt).toContain("Do not use OpenAI Browser Use");
+    expect(prompt).toContain("Do not use OpenAI Browser Use, Chrome MCP, `t3_browser` MCP");
+    expect(prompt).toContain("projectId: \"PROJECT_ID\"");
+    expect(prompt).toContain("Use projectId `project-1`");
+    expect(prompt).toContain("Task: open localhost:3000");
   });
 });
 

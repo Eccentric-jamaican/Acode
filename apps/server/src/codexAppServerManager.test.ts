@@ -14,6 +14,7 @@ import {
   isRecoverableThreadResumeError,
   normalizeCodexModelSlug,
   readCodexAccountSnapshot,
+  readCodexModelList,
   resolveCodexModelForAccount,
 } from "./codexAppServerManager";
 
@@ -250,6 +251,29 @@ describe("readCodexAccountSnapshot", () => {
       planType: null,
       sparkEnabled: true,
     });
+  });
+});
+
+describe("readCodexModelList", () => {
+  it("accepts app-server model arrays with id and display names", () => {
+    expect(
+      readCodexModelList({
+        models: [
+          { id: "gpt-5.5", name: "GPT-5.5" },
+          { id: "gpt-5.5", name: "Duplicate" },
+          { id: "gpt-5.4-mini", displayName: "GPT-5.4 Mini" },
+        ],
+      }),
+    ).toEqual([
+      { slug: "gpt-5.5", name: "GPT-5.5" },
+      { slug: "gpt-5.4-mini", name: "GPT-5.4 Mini" },
+    ]);
+  });
+
+  it("falls back to readable names for string model entries", () => {
+    expect(readCodexModelList(["gpt-5.5-codex"])).toEqual([
+      { slug: "gpt-5.5-codex", name: "GPT 5.5 Codex" },
+    ]);
   });
 });
 

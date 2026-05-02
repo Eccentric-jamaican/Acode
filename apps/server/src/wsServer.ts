@@ -56,8 +56,13 @@ import { GitManager } from "./git/Services/GitManager.ts";
 import { TerminalManager } from "./terminal/Services/Manager.ts";
 import { Keybindings } from "./keybindings";
 import {
+  createWorkspaceDirectory,
+  deleteWorkspaceEntry,
   listWorkspaceDirectory,
+  listWorkspaceTree,
   readWorkspaceFile,
+  recordWorkspaceFileWrite,
+  renameWorkspaceEntry,
   searchWorkspaceEntries,
 } from "./workspaceEntries";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine";
@@ -1020,6 +1025,17 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         });
       }
 
+      case WS_METHODS.projectsListTree: {
+        const body = stripRequestTag(request.body);
+        return yield* Effect.tryPromise({
+          try: () => listWorkspaceTree(body),
+          catch: (cause) =>
+            new RouteRequestError({
+              message: `Failed to list workspace tree: ${String(cause)}`,
+            }),
+        });
+      }
+
       case WS_METHODS.projectsReadFile: {
         const body = stripRequestTag(request.body);
         return yield* Effect.tryPromise({
@@ -1054,7 +1070,41 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
               }),
           ),
         );
+        recordWorkspaceFileWrite(body.cwd, target.relativePath);
         return { relativePath: target.relativePath };
+      }
+
+      case WS_METHODS.projectsCreateDirectory: {
+        const body = stripRequestTag(request.body);
+        return yield* Effect.tryPromise({
+          try: () => createWorkspaceDirectory(body),
+          catch: (cause) =>
+            new RouteRequestError({
+              message: `Failed to create workspace directory: ${String(cause)}`,
+            }),
+        });
+      }
+
+      case WS_METHODS.projectsRenameEntry: {
+        const body = stripRequestTag(request.body);
+        return yield* Effect.tryPromise({
+          try: () => renameWorkspaceEntry(body),
+          catch: (cause) =>
+            new RouteRequestError({
+              message: `Failed to rename workspace entry: ${String(cause)}`,
+            }),
+        });
+      }
+
+      case WS_METHODS.projectsDeleteEntry: {
+        const body = stripRequestTag(request.body);
+        return yield* Effect.tryPromise({
+          try: () => deleteWorkspaceEntry(body),
+          catch: (cause) =>
+            new RouteRequestError({
+              message: `Failed to delete workspace entry: ${String(cause)}`,
+            }),
+        });
       }
 
       case WS_METHODS.shellOpenInEditor: {

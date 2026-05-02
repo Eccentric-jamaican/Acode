@@ -33,6 +33,7 @@ import {
   GlobeIcon,
   HammerIcon,
   type LucideIcon,
+  MousePointer2Icon,
   PinIcon,
   PlugIcon,
   SquarePenIcon,
@@ -232,8 +233,27 @@ interface AssistantSelectionActionState {
 }
 
 type UserMessageTextSegment =
+  | { type: "shortcut"; key: string; command: "browser" | "review" | "subagents" | "inspect"; args: string }
   | { type: "mention"; key: string; descriptor: UserMessageMentionDescriptor }
   | { type: "text"; key: string; text: string };
+
+function parseLeadingShortcut(rawName: string): {
+  command: "browser" | "review" | "subagents" | "inspect";
+  label: string;
+} | null {
+  switch (rawName.toLowerCase()) {
+    case "browser":
+      return { command: "browser", label: "T3 Browser Use" };
+    case "review":
+      return { command: "review", label: "Code Review" };
+    case "subagents":
+      return { command: "subagents", label: "Subagents" };
+    case "inspect":
+      return { command: "inspect", label: "Inspected element" };
+    default:
+      return null;
+  }
+}
 
 function splitUserMessageProviderMentions(
   text: string,
@@ -250,6 +270,20 @@ function splitUserMessageProviderMentions(
     const match = LEADING_PROVIDER_MENTION_PATTERN.exec(remaining);
     if (!match?.[2]) break;
     const rawName = match[2];
+    const shortcut = match[1] === "/" ? parseLeadingShortcut(rawName) : null;
+    if (shortcut) {
+      segments.push({
+        type: "shortcut",
+        key: `shortcut:${offset}:${rawName}`,
+        command: shortcut.command,
+        args: "",
+      });
+      const nextRemaining = remaining.slice(match[0].length);
+      const trimmedRemaining = nextRemaining.trimStart();
+      offset += match[0].length + nextRemaining.length - trimmedRemaining.length;
+      remaining = trimmedRemaining;
+      continue;
+    }
     const descriptor =
       descriptorsByName.get(rawName.toLowerCase()) ?? {
         mentionName: rawName,
@@ -300,6 +334,40 @@ const UserMessageMentionChip = memo(function UserMessageMentionChip(props: {
   );
 });
 
+const UserMessageShortcutChip = memo(function UserMessageShortcutChip(props: {
+  command: "browser" | "review" | "subagents" | "inspect";
+}) {
+  const Icon =
+    props.command === "browser"
+      ? GlobeIcon
+      : props.command === "review"
+        ? SquarePenIcon
+        : props.command === "inspect"
+          ? MousePointer2Icon
+          : BotIcon;
+  const label =
+    props.command === "browser"
+      ? "T3 Browser Use"
+      : props.command === "review"
+        ? "Code Review"
+        : props.command === "inspect"
+          ? "Inspected element"
+          : "Subagents";
+  return (
+    <span
+      className={cn(
+        "inline-flex align-middle items-center gap-1.5 rounded-md px-0.5 py-0.5 text-sm font-medium",
+        props.command === "inspect"
+          ? "text-cyan-500 dark:text-cyan-400"
+          : "text-emerald-500 dark:text-emerald-400",
+      )}
+    >
+      <Icon className="size-4 shrink-0" />
+      <span className="max-w-40 truncate">{label}</span>
+    </span>
+  );
+});
+
 const UserMessageText = memo(function UserMessageText(props: {
   text: string;
   cwd: string | undefined;
@@ -314,7 +382,9 @@ const UserMessageText = memo(function UserMessageText(props: {
   return (
     <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-1">
       {segments.map((segment) =>
-        segment.type === "mention" ? (
+        segment.type === "shortcut" ? (
+          <UserMessageShortcutChip key={segment.key} command={segment.command} />
+        ) : segment.type === "mention" ? (
           <UserMessageMentionChip
             key={segment.key}
             descriptor={segment.descriptor}

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { fileURLToPath } from "node:url";
 
 import {
   ApprovalRequestId,
@@ -126,6 +127,11 @@ export interface CodexReviewStartResult {
   readonly turnId: TurnId | null;
 }
 
+export interface CodexModelSummary {
+  readonly slug: string;
+  readonly name: string;
+}
+
 const ANSI_ESCAPE_CHAR = String.fromCharCode(27);
 const ANSI_ESCAPE_REGEX = new RegExp(`${ANSI_ESCAPE_CHAR}\\[[0-9;]*m`, "g");
 const CODEX_STDERR_LOG_REGEX =
@@ -145,6 +151,10 @@ const CODEX_DEFAULT_MODEL = "gpt-5.4";
 const CODEX_SPARK_MODEL = "gpt-5.3-codex-spark";
 const CODEX_SPARK_DISABLED_PLAN_TYPES = new Set<CodexPlanType>(["free", "go", "plus"]);
 
+function resolveBrowserUseClientPath(): string {
+  return fileURLToPath(new URL("./browserUseClient.mjs", import.meta.url));
+}
+
 function noopListener() {}
 
 function asObject(value: unknown): Record<string, unknown> | undefined {
@@ -156,6 +166,52 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
 
 function asString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
+}
+
+function modelDisplayNameFromSlug(slug: string): string {
+  return slug
+    .split(/[-_\s]+/g)
+    .filter(Boolean)
+    .map((part) => (part.toLowerCase() === "gpt" ? "GPT" : part[0]?.toUpperCase() + part.slice(1)))
+    .join(" ");
+}
+
+export function readCodexModelList(response: unknown): CodexModelSummary[] {
+  const record = asObject(response);
+  const rawModels = Array.isArray(response)
+    ? response
+    : Array.isArray(record?.models)
+      ? record.models
+      : Array.isArray(record?.data)
+        ? record.data
+        : [];
+  const seen = new Set<string>();
+  const models: CodexModelSummary[] = [];
+
+  for (const entry of rawModels) {
+    const model = asObject(entry);
+    const slug =
+      asString(model?.slug) ??
+      asString(model?.id) ??
+      asString(model?.model) ??
+      (typeof entry === "string" ? entry : undefined);
+    const normalizedSlug = normalizeCodexModelSlug(slug);
+    if (!normalizedSlug || seen.has(normalizedSlug)) {
+      continue;
+    }
+
+    seen.add(normalizedSlug);
+    models.push({
+      slug: normalizedSlug,
+      name:
+        asString(model?.name) ??
+        asString(model?.displayName) ??
+        asString(model?.display_name) ??
+        modelDisplayNameFromSlug(normalizedSlug),
+    });
+  }
+
+  return models;
 }
 
 export function readCodexAccountSnapshot(response: unknown): CodexAccountSnapshot {
@@ -510,6 +566,9 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         cwd: resolvedCwd,
         ...(codexOptions.binaryPath ? { binaryPath: codexOptions.binaryPath } : {}),
         ...(codexOptions.homePath ? { homePath: codexOptions.homePath } : {}),
+        env: {
+          T3CODE_BROWSER_USE_CLIENT_PATH: resolveBrowserUseClientPath(),
+        },
       });
 
       context = {
@@ -534,7 +593,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       context.transport.notify("initialized");
       try {
         const modelListResponse = await this.sendRequest(context, "model/list", {});
-        console.log("codex model/list response", modelListResponse);
+        console.log("codex model/list response", readCodexModelList(modelListResponse));
       } catch (error) {
         console.log("codex model/list failed", error);
       }
@@ -982,6 +1041,22 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     };
   }
 
+  async listModels(input: {
+    readonly cwd?: string;
+    readonly providerOptions?: ProviderSessionStartInput["providerOptions"];
+  } = {}): Promise<CodexModelSummary[]> {
+    const response = await this.requestWithAnyContext(
+      "model/list",
+      {},
+      {
+        ...(input.cwd !== undefined ? { cwd: input.cwd, preferredCwd: input.cwd } : {}),
+        ...(input.providerOptions !== undefined ? { providerOptions: input.providerOptions } : {}),
+      },
+      20_000,
+    );
+    return readCodexModelList(response);
+  }
+
   async respondToRequest(
     threadId: ThreadId,
     requestId: ApprovalRequestId,
@@ -1335,6 +1410,9 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       cwd,
       ...(codexOptions.binaryPath ? { binaryPath: codexOptions.binaryPath } : {}),
       ...(codexOptions.homePath ? { homePath: codexOptions.homePath } : {}),
+      env: {
+        T3CODE_BROWSER_USE_CLIENT_PATH: resolveBrowserUseClientPath(),
+      },
     });
     transport.on("error", noopListener);
     transport.on("exit", noopListener);

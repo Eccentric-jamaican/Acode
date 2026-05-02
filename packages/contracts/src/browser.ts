@@ -153,3 +153,30 @@ export const BrowserSetInspectModeInput = Schema.Struct({
   enabled: Schema.Boolean,
 });
 export type BrowserSetInspectModeInput = typeof BrowserSetInspectModeInput.Type;
+
+export const BrowserUsePermissionPolicy = Schema.Literals(["alwaysAsk", "allow", "deny"]);
+export type BrowserUsePermissionPolicy = typeof BrowserUsePermissionPolicy.Type;
+
+export const BrowserUseSettings = Schema.Struct({
+  approvalPolicy: BrowserUsePermissionPolicy,
+  historyPolicy: BrowserUsePermissionPolicy,
+  blockedDomains: Schema.Array(TrimmedNonEmptyString),
+  allowedDomains: Schema.Array(TrimmedNonEmptyString),
+});
+export type BrowserUseSettings = typeof BrowserUseSettings.Type;
+
+export const BrowserUseSettingsPatch = Schema.Struct({
+  approvalPolicy: Schema.optional(BrowserUsePermissionPolicy),
+  historyPolicy: Schema.optional(BrowserUsePermissionPolicy),
+  blockedDomains: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+  allowedDomains: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
+});
+export type BrowserUseSettingsPatch = typeof BrowserUseSettingsPatch.Type;
+
+export const BrowserClearBrowsingDataKind = Schema.Literals(["all", "cookies", "cache", "siteData"]);
+export type BrowserClearBrowsingDataKind = typeof BrowserClearBrowsingDataKind.Type;
+
+export const BrowserClearBrowsingDataInput = Schema.Struct({
+  kind: BrowserClearBrowsingDataKind,
+});
+export type BrowserClearBrowsingDataInput = typeof BrowserClearBrowsingDataInput.Type;

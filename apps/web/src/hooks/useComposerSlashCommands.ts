@@ -1,8 +1,6 @@
 import type { ProviderKind } from "@t3tools/contracts";
 import { useCallback } from "react";
 import {
-  buildSlashReviewComposerPrompt,
-  buildSubagentsPrompt,
   getAvailableComposerSlashCommands,
   parseComposerSlashInvocationForCommands,
   parseFastSlashCommandAction,
@@ -26,6 +24,10 @@ export function useComposerSlashCommands(input: {
   handleClearConversation: () => Promise<void> | void;
   handleForkCommand: () => Promise<void> | void;
   handleStatusCommand: () => void;
+  handleShortcutCommand: (
+    command: "browser" | "review" | "subagents",
+    args: string,
+  ) => void;
   setFastModeFromSlash: (enabled: boolean) => void;
   editorActions: {
     resolveActiveComposerTrigger: () => {
@@ -53,6 +55,7 @@ export function useComposerSlashCommands(input: {
     handleClearConversation,
     handleForkCommand,
     handleStatusCommand,
+    handleShortcutCommand,
     setFastModeFromSlash,
     editorActions,
   } = input;
@@ -133,13 +136,15 @@ export function useComposerSlashCommands(input: {
         return true;
       }
       if (invocation.command === "subagents") {
-        editorActions.setComposerPromptValue(buildSubagentsPrompt(invocation.args));
+        handleShortcutCommand("subagents", invocation.args);
+        return true;
+      }
+      if (invocation.command === "browser") {
+        handleShortcutCommand("browser", invocation.args);
         return true;
       }
       if (invocation.command === "review") {
-        editorActions.setComposerPromptValue(
-          buildSlashReviewComposerPrompt(invocation.args),
-        );
+        handleShortcutCommand("review", invocation.args);
         return true;
       }
       if (invocation.command === "fast") {
@@ -160,6 +165,7 @@ export function useComposerSlashCommands(input: {
       handleForkCommand,
       handleInteractionModeChange,
       handleStatusCommand,
+      handleShortcutCommand,
       providerNativeCommandNames,
       runFastSlashCommand,
       selectedProvider,
@@ -213,7 +219,13 @@ export function useComposerSlashCommands(input: {
       }
 
       if (item.command === "subagents") {
-        editorActions.setComposerPromptValue(buildSubagentsPrompt(""));
+        handleShortcutCommand("subagents", "");
+        editorActions.setComposerHighlightedItemId(null);
+        return;
+      }
+
+      if (item.command === "browser") {
+        handleShortcutCommand("browser", "");
         editorActions.setComposerHighlightedItemId(null);
         return;
       }
@@ -229,7 +241,7 @@ export function useComposerSlashCommands(input: {
       }
 
       if (item.command === "review") {
-        editorActions.setComposerPromptValue(buildSlashReviewComposerPrompt(""));
+        handleShortcutCommand("review", "");
         editorActions.setComposerHighlightedItemId(null);
         return;
       }
@@ -261,6 +273,7 @@ export function useComposerSlashCommands(input: {
       handleForkCommand,
       handleInteractionModeChange,
       handleStatusCommand,
+      handleShortcutCommand,
       runFastSlashCommand,
     ],
   );

@@ -4,11 +4,19 @@ import path from "node:path";
 import { runProcess } from "./processRunner";
 
 import {
+  ProjectCreateDirectoryInput,
+  ProjectCreateDirectoryResult,
+  ProjectDeleteEntryInput,
+  ProjectDeleteEntryResult,
   ProjectDirectoryEntry,
   ProjectListDirectoryInput,
   ProjectListDirectoryResult,
+  ProjectListTreeInput,
+  ProjectListTreeResult,
   ProjectReadFileInput,
   ProjectReadFileResult,
+  ProjectRenameEntryInput,
+  ProjectRenameEntryResult,
   ProjectEntry,
   ProjectSearchEntriesInput,
   ProjectSearchEntriesResult,
@@ -40,6 +48,123 @@ interface WorkspaceIndex {
 
 const workspaceIndexCache = new Map<string, WorkspaceIndex>();
 const inFlightWorkspaceIndexBuilds = new Map<string, Promise<WorkspaceIndex>>();
+
+export function invalidateWorkspaceIndex(cwd: string): void {
+  workspaceIndexCache.delete(cwd);
+  inFlightWorkspaceIndexBuilds.delete(cwd);
+}
+
+function compareProjectEntries(left: ProjectEntry, right: ProjectEntry): number {
+  if (left.kind !== right.kind) {
+    return left.kind === "directory" ? -1 : 1;
+  }
+  return left.path.localeCompare(right.path, undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
+}
+
+function projectEntryForPath(relativePath: string, kind: ProjectEntry["kind"]): ProjectEntry {
+  return {
+    path: relativePath,
+    kind,
+    parentPath: parentPathOf(relativePath),
+  };
+}
+
+function mutateCachedWorkspaceIndex(
+  cwd: string,
+  updater: (entriesByPath: Map<string, ProjectEntry>) => void,
+): void {
+  const cached = workspaceIndexCache.get(cwd);
+  if (!cached) {
+    return;
+  }
+
+  const entriesByPath = new Map(cached.entries.map((entry) => [entry.path, entry]));
+  updater(entriesByPath);
+  const entries = [...entriesByPath.values()].toSorted(compareProjectEntries);
+
+  workspaceIndexCache.set(cwd, {
+    scannedAt: Date.now(),
+    entries,
+    truncated: cached.truncated || entries.length > WORKSPACE_INDEX_MAX_ENTRIES,
+  });
+}
+
+function ensureDirectoryAncestors(
+  entriesByPath: Map<string, ProjectEntry>,
+  relativePath: string,
+): void {
+  for (const directoryPath of directoryAncestorsOf(relativePath)) {
+    if (!entriesByPath.has(directoryPath)) {
+      entriesByPath.set(directoryPath, projectEntryForPath(directoryPath, "directory"));
+    }
+  }
+}
+
+export function recordWorkspaceFileWrite(cwd: string, relativePath: string): void {
+  mutateCachedWorkspaceIndex(cwd, (entriesByPath) => {
+    ensureDirectoryAncestors(entriesByPath, relativePath);
+    entriesByPath.set(relativePath, projectEntryForPath(relativePath, "file"));
+  });
+}
+
+function recordWorkspaceDirectoryCreate(cwd: string, relativePath: string): void {
+  mutateCachedWorkspaceIndex(cwd, (entriesByPath) => {
+    ensureDirectoryAncestors(entriesByPath, relativePath);
+    entriesByPath.set(relativePath, projectEntryForPath(relativePath, "directory"));
+  });
+}
+
+function recordWorkspaceEntryRename(input: {
+  cwd: string;
+  fromRelativePath: string;
+  kind: ProjectEntry["kind"];
+  toRelativePath: string;
+}): void {
+  mutateCachedWorkspaceIndex(input.cwd, (entriesByPath) => {
+    const movedEntries: ProjectEntry[] = [];
+    for (const entry of entriesByPath.values()) {
+      if (
+        entry.path === input.fromRelativePath ||
+        entry.path.startsWith(`${input.fromRelativePath}/`)
+      ) {
+        movedEntries.push(entry);
+      }
+    }
+
+    if (movedEntries.length === 0) {
+      ensureDirectoryAncestors(entriesByPath, input.toRelativePath);
+      entriesByPath.set(input.toRelativePath, projectEntryForPath(input.toRelativePath, input.kind));
+      return;
+    }
+
+    for (const entry of movedEntries) {
+      entriesByPath.delete(entry.path);
+    }
+    ensureDirectoryAncestors(entriesByPath, input.toRelativePath);
+
+    for (const entry of movedEntries) {
+      const suffix =
+        entry.path === input.fromRelativePath
+          ? ""
+          : entry.path.slice(input.fromRelativePath.length);
+      const nextPath = `${input.toRelativePath}${suffix}`;
+      entriesByPath.set(nextPath, projectEntryForPath(nextPath, entry.kind));
+    }
+  });
+}
+
+function recordWorkspaceEntryDelete(cwd: string, relativePath: string): void {
+  mutateCachedWorkspaceIndex(cwd, (entriesByPath) => {
+    for (const entryPath of entriesByPath.keys()) {
+      if (entryPath === relativePath || entryPath.startsWith(`${relativePath}/`)) {
+        entriesByPath.delete(entryPath);
+      }
+    }
+  });
+}
 
 function toPosixPath(input: string): string {
   return input.split(path.sep).join("/");
@@ -522,6 +647,14 @@ export async function listWorkspaceDirectory(
   };
 }
 
+export async function listWorkspaceTree(input: ProjectListTreeInput): Promise<ProjectListTreeResult> {
+  const index = await getWorkspaceIndex(input.cwd);
+  return {
+    entries: index.entries,
+    truncated: index.truncated,
+  };
+}
+
 export async function readWorkspaceFile(
   input: ProjectReadFileInput,
 ): Promise<ProjectReadFileResult> {
@@ -577,5 +710,76 @@ export async function readWorkspaceFile(
     relativePath: target.relativePath,
     status: "text",
     contents: bytes.toString("utf8"),
+  };
+}
+
+export async function createWorkspaceDirectory(
+  input: ProjectCreateDirectoryInput,
+): Promise<ProjectCreateDirectoryResult> {
+  const target = resolveWorkspaceTargetPath({
+    cwd: input.cwd,
+    relativePath: input.relativePath,
+  });
+  if (target.relativePath === null) {
+    throw new Error("Cannot create the workspace root.");
+  }
+
+  await fs.mkdir(target.absolutePath, { recursive: true });
+  recordWorkspaceDirectoryCreate(input.cwd, target.relativePath);
+
+  return {
+    relativePath: target.relativePath,
+  };
+}
+
+export async function renameWorkspaceEntry(
+  input: ProjectRenameEntryInput,
+): Promise<ProjectRenameEntryResult> {
+  const fromTarget = resolveWorkspaceTargetPath({
+    cwd: input.cwd,
+    relativePath: input.fromRelativePath,
+  });
+  const toTarget = resolveWorkspaceTargetPath({
+    cwd: input.cwd,
+    relativePath: input.toRelativePath,
+  });
+  if (fromTarget.relativePath === null || toTarget.relativePath === null) {
+    throw new Error("Cannot rename the workspace root.");
+  }
+
+  const fromStats = await fs.stat(fromTarget.absolutePath);
+  const fromKind = fromStats.isDirectory() ? "directory" : "file";
+
+  await fs.mkdir(path.dirname(toTarget.absolutePath), { recursive: true });
+  await fs.rename(fromTarget.absolutePath, toTarget.absolutePath);
+  recordWorkspaceEntryRename({
+    cwd: input.cwd,
+    fromRelativePath: fromTarget.relativePath,
+    kind: fromKind,
+    toRelativePath: toTarget.relativePath,
+  });
+
+  return {
+    fromRelativePath: fromTarget.relativePath,
+    toRelativePath: toTarget.relativePath,
+  };
+}
+
+export async function deleteWorkspaceEntry(
+  input: ProjectDeleteEntryInput,
+): Promise<ProjectDeleteEntryResult> {
+  const target = resolveWorkspaceTargetPath({
+    cwd: input.cwd,
+    relativePath: input.relativePath,
+  });
+  if (target.relativePath === null) {
+    throw new Error("Cannot delete the workspace root.");
+  }
+
+  await fs.rm(target.absolutePath, { recursive: true, force: false });
+  recordWorkspaceEntryDelete(input.cwd, target.relativePath);
+
+  return {
+    relativePath: target.relativePath,
   };
 }

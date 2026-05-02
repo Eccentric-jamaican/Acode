@@ -22,6 +22,7 @@ import {
   TurnId,
 } from "@t3tools/contracts";
 import { Effect, FileSystem, Layer, Queue, Schema, ServiceMap, Stream } from "effect";
+import { getModelOptions } from "@t3tools/shared/model";
 
 import {
   ProviderAdapterProcessError,
@@ -1536,6 +1537,34 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         },
       });
 
+    const listModels: NonNullable<CodexAdapterShape["listModels"]> = () =>
+      Effect.tryPromise({
+        try: () => manager.listModels({ cwd: serverConfig.cwd }),
+        catch: (cause) =>
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "model/list",
+            detail: toMessage(cause, "model/list failed"),
+            cause,
+          }),
+      }).pipe(
+        Effect.map((models) => ({
+          models:
+            models.length > 0
+              ? models
+              : getModelOptions("codex").map(({ slug, name }) => ({ slug, name })),
+          source: models.length > 0 ? "runtime" : "static-fallback",
+          cached: false,
+        })),
+        Effect.catch(() =>
+          Effect.succeed({
+            models: getModelOptions("codex").map(({ slug, name }) => ({ slug, name })),
+            source: "static-fallback",
+            cached: false,
+          }),
+        ),
+      );
+
     const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
 
     yield* Effect.acquireRelease(
@@ -1585,7 +1614,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         supportsNativeSlashCommandDiscovery: false,
         supportsPluginMentions: true,
         supportsPluginDiscovery: true,
-        supportsRuntimeModelList: false,
+        supportsRuntimeModelList: true,
       },
       startSession,
       sendTurn,
@@ -1606,7 +1635,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
           supportsNativeSlashCommandDiscovery: false,
           supportsPluginMentions: true,
           supportsPluginDiscovery: true,
-          supportsRuntimeModelList: false,
+          supportsRuntimeModelList: true,
         }),
       listSkills: (input) =>
         Effect.succeed({
@@ -1645,6 +1674,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
       readStoredThread,
       archiveStoredThread,
       startReview,
+      listModels,
       streamEvents: Stream.fromQueue(runtimeEventQueue),
     } satisfies CodexAdapterShape;
   });

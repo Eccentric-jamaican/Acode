@@ -86,6 +86,12 @@ class FakeCodexManager extends CodexAppServerManager {
   );
 
   public stopAllImpl = vi.fn(() => undefined);
+  public listModelsImpl = vi.fn(async () => [
+    {
+      slug: "gpt-5.5",
+      name: "GPT-5.5",
+    },
+  ]);
 
   override startSession(input: CodexAppServerStartSessionInput): Promise<ProviderSession> {
     return this.startSessionImpl(input);
@@ -136,6 +142,10 @@ class FakeCodexManager extends CodexAppServerManager {
   override stopAll(): void {
     this.stopAllImpl();
   }
+
+  override listModels() {
+    return this.listModelsImpl();
+  }
 }
 
 const providerSessionDirectoryTestLayer = Layer.succeed(ProviderSessionDirectory, {
@@ -158,6 +168,27 @@ const validationLayer = it.layer(
 );
 
 validationLayer("CodexAdapterLive validation", (it) => {
+  it.effect("exposes Codex runtime model discovery", () =>
+    Effect.gen(function* () {
+      validationManager.listModelsImpl.mockClear();
+      const adapter = yield* CodexAdapter;
+      if (!adapter.getComposerCapabilities || !adapter.listModels) {
+        throw new Error("Codex adapter did not expose runtime model discovery.");
+      }
+
+      const capabilities = yield* adapter.getComposerCapabilities();
+      const result = yield* adapter.listModels();
+
+      assert.equal(capabilities?.supportsRuntimeModelList, true);
+      assert.deepStrictEqual(result, {
+        models: [{ slug: "gpt-5.5", name: "GPT-5.5" }],
+        source: "runtime",
+        cached: false,
+      });
+      assert.equal(validationManager.listModelsImpl.mock.calls.length, 1);
+    }),
+  );
+
   it.effect("maps codex model options before starting a session", () =>
     Effect.gen(function* () {
       validationManager.startSessionImpl.mockClear();

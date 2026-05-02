@@ -31,6 +31,7 @@ vi.mock("electron", () => {
     loading = false;
     zoomFactor = 1;
     setZoomFactorCalls: number[] = [];
+    executeJavaScriptCalls: string[] = [];
     ownerView: MockWebContentsView | null = null;
     readonly navigationHistory = {
       canGoBack: () => false,
@@ -62,7 +63,10 @@ vi.mock("electron", () => {
       return this.loading;
     }
 
-    async executeJavaScript(): Promise<unknown> {
+    async executeJavaScript(script?: string): Promise<unknown> {
+      if (typeof script === "string") {
+        this.executeJavaScriptCalls.push(script);
+      }
       return null;
     }
 
@@ -117,16 +121,23 @@ vi.mock("electron", () => {
 
   return {
     BrowserWindow: undefined,
+    session: {
+      fromPartition: vi.fn(() => ({
+        clearCache: vi.fn(async () => undefined),
+        clearStorageData: vi.fn(async () => undefined),
+      })),
+    },
     WebContentsView: MockWebContentsView,
   };
 });
 
-import { BrowserRuntimeRegistry } from "./browserRuntime";
+import { BROWSER_STORAGE_PARTITION, BrowserRuntimeRegistry } from "./browserRuntime";
 
 interface TestWebContents {
   currentUrl: string;
   loadURL: (url: string) => Promise<void>;
   setZoomFactorCalls: number[];
+  executeJavaScriptCalls: string[];
 }
 
 interface TestView {
@@ -207,13 +218,33 @@ describe("BrowserRuntimeRegistry", () => {
     await expect(registry.navigate(projectId, "https://example.com")).rejects.toThrow("ERR_ABORTED");
   });
 
-  it("uses a persistent partition per project runtime", async () => {
+  it("uses the shared persistent browser partition", async () => {
     const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
     const projectId = ProjectId.makeUnsafe("project-persistent-1");
+    const otherProjectId = ProjectId.makeUnsafe("project-persistent-2");
 
     await registry.ensure(projectId);
+    await registry.ensure(otherProjectId);
     const tab = getActiveTabRuntime(registry, projectId);
-    expect(tab.view.partition).toBe(`persist:t3-browser-${String(projectId)}`);
+    const otherTab = getActiveTabRuntime(registry, otherProjectId);
+    expect(tab.view.partition).toBe(BROWSER_STORAGE_PARTITION);
+    expect(otherTab.view.partition).toBe(BROWSER_STORAGE_PARTITION);
+  });
+
+  it("enforces browser approval and history policies", async () => {
+    const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
+    const projectId = ProjectId.makeUnsafe("project-policy-1");
+
+    await registry.updateSettings({
+      approvalPolicy: "deny",
+      historyPolicy: "deny",
+    });
+
+    await expect(registry.ensure(projectId)).rejects.toThrow("Browser opening is disabled");
+
+    await registry.updateSettings({ approvalPolicy: "allow" });
+    await registry.ensure(projectId);
+    await expect(registry.back(projectId)).rejects.toThrow("Browser history access is disabled");
   });
 
   it("attaches the native view before applying pane bounds", async () => {
@@ -529,5 +560,21 @@ describe("BrowserRuntimeRegistry", () => {
     expect(afterClose.activeTabId).toBeTruthy();
     expect(afterClose.activeTabId).not.toBe(initialTabId);
     expect(afterClose.session?.navigation.url).toBe("https://www.google.com");
+  });
+
+  it("injects a visible agent cursor for browser interactions", async () => {
+    const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
+    const projectId = ProjectId.makeUnsafe("project-agent-cursor");
+
+    await registry.ensure(projectId);
+    const tab = getActiveTabRuntime(registry, projectId);
+    tab.view.webContents.executeJavaScriptCalls = [];
+
+    await registry.click(projectId, "button.primary");
+
+    const script = tab.view.webContents.executeJavaScriptCalls.join("\n");
+    expect(script).toContain("__t3_browser_agent_cursor");
+    expect(script).toContain("button.primary");
+    expect(script).toContain('moveTo(x, y, "click")');
   });
 });

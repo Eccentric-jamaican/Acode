@@ -6,7 +6,14 @@ import { spawnSync } from "node:child_process";
 
 import { afterEach, assert, describe, it, vi } from "vitest";
 
-import { searchWorkspaceEntries } from "./workspaceEntries";
+import {
+  createWorkspaceDirectory,
+  deleteWorkspaceEntry,
+  listWorkspaceTree,
+  recordWorkspaceFileWrite,
+  renameWorkspaceEntry,
+  searchWorkspaceEntries,
+} from "./workspaceEntries";
 
 const tempDirs: string[] = [];
 
@@ -55,6 +62,84 @@ describe("searchWorkspaceEntries", () => {
     assert.isFalse(paths.some((entryPath) => entryPath.startsWith(".git")));
     assert.isFalse(paths.some((entryPath) => entryPath.startsWith("node_modules")));
     assert.isFalse(result.truncated);
+  });
+
+  it("lists the cached workspace tree without a search limit", async () => {
+    const cwd = makeTempDir("t3code-workspace-tree-");
+    writeFile(cwd, "apps/web/src/App.tsx");
+    writeFile(cwd, "packages/contracts/src/project.ts");
+
+    const result = await listWorkspaceTree({ cwd });
+    const paths = result.entries.map((entry) => entry.path);
+
+    assert.includeMembers(paths, [
+      "apps",
+      "apps/web",
+      "apps/web/src",
+      "apps/web/src/App.tsx",
+      "packages",
+      "packages/contracts",
+      "packages/contracts/src",
+      "packages/contracts/src/project.ts",
+    ]);
+    assert.isFalse(result.truncated);
+  });
+
+  it("creates, renames, and deletes workspace entries", async () => {
+    const cwd = makeTempDir("t3code-workspace-mutations-");
+
+    const created = await createWorkspaceDirectory({
+      cwd,
+      relativePath: "src/components",
+    });
+    assert.equal(created.relativePath, "src/components");
+    assert.isTrue(fs.statSync(path.join(cwd, "src/components")).isDirectory());
+
+    writeFile(cwd, "src/components/Button.tsx", "export {};");
+
+    const renamed = await renameWorkspaceEntry({
+      cwd,
+      fromRelativePath: "src/components/Button.tsx",
+      toRelativePath: "src/components/IconButton.tsx",
+    });
+    assert.equal(renamed.toRelativePath, "src/components/IconButton.tsx");
+    assert.isFalse(fs.existsSync(path.join(cwd, "src/components/Button.tsx")));
+    assert.isTrue(fs.existsSync(path.join(cwd, "src/components/IconButton.tsx")));
+
+    const deleted = await deleteWorkspaceEntry({
+      cwd,
+      relativePath: "src",
+    });
+    assert.equal(deleted.relativePath, "src");
+    assert.isFalse(fs.existsSync(path.join(cwd, "src")));
+  });
+
+  it("patches the cached workspace tree after mutations without rescanning", async () => {
+    const cwd = makeTempDir("t3code-workspace-incremental-mutations-");
+    writeFile(cwd, "src/original.ts", "export {};");
+
+    await listWorkspaceTree({ cwd });
+
+    vi.spyOn(fsPromises, "readdir").mockRejectedValue(new Error("unexpected rescan"));
+
+    writeFile(cwd, "src/written.ts", "export {};");
+    recordWorkspaceFileWrite(cwd, "src/written.ts");
+    await createWorkspaceDirectory({ cwd, relativePath: "src/components" });
+    await renameWorkspaceEntry({
+      cwd,
+      fromRelativePath: "src/original.ts",
+      toRelativePath: "src/renamed.ts",
+    });
+    await deleteWorkspaceEntry({ cwd, relativePath: "src/components" });
+
+    const result = await listWorkspaceTree({ cwd });
+    const paths = result.entries.map((entry) => entry.path);
+
+    assert.include(paths, "src");
+    assert.include(paths, "src/written.ts");
+    assert.include(paths, "src/renamed.ts");
+    assert.notInclude(paths, "src/original.ts");
+    assert.notInclude(paths, "src/components");
   });
 
   it("filters and ranks entries by query", async () => {

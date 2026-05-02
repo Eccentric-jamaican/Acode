@@ -1,8 +1,9 @@
 import {
-  getSharedHighlighter,
-  type DiffsHighlighter,
+  type FileContents,
+  File as PierreFile,
+  type LineAnnotation,
   type SupportedLanguages,
-} from "@pierre/diffs";
+} from "@pierre/diffs/react";
 import { useQuery } from "@tanstack/react-query";
 import { useParams, useSearch } from "@tanstack/react-router";
 import { ThreadId } from "@t3tools/contracts";
@@ -12,14 +13,15 @@ import {
   XIcon,
   ChevronRightIcon,
   FileIcon,
+  ExternalLinkIcon,
 } from "lucide-react";
-import { Suspense, use, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 
 import { parseDiffRouteSearch } from "../diffRouteSearch";
 import { isElectronRuntime } from "../env";
 import { useFilePanelStore, getFilePanelThreadState, type FilePanelComment } from "../filePanelStore";
 import { useTheme } from "../hooks/useTheme";
-import { resolveDiffThemeName } from "../lib/diffRendering";
+import { buildPatchCacheKey, resolveDiffThemeName } from "../lib/diffRendering";
 import { projectReadFileQueryOptions } from "../lib/projectReactQuery";
 import { normalizeSyntaxLanguage } from "../lib/syntaxLanguage";
 import { cn } from "../lib/utils";
@@ -35,13 +37,6 @@ interface DiffPanelProps {
 }
 
 export { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
-
-type ResolvedHighlighter = {
-  highlighter: DiffsHighlighter;
-  language: string;
-};
-
-const fileViewerHighlighterPromiseCache = new Map<string, Promise<ResolvedHighlighter>>();
 
 function inferFileViewerLanguage(filePath: string): string {
   const extension = filePath.split(".").pop()?.toLowerCase() ?? "";
@@ -63,47 +58,6 @@ function inferFileViewerLanguage(filePath: string): string {
 function isMarkdownFile(filePath: string): boolean {
   const extension = filePath.split(".").pop()?.toLowerCase() ?? "";
   return extension === "md" || extension === "mdx" || extension === "markdown";
-}
-
-function getFileViewerHighlighterPromise(language: string): Promise<ResolvedHighlighter> {
-  const normalizedLanguage = normalizeSyntaxLanguage(language);
-  const cached = fileViewerHighlighterPromiseCache.get(normalizedLanguage);
-  if (cached) {
-    return cached;
-  }
-
-  const promise = getSharedHighlighter({
-    themes: [resolveDiffThemeName("dark"), resolveDiffThemeName("light")],
-    langs: [normalizedLanguage as SupportedLanguages],
-    preferredHighlighter: "shiki-js",
-  })
-    .then((highlighter) => ({ highlighter, language: normalizedLanguage }))
-    .catch(async () => {
-      const fallbackLanguage = "text";
-      const fallbackHighlighter = await getSharedHighlighter({
-        themes: [resolveDiffThemeName("dark"), resolveDiffThemeName("light")],
-        langs: [fallbackLanguage as SupportedLanguages],
-        preferredHighlighter: "shiki-js",
-      });
-      return { highlighter: fallbackHighlighter, language: fallbackLanguage };
-    });
-
-  fileViewerHighlighterPromiseCache.set(normalizedLanguage, promise);
-  return promise;
-}
-
-function extractHighlightedLines(html: string): string[] {
-  if (typeof DOMParser === "undefined") {
-    return html.split("\n");
-  }
-
-  const document = new DOMParser().parseFromString(html, "text/html");
-  const lineNodes = Array.from(document.querySelectorAll(".line"));
-  if (lineNodes.length === 0) {
-    return [html];
-  }
-
-  return lineNodes.map((lineNode) => lineNode.innerHTML);
 }
 
 export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
@@ -145,7 +99,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     activeFilePath && !filePanelState.plainViewMarkdownFiles.includes(activeFilePath),
   );
   const codeWordWrapEnabled = Boolean(
-    activeFilePath && !filePanelState.noWrapCodeFiles.includes(activeFilePath),
+    activeFilePath && filePanelState.noWrapCodeFiles.includes(activeFilePath),
   );
   const activeFileQuery = useQuery(
     projectReadFileQueryOptions({
@@ -159,28 +113,40 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     if (!activeFilePath) return [] as string[];
     return activeFilePath.split("/").filter((segment) => segment.length > 0);
   }, [activeFilePath]);
+  const activeFileName = breadcrumbs.at(-1) ?? null;
+  const openActiveFileInEditor = () => {
+    if (!activeCwd || !activeFilePath) {
+      return;
+    }
+    const api = readNativeApi();
+    if (!api) {
+      return;
+    }
+    const targetPath = resolvePathLinkTarget(activeFilePath, activeCwd);
+    void api.shell.openInEditor(targetPath, preferredTerminalEditor());
+  };
 
   const headerRowClassName = cn(
-    "desktop-top-edge-actions-safe flex min-w-0 items-center gap-2 px-4",
-    usesDesktopAppChrome && mode !== "sheet" ? "h-[var(--app-desktop-content-header-height)]" : "h-12",
+    "desktop-top-edge-actions-safe flex min-w-0 items-end gap-2 border-b border-border/45 bg-muted/18 px-3",
+    usesDesktopAppChrome && mode !== "sheet" ? "h-[var(--app-desktop-content-header-height)]" : "h-11",
   );
 
   return (
     <div
       className={cn(
-        "flex h-full min-w-0 flex-col bg-background",
+        "flex h-full min-w-0 flex-col bg-background text-foreground",
         mode === "inline"
-          ? "w-[42vw] min-w-[360px] max-w-[560px] shrink-0 border-l border-border"
+          ? "w-[42vw] min-w-[420px] max-w-[640px] shrink-0 border-l border-border/60"
           : "w-full",
       )}
     >
-      <div className="shrink-0 border-b border-border">
+      <div className="shrink-0 border-b border-border/60 bg-background">
         <div
           className={headerRowClassName}
           data-testid={usesDesktopAppChrome && mode !== "sheet" ? "diff-panel-top-header" : undefined}
         >
-          <div className="min-w-0 flex-1 overflow-x-auto">
-            <div className="flex min-w-max items-center gap-1 py-2">
+          <div className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden">
+            <div className="flex min-w-max items-end gap-0">
               <ViewerTabButton
                 active={filePanelState.activeTab.kind === "summary"}
                 onClick={() => {
@@ -211,18 +177,23 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
             </div>
           </div>
         </div>
-        <div className="desktop-top-edge-actions-safe flex h-9 items-center justify-between gap-3 border-t border-border/60 px-4 text-[12px] text-muted-foreground/70">
+        <div className="desktop-top-edge-actions-safe flex h-11 items-center justify-between gap-3 px-4 text-[12px] text-muted-foreground/72">
           {activeFilePath ? (
-            <div className="min-w-0 truncate" data-testid="viewer-breadcrumbs">
-              {breadcrumbs.map((segment, index) => (
-                <span key={breadcrumbs.slice(0, index + 1).join("/")}>
-                  {index > 0 ? <ChevronRightIcon className="mx-1 inline size-3 opacity-60" /> : null}
-                  <span>{segment}</span>
-                </span>
-              ))}
+            <div className="min-w-0" data-testid="viewer-breadcrumbs">
+              <div className="truncate text-[13px] font-medium text-foreground/88">
+                {activeFileName}
+              </div>
+              <div className="mt-0.5 flex min-w-0 items-center overflow-hidden whitespace-nowrap text-[11px]">
+                {breadcrumbs.slice(0, -1).map((segment, index) => (
+                  <span key={breadcrumbs.slice(0, index + 1).join("/")} className="contents">
+                    {index > 0 ? <ChevronRightIcon className="mx-0.5 size-3 shrink-0 opacity-45" /> : null}
+                    <span className="truncate">{segment}</span>
+                  </span>
+                ))}
+              </div>
             </div>
           ) : (
-            <span className="truncate">Viewer</span>
+            <span className="truncate text-[13px] font-medium text-foreground/84">Viewer</span>
           )}
           {activeFilePath ? (
             <Menu>
@@ -240,6 +211,10 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                 <EllipsisIcon className="size-3.5" />
               </MenuTrigger>
               <MenuPopup align="end">
+                <MenuItem onClick={openActiveFileInEditor}>
+                  <ExternalLinkIcon className="size-3.5 text-muted-foreground" />
+                  Open in editor
+                </MenuItem>
                 {isMarkdownFile(activeFilePath) ? (
                   <MenuItem
                     onClick={() => {
@@ -284,17 +259,6 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
               filePath={activeFilePath}
               contents={activeFileQuery.data.contents}
               cwd={activeCwd}
-              onOpenInEditor={() => {
-                if (!activeCwd || !activeFilePath) {
-                  return;
-                }
-                const api = readNativeApi();
-                if (!api) {
-                  return;
-                }
-                const targetPath = resolvePathLinkTarget(activeFilePath, activeCwd);
-                void api.shell.openInEditor(targetPath, preferredTerminalEditor());
-              }}
             />
           ) : (
             <Suspense fallback={<PanelEmptyState message="Loading syntax highlighting…" />}>
@@ -319,17 +283,6 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                     deleteComment(activeThreadId, activeFilePath, commentId);
                   }
                 }}
-                onOpenInEditor={() => {
-                  if (!activeCwd || !activeFilePath) {
-                    return;
-                  }
-                  const api = readNativeApi();
-                  if (!api) {
-                    return;
-                  }
-                  const targetPath = resolvePathLinkTarget(activeFilePath, activeCwd);
-                  void api.shell.openInEditor(targetPath, preferredTerminalEditor());
-                }}
               />
             </Suspense>
           )
@@ -346,10 +299,10 @@ function ViewerTabButton(props: { active: boolean; onClick: () => void; children
     <button
       type="button"
       className={cn(
-        "inline-flex h-8 items-center rounded-md border px-2.5 text-[12px] font-medium transition-colors",
+        "inline-flex h-9 items-center border-b-2 px-3 text-[12px] font-medium transition-colors",
         props.active
-          ? "border-border bg-accent/55 text-foreground"
-          : "border-transparent bg-transparent text-muted-foreground/72 hover:bg-accent/30 hover:text-foreground",
+          ? "border-primary/70 bg-background text-foreground shadow-[inset_0_1px_0_hsl(var(--border)/0.35)]"
+          : "border-transparent bg-transparent text-muted-foreground/74 hover:bg-background/55 hover:text-foreground",
       )}
       onClick={props.onClick}
     >
@@ -368,10 +321,10 @@ function ViewerFileTab(props: {
   return (
     <div
       className={cn(
-        "inline-flex h-8 max-w-52 items-center gap-1 rounded-md border px-2 text-[12px] transition-colors",
+        "inline-flex h-9 max-w-56 items-center gap-1 border-b-2 px-3 text-[12px] transition-colors",
         props.active
-          ? "border-border bg-accent/55 text-foreground"
-          : "border-transparent bg-transparent text-muted-foreground/72 hover:bg-accent/30 hover:text-foreground",
+          ? "border-primary/70 bg-background text-foreground shadow-[inset_0_1px_0_hsl(var(--border)/0.35)]"
+          : "border-transparent bg-transparent text-muted-foreground/74 hover:bg-background/55 hover:text-foreground",
       )}
     >
       <button type="button" className="flex min-w-0 items-center gap-1" onClick={props.onSelect}>
@@ -419,22 +372,73 @@ function MarkdownFileViewer(props: {
   filePath: string;
   contents: string;
   cwd: string | null;
-  onOpenInEditor: () => void;
 }) {
   return (
-    <div className="h-full overflow-auto bg-background/80">
-      <div className="flex items-center justify-between border-b border-border/60 px-4 py-2 text-[11px] text-muted-foreground/70">
-        <span className="truncate">{props.filePath}</span>
-        <Button type="button" size="xs" variant="outline" onClick={props.onOpenInEditor}>
-          Open
-        </Button>
-      </div>
+    <div className="h-full overflow-auto bg-background">
       <div className="px-6 py-6">
         <ChatMarkdown text={props.contents} cwd={props.cwd ?? undefined} />
       </div>
     </div>
   );
 }
+
+type FileCommentAnnotation = {
+  comments: readonly FilePanelComment[];
+  draft: boolean;
+};
+
+const PIERRE_FILE_VIEWER_UNSAFE_CSS = `
+  :host {
+    display: block;
+    min-height: 100%;
+    background: transparent;
+    color: hsl(var(--foreground));
+    font-family: inherit;
+    --diffs-font-family-override: var(--font-mono);
+    --diffs-font-size-override: 12px;
+    --diffs-line-height-override: 1.45rem;
+    --diffs-bg-override: transparent;
+    --diffs-fg-override: hsl(var(--foreground) / 0.88);
+    --diffs-border-color-override: hsl(var(--border) / 0.52);
+    --diffs-gutter-fg-override: hsl(var(--muted-foreground) / 0.54);
+    --diffs-gutter-bg-override: transparent;
+    --diffs-line-hover-bg-override: hsl(var(--accent) / 0.1);
+    --diffs-selected-bg-override: hsl(var(--accent) / 0.18);
+  }
+
+  pre {
+    margin: 0;
+    padding: 12px 0 24px;
+    background: transparent;
+    outline: none;
+  }
+
+  pre[data-file] {
+    border: 0;
+  }
+
+  [data-line] {
+    min-height: 22px;
+  }
+
+  [data-column-number],
+  [data-line-number-content] {
+    color: hsl(var(--muted-foreground) / 0.48);
+    user-select: none;
+  }
+
+  [data-column-content] {
+    padding-right: 24px;
+  }
+
+  [data-line]:hover {
+    background: hsl(var(--accent) / 0.08);
+  }
+
+  [data-line-annotation] {
+    background: transparent;
+  }
+`;
 
 function ReadOnlyFileViewer(props: {
   filePath: string;
@@ -445,107 +449,140 @@ function ReadOnlyFileViewer(props: {
   onAddComment: (line: number, text: string) => void;
   onUpdateComment: (commentId: string, text: string) => void;
   onDeleteComment: (commentId: string) => void;
-  onOpenInEditor: () => void;
 }) {
   const [draftLine, setDraftLine] = useState<number | null>(null);
   const [draftText, setDraftText] = useState("");
-  const lines = useMemo(() => props.contents.split(/\r?\n/), [props.contents]);
   const themeName = resolveDiffThemeName(props.theme);
-  const requestedLanguage = inferFileViewerLanguage(props.filePath);
-  const { highlighter, language } = use(getFileViewerHighlighterPromise(requestedLanguage));
-  const highlightedHtml = useMemo(
-    () => highlighter.codeToHtml(props.contents, { lang: language, theme: themeName }),
-    [highlighter, language, props.contents, themeName],
+  const language = inferFileViewerLanguage(props.filePath) as SupportedLanguages;
+  const file = useMemo<FileContents>(
+    () => ({
+      name: props.filePath,
+      contents: props.contents,
+      lang: language,
+      cacheKey: buildPatchCacheKey(props.contents, `file:${props.filePath}:${themeName}`),
+    }),
+    [language, props.contents, props.filePath, themeName],
   );
-  const highlightedLines = useMemo(() => extractHighlightedLines(highlightedHtml), [highlightedHtml]);
+  const lineAnnotations = useMemo<Array<LineAnnotation<FileCommentAnnotation>>>(() => {
+    const commentsByLine = new Map<number, FilePanelComment[]>();
+    for (const comment of props.comments) {
+      const existing = commentsByLine.get(comment.line);
+      if (existing) {
+        existing.push(comment);
+      } else {
+        commentsByLine.set(comment.line, [comment]);
+      }
+    }
+
+    if (draftLine !== null && !commentsByLine.has(draftLine)) {
+      commentsByLine.set(draftLine, []);
+    }
+
+    return [...commentsByLine.entries()]
+      .toSorted(([leftLine], [rightLine]) => leftLine - rightLine)
+      .map(([lineNumber, comments]) => ({
+        lineNumber,
+        metadata: {
+          comments,
+          draft: draftLine === lineNumber,
+        },
+      }));
+  }, [draftLine, props.comments]);
 
   return (
-    <div className="h-full overflow-auto bg-background/80">
-      <div className="flex items-center justify-between border-b border-border/60 px-4 py-2 text-[11px] text-muted-foreground/70">
-        <span className="truncate">{props.filePath}</span>
-        <Button type="button" size="xs" variant="outline" onClick={props.onOpenInEditor}>
-          Open
-        </Button>
-      </div>
-      <div className="font-mono text-[12px] leading-5.5">
-        {lines.map((lineText, index) => {
-          const lineNumber = index + 1;
-          const lineComments = props.comments.filter((comment) => comment.line === lineNumber);
-          return (
-            <div key={`${lineNumber}:${lineText}`}>
-              <div className="group flex items-start gap-3 px-4 py-[1px] hover:bg-accent/10">
-                <div className="flex w-16 shrink-0 items-center gap-1 pt-[1px] text-right text-[11px] text-muted-foreground/50">
-                  <button
-                    type="button"
-                    className="opacity-0 transition-opacity group-hover:opacity-100 hover:text-foreground"
-                    onClick={() => {
-                      setDraftLine(lineNumber);
-                      setDraftText("");
-                    }}
-                    aria-label={`Comment on line ${lineNumber}`}
-                  >
-                    <MessageSquareIcon className="size-3" />
-                  </button>
-                  <span className={cn("tabular-nums", lineComments.length > 0 ? "text-foreground/75" : "")}>{lineNumber}</span>
-                </div>
-                <div
-                  className={cn(
-                    "file-viewer-shiki min-w-0 flex-1 py-0 font-mono text-[12px] leading-5.5",
-                    props.wrapLines ? "whitespace-pre-wrap break-words" : "whitespace-pre overflow-x-auto",
-                    props.theme === "dark" ? "text-foreground/88" : "text-foreground/84",
-                  )}
-                  dangerouslySetInnerHTML={{
-                    __html:
-                      highlightedLines[index] && highlightedLines[index].length > 0
-                        ? highlightedLines[index]
-                        : lineText.length > 0
-                          ? lineText
-                          : "&nbsp;",
-                  }}
-                />
-              </div>
-              {lineComments.map((comment) => (
-                <LineCommentCard
-                  key={comment.id}
-                  comment={comment}
-                  onSave={(text) => props.onUpdateComment(comment.id, text)}
-                  onDelete={() => props.onDeleteComment(comment.id)}
-                />
-              ))}
-              {draftLine === lineNumber ? (
-                <div className="px-20 pb-3 pr-4">
-                  <div className="rounded-md border border-border/60 bg-background/80 p-2">
-                    <textarea
-                      className="min-h-20 w-full resize-y bg-transparent text-[12px] text-foreground outline-none"
-                      placeholder="Local comment"
-                      value={draftText}
-                      onChange={(event) => setDraftText(event.target.value)}
-                    />
-                    <div className="mt-2 flex items-center justify-end gap-2">
-                      <Button type="button" size="xs" variant="ghost" onClick={() => setDraftLine(null)}>
-                        Cancel
-                      </Button>
-                      <Button
-                        type="button"
-                        size="xs"
-                        variant="outline"
-                        disabled={draftText.trim().length === 0}
-                        onClick={() => {
-                          props.onAddComment(lineNumber, draftText.trim());
-                          setDraftText("");
-                          setDraftLine(null);
-                        }}
-                      >
-                        Save
-                      </Button>
-                    </div>
-                  </div>
-                </div>
-              ) : null}
-            </div>
-          );
-        })}
-      </div>
+    <div className="h-full overflow-auto bg-background">
+      <PierreFile
+        file={file}
+        lineAnnotations={lineAnnotations}
+        options={{
+          disableFileHeader: true,
+          overflow: props.wrapLines ? "wrap" : "scroll",
+          preferredHighlighter: "shiki-js",
+          theme: themeName,
+          themeType: props.theme,
+          tokenizeMaxLineLength: 1_000,
+          unsafeCSS: PIERRE_FILE_VIEWER_UNSAFE_CSS,
+        }}
+        renderAnnotation={(annotation) => (
+          <FileLineAnnotation
+            annotation={annotation}
+            draftText={draftText}
+            onCancelDraft={() => setDraftLine(null)}
+            onChangeDraftText={setDraftText}
+            onDeleteComment={props.onDeleteComment}
+            onSaveComment={(lineNumber) => {
+              props.onAddComment(lineNumber, draftText.trim());
+              setDraftText("");
+              setDraftLine(null);
+            }}
+            onUpdateComment={props.onUpdateComment}
+          />
+        )}
+        renderGutterUtility={(getHoveredLine) => (
+          <button
+            type="button"
+            className="rounded-sm p-0.5 text-muted-foreground/70 hover:bg-accent hover:text-foreground"
+            aria-label="Comment on hovered line"
+            onClick={() => {
+              const hoveredLine = getHoveredLine();
+              if (!hoveredLine) {
+                return;
+              }
+              setDraftLine(hoveredLine.lineNumber);
+              setDraftText("");
+            }}
+          >
+            <MessageSquareIcon className="size-3" />
+          </button>
+        )}
+      />
+    </div>
+  );
+}
+
+function FileLineAnnotation(props: {
+  annotation: LineAnnotation<FileCommentAnnotation>;
+  draftText: string;
+  onCancelDraft: () => void;
+  onChangeDraftText: (value: string) => void;
+  onDeleteComment: (commentId: string) => void;
+  onSaveComment: (lineNumber: number) => void;
+  onUpdateComment: (commentId: string, text: string) => void;
+}) {
+  return (
+    <div className="px-20 pb-2 pr-4">
+      {props.annotation.metadata.comments.map((comment) => (
+        <LineCommentCard
+          key={comment.id}
+          comment={comment}
+          onSave={(text) => props.onUpdateComment(comment.id, text)}
+          onDelete={() => props.onDeleteComment(comment.id)}
+        />
+      ))}
+      {props.annotation.metadata.draft ? (
+        <div className="rounded-md border border-border/60 bg-background/80 p-2">
+          <textarea
+            className="min-h-20 w-full resize-y bg-transparent text-[12px] text-foreground outline-none"
+            placeholder="Local comment"
+            value={props.draftText}
+            onChange={(event) => props.onChangeDraftText(event.target.value)}
+          />
+          <div className="mt-2 flex items-center justify-end gap-2">
+            <Button type="button" size="xs" variant="ghost" onClick={props.onCancelDraft}>
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              disabled={props.draftText.trim().length === 0}
+              onClick={() => props.onSaveComment(props.annotation.lineNumber)}
+            >
+              Save
+            </Button>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -563,7 +600,7 @@ function LineCommentCard(props: {
   }, [props.comment.text]);
 
   return (
-    <div className="px-20 pb-2 pr-4">
+    <div className="pb-2">
       <div className="rounded-md border border-border/60 bg-background/70 p-2 text-[12px] text-muted-foreground/82">
         {editing ? (
           <>

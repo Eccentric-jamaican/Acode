@@ -82,6 +82,9 @@ const BROWSER_BACK_CHANNEL = "desktop:browser-back";
 const BROWSER_FORWARD_CHANNEL = "desktop:browser-forward";
 const BROWSER_RELOAD_CHANNEL = "desktop:browser-reload";
 const BROWSER_KILL_CHANNEL = "desktop:browser-kill";
+const BROWSER_GET_SETTINGS_CHANNEL = "desktop:browser-get-settings";
+const BROWSER_UPDATE_SETTINGS_CHANNEL = "desktop:browser-update-settings";
+const BROWSER_CLEAR_BROWSING_DATA_CHANNEL = "desktop:browser-clear-browsing-data";
 const BROWSER_SET_INSPECT_MODE_CHANNEL = "desktop:browser-set-inspect-mode";
 const BROWSER_CAPTURE_INSPECT_SELECTION_CHANNEL = "desktop:browser-capture-inspect-selection";
 const BROWSER_EVENT_CHANNEL = "desktop:browser-event";
@@ -157,6 +160,26 @@ let windowsRichToastDisabledForSession: string | null = null;
 let destructiveMenuIconCache: Electron.NativeImage | null | undefined;
 const browserRuntimeRegistry = new BrowserRuntimeRegistry({
   browserPreloadPath: Path.join(__dirname, "browserPreload.js"),
+  settingsPath: Path.join(STATE_DIR, "browser-use-settings.json"),
+  approveOpenUrl: async (url) => {
+    const owner = BrowserWindow.getFocusedWindow() ?? mainWindow;
+    return showDesktopConfirmDialog(
+      [`Open ${url} in the in-app browser?`, "You can change this in Settings > Browser use."].join(
+        "\n",
+      ),
+      owner,
+    );
+  },
+  approveHistoryAccess: async () => {
+    const owner = BrowserWindow.getFocusedWindow() ?? mainWindow;
+    return showDesktopConfirmDialog(
+      [
+        "Allow Codex to navigate browser history?",
+        "You can change this in Settings > Browser use.",
+      ].join("\n"),
+      owner,
+    );
+  },
 });
 const initialUpdateState = (): DesktopUpdateState => createInitialDesktopUpdateState(app.getVersion());
 
@@ -498,6 +521,33 @@ async function readRequestBody(request: Http.IncomingMessage): Promise<unknown> 
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
+function shouldRevealBrowserPaneForBridgeMethod(method: string): boolean {
+  switch (method) {
+    case "browser.ensure":
+    case "browser.show":
+    case "browser.new_tab":
+    case "browser.activate_tab":
+    case "browser.close_tab":
+    case "browser.list_tabs":
+    case "browser.navigate":
+    case "browser.back":
+    case "browser.forward":
+    case "browser.reload":
+    case "browser.snapshot":
+    case "browser.screenshot":
+    case "browser.wait_for":
+    case "browser.click":
+    case "browser.hover":
+    case "browser.fill":
+    case "browser.type_text":
+    case "browser.press_key":
+    case "browser.evaluate":
+      return true;
+    default:
+      return false;
+  }
+}
+
 async function handleBrowserBridgeRequest(body: unknown): Promise<unknown> {
   const record = asRecord(body);
   const method = record.method;
@@ -506,12 +556,17 @@ async function handleBrowserBridgeRequest(body: unknown): Promise<unknown> {
     throw new Error("method must be a non-empty string.");
   }
   const input = params === undefined ? {} : asRecord(params);
+  const revealedProjectId = shouldRevealBrowserPaneForBridgeMethod(method)
+    ? asProjectId(input.projectId)
+    : null;
+  if (revealedProjectId) {
+    await browserRuntimeRegistry.requestPane(revealedProjectId);
+  }
   switch (method) {
     case "browser.ensure":
-      return browserRuntimeRegistry.ensure(asProjectId(input.projectId));
+      return browserRuntimeRegistry.ensure(revealedProjectId ?? asProjectId(input.projectId));
     case "browser.show":
-      await browserRuntimeRegistry.requestPane(asProjectId(input.projectId));
-      return browserRuntimeRegistry.getState(asProjectId(input.projectId));
+      return browserRuntimeRegistry.getState(revealedProjectId ?? asProjectId(input.projectId));
     case "browser.kill":
       await browserRuntimeRegistry.kill(asProjectId(input.projectId));
       return {};
@@ -542,6 +597,17 @@ async function handleBrowserBridgeRequest(body: unknown): Promise<unknown> {
         throw new Error("url must be a non-empty string.");
       }
       return browserRuntimeRegistry.navigate(asProjectId(input.projectId), input.url);
+    case "browser.get_settings":
+      return browserRuntimeRegistry.getSettings();
+    case "browser.update_settings":
+      return browserRuntimeRegistry.updateSettings(input);
+    case "browser.clear_browsing_data":
+      return browserRuntimeRegistry.clearBrowsingData({
+        kind:
+          input.kind === "cookies" || input.kind === "cache" || input.kind === "siteData"
+            ? input.kind
+            : "all",
+      });
     case "browser.back":
       return browserRuntimeRegistry.back(asProjectId(input.projectId));
     case "browser.forward":
@@ -2121,6 +2187,25 @@ function registerIpcHandlers(): void {
   ipcMain.removeHandler(BROWSER_KILL_CHANNEL);
   ipcMain.handle(BROWSER_KILL_CHANNEL, async (_event, rawInput: unknown) => {
     await browserRuntimeRegistry.kill(asProjectId(asRecord(rawInput).projectId));
+  });
+
+  ipcMain.removeHandler(BROWSER_GET_SETTINGS_CHANNEL);
+  ipcMain.handle(BROWSER_GET_SETTINGS_CHANNEL, async () => browserRuntimeRegistry.getSettings());
+
+  ipcMain.removeHandler(BROWSER_UPDATE_SETTINGS_CHANNEL);
+  ipcMain.handle(BROWSER_UPDATE_SETTINGS_CHANNEL, async (_event, rawInput: unknown) =>
+    browserRuntimeRegistry.updateSettings(asRecord(rawInput)),
+  );
+
+  ipcMain.removeHandler(BROWSER_CLEAR_BROWSING_DATA_CHANNEL);
+  ipcMain.handle(BROWSER_CLEAR_BROWSING_DATA_CHANNEL, async (_event, rawInput: unknown) => {
+    const input = asRecord(rawInput);
+    await browserRuntimeRegistry.clearBrowsingData({
+      kind:
+        input.kind === "cookies" || input.kind === "cache" || input.kind === "siteData"
+          ? input.kind
+          : "all",
+    });
   });
 
   ipcMain.removeHandler(BROWSER_SET_INSPECT_MODE_CHANNEL);

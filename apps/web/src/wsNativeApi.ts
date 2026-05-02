@@ -243,8 +243,12 @@ export function createWsNativeApi(): NativeApi {
     projects: {
       searchEntries: (input) => transport.request(WS_METHODS.projectsSearchEntries, input),
       listDirectory: (input) => transport.request(WS_METHODS.projectsListDirectory, input),
+      listTree: (input) => transport.request(WS_METHODS.projectsListTree, input),
       readFile: (input) => transport.request(WS_METHODS.projectsReadFile, input),
       writeFile: (input) => transport.request(WS_METHODS.projectsWriteFile, input),
+      createDirectory: (input) => transport.request(WS_METHODS.projectsCreateDirectory, input),
+      renameEntry: (input) => transport.request(WS_METHODS.projectsRenameEntry, input),
+      deleteEntry: (input) => transport.request(WS_METHODS.projectsDeleteEntry, input),
     },
     shell: {
       openInEditor: (cwd, editor) =>
@@ -395,6 +399,24 @@ export function createWsNativeApi(): NativeApi {
           return desktopBrowserUnavailable();
         }
         return window.desktopBridge.browser.kill(input);
+      },
+      getSettings: async () => {
+        if (!window.desktopBridge?.browser) {
+          return desktopBrowserUnavailable();
+        }
+        return window.desktopBridge.browser.getSettings();
+      },
+      updateSettings: async (input) => {
+        if (!window.desktopBridge?.browser) {
+          return desktopBrowserUnavailable();
+        }
+        return window.desktopBridge.browser.updateSettings(input);
+      },
+      clearBrowsingData: async (input) => {
+        if (!window.desktopBridge?.browser) {
+          return desktopBrowserUnavailable();
+        }
+        return window.desktopBridge.browser.clearBrowsingData(input);
       },
       setInspectMode: async (input) => {
         if (!window.desktopBridge?.browser) {

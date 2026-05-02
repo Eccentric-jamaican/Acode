@@ -1,7 +1,7 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import * as Net from "node:net";
 import * as Path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import type {
   ChatAttachment,
@@ -28,6 +28,10 @@ const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 30_000;
 const OPENCODE_SERVER_READY_PREFIX = "opencode server listening";
 const PORT_POLL_INTERVAL_MS = 200;
 const DEFAULT_OPENCODE_BINARY_PATH = "opencode";
+
+function resolveBrowserUseClientPath(): string {
+  return fileURLToPath(new URL("../browserUseClient.mjs", import.meta.url));
+}
 
 const DEFAULT_OPENCODE_MODEL_CAPABILITIES: ModelCapabilities = {
   reasoningEffortLevels: [],
@@ -327,6 +331,7 @@ export async function startOpenCodeServerProcess(input: {
     env: {
       ...process.env,
       OPENCODE_CONFIG_CONTENT: JSON.stringify({}),
+      T3CODE_BROWSER_USE_CLIENT_PATH: resolveBrowserUseClientPath(),
     },
   });
 

@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import * as FS from "node:fs";
 import * as Path from "node:path";
 
 import type {
+  BrowserClearBrowsingDataInput,
   BrowserInspectCapture,
   BrowserNavigationState,
   BrowserPaneBounds,
@@ -10,11 +12,72 @@ import type {
   BrowserSessionSnapshot,
   BrowserSessionSummary,
   BrowserTabId,
+  BrowserUseSettings,
+  BrowserUseSettingsPatch,
   ProjectId,
 } from "@t3tools/contracts";
-import { BrowserWindow, WebContentsView } from "electron";
+import { BrowserWindow, session as electronSession, WebContentsView } from "electron";
 
 const INSPECT_OVERLAY_ID = "__t3_browser_inspect_overlay";
+const AGENT_CURSOR_ID = "__t3_browser_agent_cursor";
+const AGENT_CURSOR_SCRIPT = String.raw`
+(() => {
+  const cursorId = ${JSON.stringify(AGENT_CURSOR_ID)};
+  let cursor = document.getElementById(cursorId);
+  if (!(cursor instanceof HTMLElement)) {
+    cursor = document.createElement("div");
+    cursor.id = cursorId;
+    cursor.setAttribute("aria-hidden", "true");
+    cursor.style.position = "fixed";
+    cursor.style.left = "0px";
+    cursor.style.top = "0px";
+    cursor.style.width = "18px";
+    cursor.style.height = "18px";
+    cursor.style.pointerEvents = "none";
+    cursor.style.zIndex = "2147483647";
+    cursor.style.transform = "translate(-50%, -50%)";
+    cursor.style.transition = "left 90ms ease-out, top 90ms ease-out, opacity 80ms ease-out, scale 80ms ease-out";
+    cursor.style.opacity = "0";
+    cursor.style.borderRadius = "9999px";
+    cursor.style.background = "rgba(16, 185, 129, 0.28)";
+    cursor.style.border = "2px solid rgba(16, 185, 129, 0.98)";
+    cursor.style.boxShadow = "0 0 0 5px rgba(16, 185, 129, 0.16), 0 8px 18px rgba(0, 0, 0, 0.28)";
+
+    const dot = document.createElement("div");
+    dot.style.position = "absolute";
+    dot.style.left = "50%";
+    dot.style.top = "50%";
+    dot.style.width = "4px";
+    dot.style.height = "4px";
+    dot.style.borderRadius = "9999px";
+    dot.style.background = "white";
+    dot.style.transform = "translate(-50%, -50%)";
+    dot.style.boxShadow = "0 0 5px rgba(0, 0, 0, 0.35)";
+    cursor.appendChild(dot);
+    document.documentElement.appendChild(cursor);
+  }
+
+  const moveTo = (x, y, intent) => {
+    const safeX = Math.max(0, Math.min(window.innerWidth, Number(x) || 0));
+    const safeY = Math.max(0, Math.min(window.innerHeight, Number(y) || 0));
+    cursor.style.left = safeX + "px";
+    cursor.style.top = safeY + "px";
+    cursor.style.opacity = "1";
+    cursor.style.scale = intent === "click" ? "0.82" : "1";
+    window.clearTimeout(window.__t3BrowserAgentCursorScaleTimer);
+    window.__t3BrowserAgentCursorScaleTimer = window.setTimeout(() => {
+      cursor.style.scale = "1";
+    }, 90);
+    window.clearTimeout(window.__t3BrowserAgentCursorHideTimer);
+    window.__t3BrowserAgentCursorHideTimer = window.setTimeout(() => {
+      cursor.style.opacity = "0.52";
+    }, 1400);
+  };
+
+  window.__t3BrowserAgentCursor = { moveTo };
+  return true;
+})()
+`;
 const INSPECT_SCRIPT = String.raw`
 (() => {
   const host = window.__t3BrowserHost;
@@ -238,6 +301,14 @@ const WAIT_POLL_INTERVAL_MS = 100;
 const ATTACHED_BOUNDS_REAPPLY_DELAYS_MS = [0, 75, 200, 500] as const;
 const INTEGRATED_BROWSER_VIEWPORT_SELECTOR = '[data-integrated-browser-native-viewport="true"]';
 const DEFAULT_NEW_TAB_URL = "https://www.google.com";
+export const BROWSER_STORAGE_PARTITION = "persist:t3-browser-default";
+
+const DEFAULT_BROWSER_USE_SETTINGS: BrowserUseSettings = {
+  approvalPolicy: "alwaysAsk",
+  historyPolicy: "alwaysAsk",
+  blockedDomains: [],
+  allowedDomains: [],
+};
 
 interface BrowserTabRuntimeRecord {
   tabId: BrowserTabId;
@@ -393,26 +464,27 @@ async function capturePngDataUrl(
   return `data:image/png;base64,${image.toPNG().toString("base64")}`;
 }
 
-async function evaluateSelectorTarget<T>(
-  webContents: Electron.WebContents,
-  selector: string,
-  body: string,
-): Promise<T> {
-  const encodedSelector = JSON.stringify(selector);
-  return webContents.executeJavaScript(
-    `(async () => {
-      const element = document.querySelector(${encodedSelector});
+function selectorInteractionScript(selector: string, body: string): string {
+  return `(async () => {
+      ${AGENT_CURSOR_SCRIPT};
+      const element = document.querySelector(${JSON.stringify(selector)});
       if (!(element instanceof Element)) {
         throw new Error("Target element not found.");
       }
+      element.scrollIntoView({ block: "center", inline: "center" });
+      const rect = element.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      window.__t3BrowserAgentCursor?.moveTo(x, y, "move");
       ${body}
-    })()`,
-    true,
-  ) as Promise<T>;
+    })()`;
 }
 
 export interface BrowserRuntimeRegistryOptions {
   browserPreloadPath: string;
+  settingsPath?: string;
+  approveOpenUrl?: (url: string) => Promise<boolean>;
+  approveHistoryAccess?: () => Promise<boolean>;
 }
 
 export class BrowserRuntimeRegistry extends EventEmitter<{
@@ -420,6 +492,10 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
 }> {
   private readonly runtimes = new Map<ProjectId, BrowserProjectRuntimeRecord>();
   private readonly browserPreloadPath: string;
+  private readonly settingsPath: string | null;
+  private readonly approveOpenUrl: ((url: string) => Promise<boolean>) | null;
+  private readonly approveHistoryAccess: (() => Promise<boolean>) | null;
+  private settings: BrowserUseSettings = DEFAULT_BROWSER_USE_SETTINGS;
   private window: BrowserWindow | null = null;
   private attachedProjectId: ProjectId | null = null;
   private attachedTabId: BrowserTabId | null = null;
@@ -431,6 +507,10 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
   constructor(options: BrowserRuntimeRegistryOptions) {
     super();
     this.browserPreloadPath = options.browserPreloadPath;
+    this.settingsPath = options.settingsPath ?? null;
+    this.approveOpenUrl = options.approveOpenUrl ?? null;
+    this.approveHistoryAccess = options.approveHistoryAccess ?? null;
+    this.settings = this.readSettings();
   }
 
   setWindow(window: BrowserWindow | null): void {
@@ -545,6 +625,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
       typeof url === "string" && url.trim().length > 0
         ? this.normalizeUrl(url)
         : DEFAULT_NEW_TAB_URL;
+    await this.assertCanOpenUrl(initialUrl);
     await this.createTab(projectRuntime, { url: initialUrl, activate: true });
 
     if (this.window && this.paneOpen && this.paneProjectId === projectId && this.paneBounds) {
@@ -611,6 +692,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
   async navigate(projectId: ProjectId, url: string): Promise<BrowserSessionSnapshot> {
     const tab = await this.ensureActiveTab(projectId);
     const targetUrl = this.normalizeUrl(url);
+    await this.assertCanOpenUrl(targetUrl);
     await this.loadUrl(tab, targetUrl);
     tab.navigation = {
       ...tab.navigation,
@@ -624,6 +706,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
 
   async back(projectId: ProjectId): Promise<BrowserSessionSnapshot> {
     const tab = await this.ensureActiveTab(projectId);
+    await this.assertCanUseHistory();
     if (tab.view.webContents.navigationHistory.canGoBack()) {
       tab.view.webContents.navigationHistory.goBack();
     }
@@ -632,6 +715,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
 
   async forward(projectId: ProjectId): Promise<BrowserSessionSnapshot> {
     const tab = await this.ensureActiveTab(projectId);
+    await this.assertCanUseHistory();
     if (tab.view.webContents.navigationHistory.canGoForward()) {
       tab.view.webContents.navigationHistory.goForward();
     }
@@ -662,6 +746,41 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
       this.paneBounds = null;
     }
     this.emitStateUpdated(projectId);
+  }
+
+  async getSettings(): Promise<BrowserUseSettings> {
+    return this.settings;
+  }
+
+  async updateSettings(patch: BrowserUseSettingsPatch): Promise<BrowserUseSettings> {
+    this.settings = normalizeBrowserUseSettings({
+      ...this.settings,
+      ...patch,
+    });
+    this.writeSettings();
+    return this.settings;
+  }
+
+  async clearBrowsingData(input: BrowserClearBrowsingDataInput): Promise<void> {
+    const browserSession = electronSession.fromPartition(BROWSER_STORAGE_PARTITION);
+    switch (input.kind) {
+      case "cookies":
+        await browserSession.clearStorageData({ storages: ["cookies"] });
+        return;
+      case "cache":
+        await browserSession.clearCache();
+        await browserSession.clearStorageData({ storages: ["cachestorage"] });
+        return;
+      case "siteData":
+        await browserSession.clearStorageData({
+          storages: ["localstorage", "indexdb", "websql", "serviceworkers"],
+        });
+        return;
+      case "all":
+        await browserSession.clearCache();
+        await browserSession.clearStorageData();
+        return;
+    }
   }
 
   async setInspectMode(projectId: ProjectId, enabled: boolean): Promise<BrowserSessionSnapshot> {
@@ -783,67 +902,89 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
 
   async click(projectId: ProjectId, selector: string): Promise<void> {
     const tab = await this.ensureActiveTab(projectId);
-    await evaluateSelectorTarget<void>(
-      tab.view.webContents,
-      selector,
+    await tab.view.webContents.executeJavaScript(
+      selectorInteractionScript(
+        selector,
       `
-      element.scrollIntoView({ block: "center", inline: "center" });
-      element.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      window.__t3BrowserAgentCursor?.moveTo(x, y, "click");
+      element.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, clientX: x, clientY: y }));
+      element.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: x, clientY: y }));
+      element.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, clientX: x, clientY: y, button: 0 }));
+      element.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, clientX: x, clientY: y, button: 0 }));
       element.click();
       `,
+      ),
+      true,
     );
   }
 
   async hover(projectId: ProjectId, selector: string): Promise<void> {
     const tab = await this.ensureActiveTab(projectId);
-    await evaluateSelectorTarget<void>(
-      tab.view.webContents,
-      selector,
+    await tab.view.webContents.executeJavaScript(
+      selectorInteractionScript(
+        selector,
       `
-      element.scrollIntoView({ block: "center", inline: "center" });
-      element.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+      element.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, clientX: x, clientY: y }));
+      element.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: x, clientY: y }));
       `,
+      ),
+      true,
     );
   }
 
   async fill(projectId: ProjectId, input: { selector: string; value: string }): Promise<void> {
     const tab = await this.ensureActiveTab(projectId);
-    await evaluateSelectorTarget<void>(
-      tab.view.webContents,
-      input.selector,
+    await tab.view.webContents.executeJavaScript(
+      selectorInteractionScript(
+        input.selector,
       `
       if (!("value" in element)) {
         throw new Error("Target element does not support value assignment.");
       }
-      element.scrollIntoView({ block: "center", inline: "center" });
+      window.__t3BrowserAgentCursor?.moveTo(x, y, "click");
       element.focus();
       element.value = ${JSON.stringify(input.value)};
       element.dispatchEvent(new Event("input", { bubbles: true }));
       element.dispatchEvent(new Event("change", { bubbles: true }));
       `,
+      ),
+      true,
     );
   }
 
   async typeText(projectId: ProjectId, input: { selector: string; text: string }): Promise<void> {
     const tab = await this.ensureActiveTab(projectId);
-    await evaluateSelectorTarget<void>(
-      tab.view.webContents,
-      input.selector,
+    await tab.view.webContents.executeJavaScript(
+      selectorInteractionScript(
+        input.selector,
       `
       if (!("value" in element)) {
         throw new Error("Target element does not support text input.");
       }
-      element.scrollIntoView({ block: "center", inline: "center" });
+      window.__t3BrowserAgentCursor?.moveTo(x, y, "click");
       element.focus();
       element.value = (String(element.value ?? "") + ${JSON.stringify(input.text)});
       element.dispatchEvent(new Event("input", { bubbles: true }));
       element.dispatchEvent(new Event("change", { bubbles: true }));
       `,
+      ),
+      true,
     );
   }
 
   async pressKey(projectId: ProjectId, key: string): Promise<void> {
     const tab = await this.ensureActiveTab(projectId);
+    await tab.view.webContents.executeJavaScript(
+      `(async () => {
+        ${AGENT_CURSOR_SCRIPT};
+        const target = document.activeElement instanceof Element ? document.activeElement : document.body;
+        const rect = target?.getBoundingClientRect?.();
+        const x = rect ? rect.left + Math.min(rect.width / 2, 24) : window.innerWidth / 2;
+        const y = rect ? rect.top + Math.min(rect.height / 2, 18) : window.innerHeight / 2;
+        window.__t3BrowserAgentCursor?.moveTo(x, y, "click");
+      })()`,
+      true,
+    );
     tab.view.webContents.sendInputEvent({ type: "keyDown", keyCode: key });
     tab.view.webContents.sendInputEvent({ type: "char", keyCode: key });
     tab.view.webContents.sendInputEvent({ type: "keyUp", keyCode: key });
@@ -888,6 +1029,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
       tabOrder: [],
       activeTabId: null,
     };
+    await this.assertCanOpenUrl(DEFAULT_NEW_TAB_URL);
     this.runtimes.set(projectId, projectRuntime);
     await this.createTab(projectRuntime, { url: DEFAULT_NEW_TAB_URL, activate: true });
     return projectRuntime;
@@ -916,7 +1058,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     input: { url: string; activate: boolean },
   ): Promise<BrowserTabRuntimeRecord> {
     const tabId = randomUUID() as BrowserTabId;
-    const partition = `persist:t3-browser-${String(projectRuntime.projectId)}`;
+    const partition = BROWSER_STORAGE_PARTITION;
     const preloadPath = Path.resolve(this.browserPreloadPath);
     const view = new WebContentsView({
       webPreferences: {
@@ -1198,4 +1340,126 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     }
     return `https://${trimmed}`;
   }
+
+  private async assertCanOpenUrl(url: string): Promise<void> {
+    const hostname = hostnameFromUrl(url);
+    if (!hostname) {
+      return;
+    }
+    if (matchesDomainList(hostname, this.settings.blockedDomains)) {
+      throw new Error(`Browser access to '${hostname}' is blocked by settings.`);
+    }
+    if (matchesDomainList(hostname, this.settings.allowedDomains)) {
+      return;
+    }
+    switch (this.settings.approvalPolicy) {
+      case "allow":
+        return;
+      case "deny":
+        throw new Error("Browser opening is disabled by settings.");
+      case "alwaysAsk": {
+        if (!this.approveOpenUrl) {
+          return;
+        }
+        const approved = await this.approveOpenUrl(url);
+        if (!approved) {
+          throw new Error("Browser opening was not approved.");
+        }
+      }
+    }
+  }
+
+  private async assertCanUseHistory(): Promise<void> {
+    switch (this.settings.historyPolicy) {
+      case "allow":
+        return;
+      case "deny":
+        throw new Error("Browser history access is disabled by settings.");
+      case "alwaysAsk": {
+        if (!this.approveHistoryAccess) {
+          return;
+        }
+        const approved = await this.approveHistoryAccess();
+        if (!approved) {
+          throw new Error("Browser history access was not approved.");
+        }
+      }
+    }
+  }
+
+  private readSettings(): BrowserUseSettings {
+    if (!this.settingsPath) {
+      return DEFAULT_BROWSER_USE_SETTINGS;
+    }
+    try {
+      const raw = FS.readFileSync(this.settingsPath, "utf8");
+      return normalizeBrowserUseSettings(JSON.parse(raw) as Partial<BrowserUseSettings>);
+    } catch {
+      return DEFAULT_BROWSER_USE_SETTINGS;
+    }
+  }
+
+  private writeSettings(): void {
+    if (!this.settingsPath) {
+      return;
+    }
+    FS.mkdirSync(Path.dirname(this.settingsPath), { recursive: true });
+    FS.writeFileSync(this.settingsPath, `${JSON.stringify(this.settings, null, 2)}\n`, "utf8");
+  }
+}
+
+function normalizeBrowserUseSettings(input: {
+  approvalPolicy?: unknown;
+  historyPolicy?: unknown;
+  blockedDomains?: unknown;
+  allowedDomains?: unknown;
+}): BrowserUseSettings {
+  return {
+    approvalPolicy: normalizePolicy(input.approvalPolicy),
+    historyPolicy: normalizePolicy(input.historyPolicy),
+    blockedDomains: normalizeDomainList(input.blockedDomains),
+    allowedDomains: normalizeDomainList(input.allowedDomains),
+  };
+}
+
+function normalizePolicy(value: unknown): BrowserUseSettings["approvalPolicy"] {
+  return value === "allow" || value === "deny" || value === "alwaysAsk" ? value : "alwaysAsk";
+}
+
+function normalizeDomainList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const domains: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== "string") {
+      continue;
+    }
+    const normalized = entry
+      .trim()
+      .toLowerCase()
+      .replace(/^https?:\/\//, "")
+      .replace(/^www\./, "")
+      .split("/")[0]
+      ?.replace(/^\.+|\.+$/g, "");
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    domains.push(normalized);
+  }
+  return domains;
+}
+
+function hostnameFromUrl(url: string): string | null {
+  try {
+    return new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+  } catch {
+    return null;
+  }
+}
+
+function matchesDomainList(hostname: string, domains: readonly string[]): boolean {
+  return domains.some((domain) => hostname === domain || hostname.endsWith(`.${domain}`));
 }

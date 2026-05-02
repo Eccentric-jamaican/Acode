@@ -1,4 +1,4 @@
-import { ProjectId, ThreadId } from "@t3tools/contracts";
+import { ProjectId, ThreadId, type BrowserInspectCapture } from "@t3tools/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -45,6 +45,34 @@ function makePinnedSelection(
     plainTextStart: input.plainTextStart ?? 0,
     plainTextEnd: input.plainTextEnd ?? 12,
     createdAt: input.createdAt ?? "2026-03-10T12:00:00.000Z",
+  };
+}
+
+function makeInspectCapture(input: { id: string; tagName?: string }): {
+  id: string;
+  label: string;
+  capture: BrowserInspectCapture;
+} {
+  const tagName = input.tagName ?? "button";
+  return {
+    id: input.id,
+    label: tagName,
+    capture: {
+      sessionId: "browser-session-1",
+      projectId: ProjectId.makeUnsafe("project-inspect"),
+      url: "http://localhost:3000",
+      tagName,
+      selector: tagName,
+      ancestry: ["body", tagName],
+      textSummary: "Save changes",
+      accessibilitySummary: "button Save changes",
+      sourceUrl: null,
+      sourceLocation: null,
+      boundingBox: { x: 1, y: 2, width: 100, height: 40 },
+      computedStyle: { color: "rgb(255, 255, 255)" },
+      screenshotDataUrl: "data:image/png;base64,AA==",
+      capturedAt: "2026-03-10T12:00:00.000Z",
+    },
   };
 }
 
@@ -218,6 +246,35 @@ describe("composerDraftStore pinned selections", () => {
     ).toEqual(["pin-2"]);
 
     store.clearPinnedSelections(threadId);
+    expect(useComposerDraftStore.getState().draftsByThreadId[threadId]).toBeUndefined();
+  });
+});
+
+describe("composerDraftStore inspect captures", () => {
+  const threadId = ThreadId.makeUnsafe("thread-inspect");
+
+  beforeEach(() => {
+    useComposerDraftStore.setState({
+      draftsByThreadId: {},
+      draftThreadsByThreadId: {},
+      projectDraftThreadIdByProjectId: {},
+    });
+  });
+
+  it("stores inspect captures outside the visible prompt", () => {
+    const store = useComposerDraftStore.getState();
+    store.addInspectCapture(threadId, makeInspectCapture({ id: "inspect-1" }));
+
+    const draft = useComposerDraftStore.getState().draftsByThreadId[threadId];
+    expect(draft?.prompt).toBe("");
+    expect(draft?.inspectCaptures.map((capture) => capture.id)).toEqual(["inspect-1"]);
+  });
+
+  it("clears inspect captures with composer content", () => {
+    const store = useComposerDraftStore.getState();
+    store.addInspectCapture(threadId, makeInspectCapture({ id: "inspect-1" }));
+    store.clearComposerContent(threadId);
+
     expect(useComposerDraftStore.getState().draftsByThreadId[threadId]).toBeUndefined();
   });
 });

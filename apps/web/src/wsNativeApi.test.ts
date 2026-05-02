@@ -734,6 +734,19 @@ describe("wsNativeApi", () => {
       forward: vi.fn().mockResolvedValue({ session: null }),
       reload: vi.fn().mockResolvedValue({ session: null }),
       kill: vi.fn().mockResolvedValue(undefined),
+      getSettings: vi.fn().mockResolvedValue({
+        approvalPolicy: "alwaysAsk",
+        historyPolicy: "alwaysAsk",
+        blockedDomains: [],
+        allowedDomains: [],
+      }),
+      updateSettings: vi.fn().mockResolvedValue({
+        approvalPolicy: "allow",
+        historyPolicy: "alwaysAsk",
+        blockedDomains: [],
+        allowedDomains: [],
+      }),
+      clearBrowsingData: vi.fn().mockResolvedValue(undefined),
       setInspectMode: vi.fn().mockResolvedValue({ session: null }),
       captureInspectSelection: vi.fn().mockResolvedValue(null),
       onEvent: vi.fn().mockReturnValue(() => {}),
@@ -773,6 +786,9 @@ describe("wsNativeApi", () => {
       projectId: ProjectId.makeUnsafe("project-1"),
       enabled: true,
     });
+    await api.browser.getSettings();
+    await api.browser.updateSettings({ approvalPolicy: "allow" });
+    await api.browser.clearBrowsingData({ kind: "cookies" });
     const unsubscribe = api.browser.onEvent(vi.fn());
     await api.browser.closePane();
 
@@ -800,6 +816,9 @@ describe("wsNativeApi", () => {
       projectId: "project-1",
       enabled: true,
     });
+    expect(browserBridge.getSettings).toHaveBeenCalledTimes(1);
+    expect(browserBridge.updateSettings).toHaveBeenCalledWith({ approvalPolicy: "allow" });
+    expect(browserBridge.clearBrowsingData).toHaveBeenCalledWith({ kind: "cookies" });
     expect(browserBridge.onEvent).toHaveBeenCalledTimes(1);
     expect(browserBridge.closePane).toHaveBeenCalledTimes(1);
     expect(typeof unsubscribe).toBe("function");
