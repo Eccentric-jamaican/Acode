@@ -43,6 +43,32 @@ export const GitStatusInput = Schema.Struct({
 });
 export type GitStatusInput = typeof GitStatusInput.Type;
 
+export const GitDiffScope = Schema.Literals(["unstaged", "staged", "branch"]);
+export type GitDiffScope = typeof GitDiffScope.Type;
+
+export const GitReviewAction = Schema.Literals([
+  "stageAll",
+  "stagePath",
+  "unstageAll",
+  "unstagePath",
+  "revertUnstagedAll",
+  "revertUnstagedPath",
+]);
+export type GitReviewAction = typeof GitReviewAction.Type;
+
+export const GitDiffInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  scope: GitDiffScope,
+});
+export type GitDiffInput = typeof GitDiffInput.Type;
+
+export const GitReviewActionInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  action: GitReviewAction,
+  path: Schema.optional(TrimmedNonEmptyStringSchema),
+});
+export type GitReviewActionInput = typeof GitReviewActionInput.Type;
+
 export const GitPullInput = Schema.Struct({
   cwd: TrimmedNonEmptyStringSchema,
 });
@@ -131,6 +157,18 @@ export const GitStatusResult = Schema.Struct({
   pr: Schema.NullOr(GitStatusPr),
 });
 export type GitStatusResult = typeof GitStatusResult.Type;
+
+export const GitDiffResult = Schema.Struct({
+  scope: GitDiffScope,
+  patch: Schema.String,
+});
+export type GitDiffResult = typeof GitDiffResult.Type;
+
+export const GitReviewActionResult = Schema.Struct({
+  action: GitReviewAction,
+  status: Schema.Literal("applied"),
+});
+export type GitReviewActionResult = typeof GitReviewActionResult.Type;
 
 export const GitListBranchesResult = Schema.Struct({
   branches: Schema.Array(GitBranch),

@@ -21,9 +21,11 @@ import {
   GitCheckoutInput,
   GitCreateBranchInput,
   GitCreateWorktreeInput,
+  GitDiffInput,
   GitInitInput,
   GitListBranchesInput,
   GitPullInput,
+  GitReviewActionInput,
   GitRemoveWorktreeInput,
   GitRunStackedActionInput,
   GitStatusInput,
@@ -87,6 +89,8 @@ export const WS_METHODS = {
   // Git methods
   gitPull: "git.pull",
   gitStatus: "git.status",
+  gitDiff: "git.diff",
+  gitReviewAction: "git.reviewAction",
   gitRunStackedAction: "git.runStackedAction",
   gitClone: "git.clone",
   gitListBranches: "git.listBranches",
@@ -177,6 +181,8 @@ const WebSocketRequestBody = Schema.Union([
   // Git methods
   tagRequestBody(WS_METHODS.gitPull, GitPullInput),
   tagRequestBody(WS_METHODS.gitStatus, GitStatusInput),
+  tagRequestBody(WS_METHODS.gitDiff, GitDiffInput),
+  tagRequestBody(WS_METHODS.gitReviewAction, GitReviewActionInput),
   tagRequestBody(WS_METHODS.gitRunStackedAction, GitRunStackedActionInput),
   tagRequestBody(WS_METHODS.gitClone, GitCloneInput),
   tagRequestBody(WS_METHODS.gitListBranches, GitListBranchesInput),
@@ -256,6 +262,7 @@ export type WsResponse = typeof WsResponse.Type;
 
 export const WsWelcomePayload = Schema.Struct({
   cwd: TrimmedNonEmptyString,
+  homeDirectory: Schema.optional(TrimmedNonEmptyString),
   projectName: TrimmedNonEmptyString,
   bootstrapProjectId: Schema.optional(ProjectId),
   bootstrapThreadId: Schema.optional(ThreadId),

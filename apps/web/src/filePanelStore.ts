@@ -5,6 +5,7 @@ import { createJSONStorage, persist } from "zustand/middleware";
 export interface FilePanelComment {
   id: string;
   line: number;
+  side?: "additions" | "deletions" | undefined;
   text: string;
   createdAt: string;
   updatedAt: string;
@@ -12,7 +13,7 @@ export interface FilePanelComment {
 
 export interface FilePanelThreadState {
   openFiles: string[];
-  activeTab: { kind: "summary" } | { kind: "file"; path: string };
+  activeTab: { kind: "review" } | { kind: "file"; path: string };
   expandedDirectories: string[];
   plainViewMarkdownFiles: string[];
   noWrapCodeFiles: string[];
@@ -23,19 +24,26 @@ interface FilePanelStore {
   byThreadId: Record<string, FilePanelThreadState | undefined>;
   openFile: (threadId: ThreadId, path: string) => void;
   closeFile: (threadId: ThreadId, path: string) => void;
-  selectSummary: (threadId: ThreadId) => void;
+  selectReview: (threadId: ThreadId) => void;
   toggleDirectory: (threadId: ThreadId, path: string) => void;
   toggleMarkdownRichView: (threadId: ThreadId, filePath: string) => void;
   toggleCodeWordWrap: (threadId: ThreadId, filePath: string) => void;
-  addComment: (threadId: ThreadId, filePath: string, line: number, text: string) => void;
+  addComment: (
+    threadId: ThreadId,
+    filePath: string,
+    line: number,
+    text: string,
+    side?: FilePanelComment["side"],
+  ) => void;
   updateComment: (threadId: ThreadId, filePath: string, commentId: string, text: string) => void;
   deleteComment: (threadId: ThreadId, filePath: string, commentId: string) => void;
+  clearComments: (threadId: ThreadId) => void;
 }
 
 const FILE_PANEL_STORAGE_KEY = "t3code:file-panel-state:v2";
 const DEFAULT_FILE_PANEL_THREAD_STATE: FilePanelThreadState = {
   openFiles: [],
-  activeTab: { kind: "summary" },
+  activeTab: { kind: "review" },
   expandedDirectories: [],
   plainViewMarkdownFiles: [],
   noWrapCodeFiles: [],
@@ -45,7 +53,7 @@ const DEFAULT_FILE_PANEL_THREAD_STATE: FilePanelThreadState = {
 function createDefaultThreadState(): FilePanelThreadState {
   return {
     openFiles: [],
-    activeTab: { kind: "summary" },
+    activeTab: { kind: "review" },
     expandedDirectories: [],
     plainViewMarkdownFiles: [],
     noWrapCodeFiles: [],
@@ -65,7 +73,7 @@ function normalizeFilePanelThreadState(
     activeTab:
       threadState.activeTab?.kind === "file" && typeof threadState.activeTab.path === "string"
         ? { kind: "file", path: threadState.activeTab.path }
-        : { kind: "summary" },
+        : { kind: "review" },
     expandedDirectories: Array.isArray(threadState.expandedDirectories)
       ? threadState.expandedDirectories
       : [],
@@ -143,7 +151,7 @@ export const useFilePanelStore = create<FilePanelStore>()(
               threadState.activeTab.kind === "file" && threadState.activeTab.path === path
                 ? openFiles[0]
                   ? { kind: "file" as const, path: openFiles[0] }
-                  : { kind: "summary" as const }
+                  : { kind: "review" as const }
                 : threadState.activeTab;
             return {
               ...threadState,
@@ -152,14 +160,14 @@ export const useFilePanelStore = create<FilePanelStore>()(
             };
           }),
         })),
-      selectSummary: (threadId) =>
+      selectReview: (threadId) =>
         set((state) => ({
           byThreadId: nextThreadState(state.byThreadId, threadId, (threadState) =>
-            threadState.activeTab.kind === "summary"
+            threadState.activeTab.kind === "review"
               ? threadState
               : {
                   ...threadState,
-                  activeTab: { kind: "summary" },
+                  activeTab: { kind: "review" },
                 },
           ),
         })),
@@ -199,7 +207,7 @@ export const useFilePanelStore = create<FilePanelStore>()(
             };
           }),
         })),
-      addComment: (threadId, filePath, line, text) =>
+      addComment: (threadId, filePath, line, text, side) =>
         set((state) => ({
           byThreadId: nextThreadState(state.byThreadId, threadId, (threadState) => {
             const now = new Date().toISOString();
@@ -213,6 +221,7 @@ export const useFilePanelStore = create<FilePanelStore>()(
                   {
                     id: crypto.randomUUID(),
                     line,
+                    ...(side ? { side } : {}),
                     text,
                     createdAt: now,
                     updatedAt: now,
@@ -262,6 +271,17 @@ export const useFilePanelStore = create<FilePanelStore>()(
               },
             };
           }),
+        })),
+      clearComments: (threadId) =>
+        set((state) => ({
+          byThreadId: nextThreadState(state.byThreadId, threadId, (threadState) =>
+            Object.keys(threadState.commentsByFilePath).length === 0
+              ? threadState
+              : {
+                  ...threadState,
+                  commentsByFilePath: {},
+                },
+          ),
         })),
     }),
     {

@@ -7,6 +7,7 @@
  * @module Server
  */
 import http from "node:http";
+import * as OS from "node:os";
 import type { Duplex } from "node:stream";
 
 import Mime from "@effect/platform-node/Mime";
@@ -320,26 +321,27 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     autoBootstrapProjectFromCwd,
   } = serverConfig;
   const availableEditors = resolveAvailableEditors();
+  const homeDirectory = OS.homedir();
 
   const gitManager = yield* GitManager;
   const terminalManager = yield* TerminalManager;
   const keybindingsManager = yield* Keybindings;
   const providerHealth = yield* ProviderHealth;
   const providerDiscovery = yield* ProviderDiscoveryService;
-  const providerRegistry =
-    Option.getOrUndefined(yield* Effect.serviceOption(ProviderRegistry)) ?? {
-      getProviders: providerHealth.getStatuses,
-      refresh: () => providerHealth.getStatuses,
-      streamChanges: Stream.empty,
-    };
+  const providerRegistry = Option.getOrUndefined(yield* Effect.serviceOption(ProviderRegistry)) ?? {
+    getProviders: providerHealth.getStatuses,
+    refresh: () => providerHealth.getStatuses,
+    streamChanges: Stream.empty,
+  };
   const codexAccountService = yield* CodexAccountService;
   const codexAdapter = yield* CodexAdapter;
-  const serverSettings =
-    Option.getOrUndefined(yield* Effect.serviceOption(ServerSettingsService)) ?? {
-      getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
-      updateSettings: () => Effect.succeed(DEFAULT_SERVER_SETTINGS),
-      streamChanges: Stream.empty,
-    };
+  const serverSettings = Option.getOrUndefined(
+    yield* Effect.serviceOption(ServerSettingsService),
+  ) ?? {
+    getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+    updateSettings: () => Effect.succeed(DEFAULT_SERVER_SETTINGS),
+    streamChanges: Stream.empty,
+  };
   const git = yield* GitCore;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -532,7 +534,9 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
               })) as ReadonlyArray<PersistedChatAttachment> | undefined;
               return {
                 ...message,
-                ...(normalizedAttachments !== undefined ? { attachments: normalizedAttachments } : {}),
+                ...(normalizedAttachments !== undefined
+                  ? { attachments: normalizedAttachments }
+                  : {}),
               };
             }),
           { concurrency: 1 },
@@ -939,10 +943,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
             orchestrationEngine.dispatch(normalizedCommand),
           );
 
-          if (
-            thread?.session &&
-            thread.session.status !== "stopped"
-          ) {
+          if (thread?.session && thread.session.status !== "stopped") {
             yield* startup
               .enqueueCommand(
                 orchestrationEngine.dispatch({
@@ -1054,14 +1055,16 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
           relativePath: body.relativePath,
           path,
         });
-        yield* fileSystem.makeDirectory(path.dirname(target.absolutePath), { recursive: true }).pipe(
-          Effect.mapError(
-            (cause) =>
-              new RouteRequestError({
-                message: `Failed to prepare workspace path: ${String(cause)}`,
-              }),
-          ),
-        );
+        yield* fileSystem
+          .makeDirectory(path.dirname(target.absolutePath), { recursive: true })
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new RouteRequestError({
+                  message: `Failed to prepare workspace path: ${String(cause)}`,
+                }),
+            ),
+          );
         yield* fileSystem.writeFileString(target.absolutePath, body.contents).pipe(
           Effect.mapError(
             (cause) =>
@@ -1115,6 +1118,16 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       case WS_METHODS.gitStatus: {
         const body = stripRequestTag(request.body);
         return yield* gitManager.status(body);
+      }
+
+      case WS_METHODS.gitDiff: {
+        const body = stripRequestTag(request.body);
+        return yield* gitManager.diff(body);
+      }
+
+      case WS_METHODS.gitReviewAction: {
+        const body = stripRequestTag(request.body);
+        return yield* gitManager.reviewAction(body);
       }
 
       case WS_METHODS.gitPull: {
@@ -1198,6 +1211,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         const settings = yield* serverSettings.getSettings;
         return {
           cwd,
+          homeDirectory,
           keybindingsConfigPath,
           keybindings: keybindingsConfig.keybindings,
           issues: keybindingsConfig.issues,
@@ -1450,6 +1464,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       channel: WS_CHANNELS.serverWelcome,
       data: {
         cwd,
+        homeDirectory,
         projectName,
         ...(welcomeBootstrapProjectId ? { bootstrapProjectId: welcomeBootstrapProjectId } : {}),
         ...(welcomeBootstrapThreadId ? { bootstrapThreadId: welcomeBootstrapThreadId } : {}),
@@ -1463,16 +1478,18 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         handleMessage(ws, raw).pipe(
           Effect.catch((error) =>
             Effect.gen(function* () {
-              yield* errorInbox.capture({
-                source: "server-internal",
-                category: "websocket",
-                severity: "error",
-                summary: "WebSocket message handler failed",
-                detail: error instanceof Error ? error.message : String(error),
-                context: {
-                  error,
-                },
-              }).pipe(Effect.catch(() => Effect.void));
+              yield* errorInbox
+                .capture({
+                  source: "server-internal",
+                  category: "websocket",
+                  severity: "error",
+                  summary: "WebSocket message handler failed",
+                  detail: error instanceof Error ? error.message : String(error),
+                  context: {
+                    error,
+                  },
+                })
+                .pipe(Effect.catch(() => Effect.void));
               yield* Effect.logError("Error handling message", error);
             }),
           ),

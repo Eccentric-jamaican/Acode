@@ -58,14 +58,16 @@ export const ServerProviderStatus = Schema.Struct({
   authStatus: ServerProviderAuthStatus,
   checkedAt: IsoDateTime,
   message: Schema.optional(TrimmedNonEmptyString),
-  models: Schema.optional(Schema.Array(
-    Schema.Struct({
-      slug: TrimmedNonEmptyString,
-      name: TrimmedNonEmptyString,
-      isCustom: Schema.Boolean,
-      capabilities: Schema.NullOr(ModelCapabilities),
-    }),
-  )),
+  models: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        slug: TrimmedNonEmptyString,
+        name: TrimmedNonEmptyString,
+        isCustom: Schema.Boolean,
+        capabilities: Schema.NullOr(ModelCapabilities),
+      }),
+    ),
+  ),
 });
 export type ServerProviderStatus = typeof ServerProviderStatus.Type;
 
@@ -152,6 +154,7 @@ const ServerProviderAccounts = Schema.Array(ServerProviderAccountSummary);
 
 export const ServerConfig = Schema.Struct({
   cwd: TrimmedNonEmptyString,
+  homeDirectory: Schema.optional(TrimmedNonEmptyString),
   keybindingsConfigPath: TrimmedNonEmptyString,
   keybindings: ResolvedKeybindingsConfig,
   issues: ServerConfigIssues,
@@ -226,8 +229,7 @@ export type ServerSuggestNewThreadTasksInput = typeof ServerSuggestNewThreadTask
 export const ServerSuggestNewThreadTasksResult = Schema.Struct({
   suggestions: Schema.Array(ServerNewThreadSuggestionCandidate),
 });
-export type ServerSuggestNewThreadTasksResult =
-  typeof ServerSuggestNewThreadTasksResult.Type;
+export type ServerSuggestNewThreadTasksResult = typeof ServerSuggestNewThreadTasksResult.Type;
 
 export const ServerUpsertKeybindingResult = Schema.Struct({
   keybindings: ResolvedKeybindingsConfig,

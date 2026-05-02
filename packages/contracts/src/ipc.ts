@@ -5,11 +5,15 @@ import type {
   GitCreateBranchInput,
   GitCreateWorktreeInput,
   GitCreateWorktreeResult,
+  GitDiffInput,
+  GitDiffResult,
   GitInitInput,
   GitListBranchesInput,
   GitListBranchesResult,
   GitPullInput,
   GitPullResult,
+  GitReviewActionInput,
+  GitReviewActionResult,
   GitRemoveWorktreeInput,
   GitRunStackedActionInput,
   GitRunStackedActionResult,
@@ -318,6 +322,8 @@ export interface NativeApi {
     // Stacked action API
     pull: (input: GitPullInput) => Promise<GitPullResult>;
     status: (input: GitStatusInput) => Promise<GitStatusResult>;
+    diff: (input: GitDiffInput) => Promise<GitDiffResult>;
+    reviewAction: (input: GitReviewActionInput) => Promise<GitReviewActionResult>;
     runStackedAction: (input: GitRunStackedActionInput) => Promise<GitRunStackedActionResult>;
   };
   contextMenu: {

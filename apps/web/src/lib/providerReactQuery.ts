@@ -12,6 +12,7 @@ interface CheckpointDiffQueryInput {
   fromTurnCount: number | null;
   toTurnCount: number | null;
   cacheScope?: string | null;
+  enabled?: boolean;
 }
 
 export const providerQueryKeys = {
@@ -76,7 +77,7 @@ export function checkpointDiffQueryOptions(input: CheckpointDiffQueryInput) {
       }
       return api.orchestration.getTurnDiff(decodedRequest.value.input);
     },
-    enabled: !!input.threadId && decodedRequest._tag === "Some",
+    enabled: input.enabled !== false && !!input.threadId && decodedRequest._tag === "Some",
     staleTime: Infinity,
     retry: (failureCount, error) => {
       if (isCheckpointTemporarilyUnavailable(error)) {

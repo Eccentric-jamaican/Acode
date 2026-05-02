@@ -904,6 +904,62 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     TEST_TIMEOUT_MS,
   );
 
+  it.effect("reads branch review diff against the resolved base branch", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/review-branch"]);
+      const fileSystem = yield* FileSystem.FileSystem;
+      yield* fileSystem.writeFileString(path.join(repoDir, "branch.txt"), "committed branch\n");
+      yield* runGit(repoDir, ["add", "branch.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "branch review change"]);
+      yield* fileSystem.writeFileString(path.join(repoDir, "README.md"), "hello\nunstaged branch\n");
+
+      const { manager } = yield* makeManager({ ghScenario: { defaultBranch: "main" } });
+      const branchDiff = yield* manager.diff({ cwd: repoDir, scope: "branch" });
+
+      expect(branchDiff.scope).toBe("branch");
+      expect(branchDiff.patch).toContain("branch.txt");
+      expect(branchDiff.patch).toContain("committed branch");
+      expect(branchDiff.patch).toContain("README.md");
+      expect(branchDiff.patch).toContain("unstaged branch");
+    }),
+    TEST_TIMEOUT_MS,
+  );
+
+  it.effect("branch review diff shows working-tree changes on the base branch", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const fileSystem = yield* FileSystem.FileSystem;
+      yield* fileSystem.writeFileString(path.join(repoDir, "README.md"), "hello\nworking tree\n");
+
+      const { manager } = yield* makeManager({ ghScenario: { defaultBranch: "main" } });
+      const branchDiff = yield* manager.diff({ cwd: repoDir, scope: "branch" });
+
+      expect(branchDiff.scope).toBe("branch");
+      expect(branchDiff.patch).toContain("README.md");
+      expect(branchDiff.patch).toContain("working tree");
+    }),
+    TEST_TIMEOUT_MS,
+  );
+
+  it.effect("rejects branch review diff from detached HEAD", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "--detach", "HEAD"]);
+
+      const { manager } = yield* makeManager();
+      const errorMessage = yield* manager.diff({ cwd: repoDir, scope: "branch" }).pipe(
+        Effect.flip,
+        Effect.map((error) => error.message),
+      );
+      expect(errorMessage).toContain("detached HEAD");
+    }),
+    TEST_TIMEOUT_MS,
+  );
+
   it.effect("surfaces missing gh binary errors", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");

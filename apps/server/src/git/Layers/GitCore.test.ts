@@ -116,11 +116,14 @@ const makeIsolatedGitCore = (gitService: GitServiceShape) =>
     return {
       status: (input) => core.status(input),
       statusDetails: (cwd) => core.statusDetails(cwd),
+      diff: (input) => core.diff(input),
+      reviewAction: (input) => core.reviewAction(input),
       prepareCommitContext: (cwd) => core.prepareCommitContext(cwd),
       commit: (cwd, subject, body) => core.commit(cwd, subject, body),
       pushCurrentBranch: (cwd, fallbackBranch) => core.pushCurrentBranch(cwd, fallbackBranch),
       pullCurrentBranch: (cwd) => core.pullCurrentBranch(cwd),
       readRangeContext: (cwd, baseBranch) => core.readRangeContext(cwd, baseBranch),
+      readBranchReviewPatch: (cwd, baseBranch) => core.readBranchReviewPatch(cwd, baseBranch),
       readConfigValue: (cwd, key) => core.readConfigValue(cwd, key),
       cloneRepo: (input) => core.cloneRepo(input),
       listBranches: (input) => core.listBranches(input),
@@ -1310,6 +1313,154 @@ it.layer(TestLayer)("git integration", (it) => {
         yield* writeTextFile(path.join(tmp, "README.md"), "updated\n");
         const dirty = yield* core.statusDetails(tmp);
         expect(dirty.hasWorkingTreeChanges).toBe(true);
+      }),
+    );
+
+    it.effect("reads staged and unstaged review patches", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const core = yield* GitCore;
+
+        yield* writeTextFile(path.join(tmp, "README.md"), "# test\n\nunstaged\n");
+        const unstaged = yield* core.diff({ cwd: tmp, scope: "unstaged" });
+        expect(unstaged.scope).toBe("unstaged");
+        expect(unstaged.patch).toContain("unstaged");
+
+        yield* git(tmp, ["add", "README.md"]);
+        const staged = yield* core.diff({ cwd: tmp, scope: "staged" });
+        expect(staged.scope).toBe("staged");
+        expect(staged.patch).toContain("unstaged");
+      }),
+    );
+
+    it.effect("applies review stage and unstage actions", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const core = yield* GitCore;
+
+        yield* writeTextFile(path.join(tmp, "README.md"), "# test\n\nchanged\n");
+        const staged = yield* core.reviewAction({ cwd: tmp, action: "stageAll" });
+        expect(staged.status).toBe("applied");
+        expect((yield* core.diff({ cwd: tmp, scope: "staged" })).patch).toContain("changed");
+
+        const unstaged = yield* core.reviewAction({ cwd: tmp, action: "unstageAll" });
+        expect(unstaged.status).toBe("applied");
+        expect((yield* core.diff({ cwd: tmp, scope: "staged" })).patch).toBe("");
+        expect((yield* core.diff({ cwd: tmp, scope: "unstaged" })).patch).toContain("changed");
+      }),
+    );
+
+    it.effect("stages new, modified, and deleted files for review", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const core = yield* GitCore;
+
+        yield* writeTextFile(path.join(tmp, "delete-me.txt"), "delete me\n");
+        yield* git(tmp, ["add", "delete-me.txt"]);
+        yield* git(tmp, ["commit", "-m", "add delete fixture"]);
+        yield* writeTextFile(path.join(tmp, "README.md"), "# test\n\nmodified\n");
+        yield* writeTextFile(path.join(tmp, "new-file.txt"), "new file\n");
+        yield* git(tmp, ["rm", "delete-me.txt"]);
+
+        yield* core.reviewAction({ cwd: tmp, action: "stageAll" });
+        const stagedPatch = (yield* core.diff({ cwd: tmp, scope: "staged" })).patch;
+        expect(stagedPatch).toContain("deleted file mode");
+        expect(stagedPatch).toContain("modified");
+        expect(stagedPatch).toContain("new-file.txt");
+        expect((yield* core.diff({ cwd: tmp, scope: "unstaged" })).patch).toBe("");
+      }),
+    );
+
+    it.effect("applies review actions to a single path", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const core = yield* GitCore;
+
+        yield* writeTextFile(path.join(tmp, "README.md"), "# test\n\nfirst\n");
+        yield* writeTextFile(path.join(tmp, "second.txt"), "second\n");
+        yield* git(tmp, ["add", "second.txt"]);
+        yield* git(tmp, ["commit", "-m", "add second fixture"]);
+        yield* writeTextFile(path.join(tmp, "second.txt"), "second changed\n");
+
+        yield* core.reviewAction({ cwd: tmp, action: "stagePath", path: "README.md" });
+        const stagedPatch = (yield* core.diff({ cwd: tmp, scope: "staged" })).patch;
+        expect(stagedPatch).toContain("README.md");
+        expect(stagedPatch).not.toContain("second.txt");
+
+        yield* core.reviewAction({ cwd: tmp, action: "revertUnstagedPath", path: "second.txt" });
+        expect((yield* core.diff({ cwd: tmp, scope: "unstaged" })).patch).toBe("");
+
+        yield* core.reviewAction({ cwd: tmp, action: "unstagePath", path: "README.md" });
+        expect((yield* core.diff({ cwd: tmp, scope: "staged" })).patch).toBe("");
+        expect((yield* core.diff({ cwd: tmp, scope: "unstaged" })).patch).toContain("README.md");
+      }),
+    );
+
+    it.effect("unstages new files without deleting them from the worktree", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const core = yield* GitCore;
+        const newFilePath = path.join(tmp, "new-file.txt");
+
+        yield* writeTextFile(newFilePath, "new file\n");
+        yield* core.reviewAction({ cwd: tmp, action: "stageAll" });
+        expect((yield* core.diff({ cwd: tmp, scope: "staged" })).patch).toContain("new-file.txt");
+
+        yield* core.reviewAction({ cwd: tmp, action: "unstageAll" });
+        expect((yield* core.diff({ cwd: tmp, scope: "staged" })).patch).toBe("");
+        expect(existsSync(newFilePath)).toBe(true);
+      }),
+    );
+
+    it.effect("reverts unstaged tracked changes", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const core = yield* GitCore;
+
+        yield* writeTextFile(path.join(tmp, "README.md"), "# test\n\nchanged\n");
+        const reverted = yield* core.reviewAction({ cwd: tmp, action: "revertUnstagedAll" });
+        expect(reverted.status).toBe("applied");
+        expect((yield* core.diff({ cwd: tmp, scope: "unstaged" })).patch).toBe("");
+      }),
+    );
+
+    it.effect("reverts only unstaged tracked changes and preserves staged changes", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const core = yield* GitCore;
+
+        yield* writeTextFile(path.join(tmp, "README.md"), "# test\n\nstaged\n");
+        yield* git(tmp, ["add", "README.md"]);
+        yield* writeTextFile(path.join(tmp, "README.md"), "# test\n\nstaged\n\nunstaged\n");
+
+        yield* core.reviewAction({ cwd: tmp, action: "revertUnstagedAll" });
+        const stagedPatch = (yield* core.diff({ cwd: tmp, scope: "staged" })).patch;
+        expect(stagedPatch).toContain("staged");
+        expect(stagedPatch).not.toContain("unstaged");
+        expect((yield* core.diff({ cwd: tmp, scope: "unstaged" })).patch).toBe("");
+      }),
+    );
+
+    it.effect("does not delete untracked files when reverting unstaged changes", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const core = yield* GitCore;
+        const untrackedPath = path.join(tmp, "scratch.txt");
+
+        yield* writeTextFile(path.join(tmp, "README.md"), "# test\n\nchanged\n");
+        yield* writeTextFile(untrackedPath, "scratch\n");
+        yield* core.reviewAction({ cwd: tmp, action: "revertUnstagedAll" });
+
+        expect((yield* core.diff({ cwd: tmp, scope: "unstaged" })).patch).toBe("");
+        expect(existsSync(untrackedPath)).toBe(true);
       }),
     );
 

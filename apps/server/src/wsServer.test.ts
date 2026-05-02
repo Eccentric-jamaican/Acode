@@ -674,6 +674,7 @@ describe("WebSocket Server", () => {
     expect(message.channel).toBe(WS_CHANNELS.serverWelcome);
     expect(message.data).toEqual({
       cwd: "/test/project",
+      homeDirectory: expect.any(String),
       projectName: "project",
     });
   });
@@ -961,6 +962,7 @@ describe("WebSocket Server", () => {
     expect(response.error).toBeUndefined();
     expect(response.result).toEqual({
       cwd: "/my/workspace",
+      homeDirectory: expect.any(String),
       keybindingsConfigPath: keybindingsPath,
       keybindings: DEFAULT_RESOLVED_KEYBINDINGS,
       issues: [],
@@ -989,6 +991,7 @@ describe("WebSocket Server", () => {
     expect(response.error).toBeUndefined();
     expect(response.result).toEqual({
       cwd: "/my/workspace",
+      homeDirectory: expect.any(String),
       keybindingsConfigPath: keybindingsPath,
       keybindings: DEFAULT_RESOLVED_KEYBINDINGS,
       issues: [],
@@ -1022,6 +1025,7 @@ describe("WebSocket Server", () => {
     expect(response.error).toBeUndefined();
     expect(response.result).toEqual({
       cwd: "/my/workspace",
+      homeDirectory: expect.any(String),
       keybindingsConfigPath: keybindingsPath,
       keybindings: DEFAULT_RESOLVED_KEYBINDINGS,
       issues: [
@@ -1300,6 +1304,7 @@ describe("WebSocket Server", () => {
     ) as KeybindingsConfig;
     expect(response.result).toEqual({
       cwd: "/my/workspace",
+      homeDirectory: expect.any(String),
       keybindingsConfigPath: keybindingsPath,
       keybindings: compileKeybindings(persistedConfig),
       issues: [],
@@ -1350,6 +1355,7 @@ describe("WebSocket Server", () => {
     expect(configResponse.error).toBeUndefined();
     expect(configResponse.result).toEqual({
       cwd: "/my/workspace",
+      homeDirectory: expect.any(String),
       keybindingsConfigPath: keybindingsPath,
       keybindings: compileKeybindings(persistedConfig),
       issues: [],
@@ -1975,8 +1981,12 @@ describe("WebSocket Server", () => {
     };
 
     const status = vi.fn(() => Effect.succeed(statusResult));
+    const diff = vi.fn(() => Effect.succeed({ scope: "unstaged" as const, patch: "" }));
+    const reviewAction = vi.fn(() =>
+      Effect.succeed({ action: "stageAll" as const, status: "applied" as const }),
+    );
     const runStackedAction = vi.fn(() => Effect.void as any);
-    const gitManager: GitManagerShape = { status, runStackedAction };
+    const gitManager: GitManagerShape = { status, diff, reviewAction, runStackedAction };
 
     server = await createTestServer({ cwd: "/test", gitManager });
     const addr = server.address();
@@ -1994,6 +2004,64 @@ describe("WebSocket Server", () => {
     expect(status).toHaveBeenCalledWith({ cwd: "/test" });
   });
 
+  it("supports git.diff over websocket", async () => {
+    const diffResult = {
+      scope: "unstaged" as const,
+      patch: "diff --git a/src/index.ts b/src/index.ts\n",
+    };
+    const status = vi.fn(() => Effect.void as any);
+    const diff = vi.fn(() => Effect.succeed(diffResult));
+    const reviewAction = vi.fn(() =>
+      Effect.succeed({ action: "stageAll" as const, status: "applied" as const }),
+    );
+    const runStackedAction = vi.fn(() => Effect.void as any);
+    const gitManager: GitManagerShape = { status, diff, reviewAction, runStackedAction };
+
+    server = await createTestServer({ cwd: "/test", gitManager });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+    const ws = await connectWs(port);
+    connections.push(ws);
+    await waitForMessage(ws);
+
+    const response = await sendRequest(ws, WS_METHODS.gitDiff, {
+      cwd: "/test",
+      scope: "unstaged",
+    });
+    expect(response.error).toBeUndefined();
+    expect(response.result).toEqual(diffResult);
+    expect(diff).toHaveBeenCalledWith({ cwd: "/test", scope: "unstaged" });
+  });
+
+  it("supports git.reviewAction over websocket", async () => {
+    const reviewActionResult = {
+      action: "stageAll" as const,
+      status: "applied" as const,
+    };
+    const status = vi.fn(() => Effect.void as any);
+    const diff = vi.fn(() => Effect.succeed({ scope: "unstaged" as const, patch: "" }));
+    const reviewAction = vi.fn(() => Effect.succeed(reviewActionResult));
+    const runStackedAction = vi.fn(() => Effect.void as any);
+    const gitManager: GitManagerShape = { status, diff, reviewAction, runStackedAction };
+
+    server = await createTestServer({ cwd: "/test", gitManager });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+    const ws = await connectWs(port);
+    connections.push(ws);
+    await waitForMessage(ws);
+
+    const response = await sendRequest(ws, WS_METHODS.gitReviewAction, {
+      cwd: "/test",
+      action: "stageAll",
+    });
+    expect(response.error).toBeUndefined();
+    expect(response.result).toEqual(reviewActionResult);
+    expect(reviewAction).toHaveBeenCalledWith({ cwd: "/test", action: "stageAll" });
+  });
+
   it("returns errors from git.runStackedAction", async () => {
     const runStackedAction = vi.fn(() =>
       Effect.fail(
@@ -2005,6 +2073,10 @@ describe("WebSocket Server", () => {
     );
     const gitManager: GitManagerShape = {
       status: vi.fn(() => Effect.void as any),
+      diff: vi.fn(() => Effect.succeed({ scope: "unstaged" as const, patch: "" })),
+      reviewAction: vi.fn(() =>
+        Effect.succeed({ action: "stageAll" as const, status: "applied" as const }),
+      ),
       runStackedAction,
     };
 

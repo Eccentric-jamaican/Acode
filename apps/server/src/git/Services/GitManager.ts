@@ -7,6 +7,10 @@
  * @module GitManager
  */
 import {
+  GitDiffInput,
+  GitDiffResult,
+  GitReviewActionInput,
+  GitReviewActionResult,
   GitRunStackedActionInput,
   GitRunStackedActionResult,
   GitStatusInput,
@@ -26,6 +30,18 @@ export interface GitManagerShape {
   readonly status: (
     input: GitStatusInput,
   ) => Effect.Effect<GitStatusResult, GitManagerServiceError>;
+
+  /**
+   * Read a review patch for staged or unstaged repository changes.
+   */
+  readonly diff: (input: GitDiffInput) => Effect.Effect<GitDiffResult, GitManagerServiceError>;
+
+  /**
+   * Apply a focused review action to the working tree/index.
+   */
+  readonly reviewAction: (
+    input: GitReviewActionInput,
+  ) => Effect.Effect<GitReviewActionResult, GitManagerServiceError>;
 
   /**
    * Run a stacked Git action (`commit`, `commit_push`, `commit_push_pr`).

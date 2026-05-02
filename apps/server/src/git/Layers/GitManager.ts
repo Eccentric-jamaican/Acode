@@ -445,6 +445,31 @@ export const makeGitManager = Effect.gen(function* () {
     };
   });
 
+  const diff: GitManagerShape["diff"] = Effect.fnUntraced(function* (input) {
+    if (input.scope === "branch") {
+      const details = yield* gitCore.statusDetails(input.cwd);
+      if (!details.branch) {
+        return yield* gitManagerError("diff", "Cannot read branch diff from detached HEAD.");
+      }
+      const baseBranch = yield* resolveBaseBranch(input.cwd, details.branch, details.upstreamRef);
+      const branchPatch = yield* gitCore.readBranchReviewPatch(input.cwd, baseBranch);
+      return {
+        scope: input.scope,
+        patch: branchPatch,
+      };
+    }
+
+    return yield* gitCore.diff(input).pipe(
+      Effect.mapError((error) => gitManagerError("diff", error.message, error)),
+    );
+  });
+
+  const reviewAction: GitManagerShape["reviewAction"] = Effect.fnUntraced(function* (input) {
+    return yield* gitCore.reviewAction(input).pipe(
+      Effect.mapError((error) => gitManagerError("reviewAction", error.message, error)),
+    );
+  });
+
   const runFeatureBranchStep = (cwd: string, branch: string | null, commitMessage?: string) =>
     Effect.gen(function* () {
       const suggestion = yield* resolveCommitAndBranchSuggestion({
@@ -536,6 +561,8 @@ export const makeGitManager = Effect.gen(function* () {
 
   return {
     status,
+    diff,
+    reviewAction,
     runStackedAction,
   } satisfies GitManagerShape;
 });

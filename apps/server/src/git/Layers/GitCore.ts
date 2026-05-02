@@ -636,6 +636,92 @@ const makeGitCore = Effect.gen(function* () {
       })),
     );
 
+  const diff: GitCoreShape["diff"] = (input) =>
+    Effect.gen(function* () {
+      const args =
+        input.scope === "staged"
+          ? ["diff", "--cached", "--patch", "--no-ext-diff"]
+          : input.scope === "branch"
+            ? ["diff", "--patch", "--no-ext-diff", "HEAD"]
+            : ["diff", "--patch", "--no-ext-diff"];
+      const patch = yield* runGitStdout("GitCore.diff", input.cwd, args);
+      return {
+        scope: input.scope,
+        patch,
+      };
+    });
+
+  const reviewAction: GitCoreShape["reviewAction"] = (input) =>
+    Effect.gen(function* () {
+      const requirePath = function (operation: string): Effect.Effect<string, GitCommandError> {
+        return input.path
+          ? Effect.succeed(input.path)
+          : Effect.fail(
+              new GitCommandError({
+                operation,
+                command: input.action,
+                cwd: input.cwd,
+                detail: "A file path is required for this review action.",
+              }),
+            );
+      };
+
+      switch (input.action) {
+        case "stageAll": {
+          yield* runGit("GitCore.reviewAction.stageAll", input.cwd, ["add", "-A"]);
+          break;
+        }
+        case "stagePath": {
+          const path = yield* requirePath("GitCore.reviewAction.stagePath");
+          yield* runGit("GitCore.reviewAction.stagePath", input.cwd, ["add", "--", path]);
+          break;
+        }
+        case "unstageAll": {
+          yield* runGit("GitCore.reviewAction.unstageAll", input.cwd, [
+            "restore",
+            "--staged",
+            "--",
+            ".",
+          ]);
+          break;
+        }
+        case "unstagePath": {
+          const path = yield* requirePath("GitCore.reviewAction.unstagePath");
+          yield* runGit("GitCore.reviewAction.unstagePath", input.cwd, [
+            "restore",
+            "--staged",
+            "--",
+            path,
+          ]);
+          break;
+        }
+        case "revertUnstagedAll": {
+          yield* runGit("GitCore.reviewAction.revertUnstagedAll", input.cwd, [
+            "restore",
+            "--worktree",
+            "--",
+            ".",
+          ]);
+          break;
+        }
+        case "revertUnstagedPath": {
+          const path = yield* requirePath("GitCore.reviewAction.revertUnstagedPath");
+          yield* runGit("GitCore.reviewAction.revertUnstagedPath", input.cwd, [
+            "restore",
+            "--worktree",
+            "--",
+            path,
+          ]);
+          break;
+        }
+      }
+
+      return {
+        action: input.action,
+        status: "applied" as const,
+      };
+    });
+
   const prepareCommitContext: GitCoreShape["prepareCommitContext"] = (cwd) =>
     Effect.gen(function* () {
       yield* runGit("GitCore.prepareCommitContext.addAll", cwd, ["add", "-A"]);
@@ -818,6 +904,23 @@ const makeGitCore = Effect.gen(function* () {
         diffSummary,
         diffPatch,
       };
+    });
+
+  const readBranchReviewPatch: GitCoreShape["readBranchReviewPatch"] = (cwd, baseBranch) =>
+    Effect.gen(function* () {
+      const mergeBase = yield* runGitStdout("GitCore.readBranchReviewPatch.mergeBase", cwd, [
+        "merge-base",
+        "HEAD",
+        baseBranch,
+      ]).pipe(Effect.map((stdout) => stdout.trim()));
+      const baseRef = mergeBase.length > 0 ? mergeBase : baseBranch;
+      return yield* runGitStdout("GitCore.readBranchReviewPatch.diff", cwd, [
+        "diff",
+        "--patch",
+        "--minimal",
+        "--no-ext-diff",
+        baseRef,
+      ]);
     });
 
   const readConfigValue: GitCoreShape["readConfigValue"] = (cwd, key) =>
@@ -1247,11 +1350,14 @@ const makeGitCore = Effect.gen(function* () {
   return {
     status,
     statusDetails,
+    diff,
+    reviewAction,
     prepareCommitContext,
     commit,
     pushCurrentBranch,
     pullCurrentBranch,
     readRangeContext,
+    readBranchReviewPatch,
     readConfigValue,
     cloneRepo,
     listBranches,

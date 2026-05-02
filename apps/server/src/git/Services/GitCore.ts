@@ -15,10 +15,14 @@ import type {
   GitCreateBranchInput,
   GitCreateWorktreeInput,
   GitCreateWorktreeResult,
+  GitDiffInput,
+  GitDiffResult,
   GitInitInput,
   GitListBranchesInput,
   GitListBranchesResult,
   GitPullResult,
+  GitReviewActionInput,
+  GitReviewActionResult,
   GitRemoveWorktreeInput,
   GitStatusInput,
   GitStatusResult,
@@ -73,6 +77,18 @@ export interface GitCoreShape {
   readonly statusDetails: (cwd: string) => Effect.Effect<GitStatusDetails, GitCommandError>;
 
   /**
+   * Read a patch for staged or unstaged repository changes.
+   */
+  readonly diff: (input: GitDiffInput) => Effect.Effect<GitDiffResult, GitCommandError>;
+
+  /**
+   * Apply a focused review action to the working tree/index.
+   */
+  readonly reviewAction: (
+    input: GitReviewActionInput,
+  ) => Effect.Effect<GitReviewActionResult, GitCommandError>;
+
+  /**
    * Build staged change context for commit generation.
    */
   readonly prepareCommitContext: (
@@ -103,6 +119,14 @@ export interface GitCoreShape {
     cwd: string,
     baseBranch: string,
   ) => Effect.Effect<GitRangeContext, GitCommandError>;
+
+  /**
+   * Read branch review patch from the merge base to the current working tree.
+   */
+  readonly readBranchReviewPatch: (
+    cwd: string,
+    baseBranch: string,
+  ) => Effect.Effect<string, GitCommandError>;
 
   /**
    * Read a Git config value from the local repository.

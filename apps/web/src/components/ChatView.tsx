@@ -132,6 +132,7 @@ import {
   DEFAULT_THREAD_TERMINAL_ID,
   MAX_THREAD_TERMINAL_COUNT,
   type ChatMessage,
+  type Project,
   type Thread,
   type TurnDiffSummary,
 } from "../types";
@@ -141,7 +142,11 @@ import { useTurnDiffSummaries } from "../hooks/useTurnDiffSummaries";
 import { useIsDisposableThread } from "../hooks/useIsDisposableThread";
 import { useComposerCommandMenuItems } from "../hooks/useComposerCommandMenuItems";
 import { useComposerSlashCommands } from "../hooks/useComposerSlashCommands";
-import { useFilePanelStore } from "../filePanelStore";
+import {
+  getFilePanelThreadState,
+  type FilePanelComment,
+  useFilePanelStore,
+} from "../filePanelStore";
 import BranchToolbar from "./BranchToolbar";
 import GitActionsControl from "./GitActionsControl";
 import { ThreadWorktreeHandoffDialog } from "./ThreadWorktreeHandoffDialog";
@@ -281,6 +286,7 @@ const EMPTY_PROVIDER_PLUGINS: ProviderPluginDescriptor[] = [];
 const EMPTY_PROVIDER_SKILLS: ProviderSkillDescriptor[] = [];
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
 const EMPTY_HANDOFF_TARGET_PROVIDERS: readonly ProviderKind[] = [];
+const HOME_PROJECT_TITLE = "Home";
 const COMPOSER_PATH_QUERY_DEBOUNCE_MS = 120;
 const SCRIPT_TERMINAL_COLS = 120;
 const SCRIPT_TERMINAL_ROWS = 30;
@@ -308,6 +314,15 @@ type SelectedComposerExtension = {
   mentionName: string;
   iconUrl?: string | undefined;
 };
+
+function isHomeProject(project: Project, homeDirectory: string | null | undefined): boolean {
+  return (
+    homeDirectory !== null &&
+    homeDirectory !== undefined &&
+    project.cwd === homeDirectory &&
+    project.name === HOME_PROJECT_TITLE
+  );
+}
 
 type SelectedComposerShortcut = {
   id: string;
@@ -512,6 +527,47 @@ function displayPromptWithInspectCaptures(input: {
   return cleanPrompt ? `${inspectTokens} ${cleanPrompt}` : inspectTokens;
 }
 
+function flattenFilePanelComments(
+  commentsByFilePath: Record<string, FilePanelComment[]>,
+): Array<{ filePath: string; comment: FilePanelComment }> {
+  return Object.entries(commentsByFilePath).flatMap(([filePath, comments]) =>
+    comments.map((comment) => ({ filePath, comment })),
+  );
+}
+
+function buildFilePanelCommentsPrompt(
+  commentsByFilePath: Record<string, FilePanelComment[]>,
+): string {
+  const comments = flattenFilePanelComments(commentsByFilePath);
+  if (comments.length === 0) return "";
+  const lines = comments.map(({ filePath, comment }, index) => {
+    const side = comment.side === "deletions" ? "old line" : "line";
+    return `${index + 1}. ${filePath}:${comment.line} (${side})\n${comment.text}`;
+  });
+  return `Local review comments:\n${lines.join("\n\n")}`;
+}
+
+function promptWithFilePanelComments(input: {
+  prompt: string;
+  commentsByFilePath: Record<string, FilePanelComment[]>;
+}): string {
+  const commentsPrompt = buildFilePanelCommentsPrompt(input.commentsByFilePath);
+  if (commentsPrompt.length === 0) return input.prompt;
+  const cleanPrompt = input.prompt.trim();
+  return cleanPrompt ? `${commentsPrompt}\n\n${cleanPrompt}` : commentsPrompt;
+}
+
+function displayPromptWithFilePanelComments(input: {
+  prompt: string;
+  commentsByFilePath: Record<string, FilePanelComment[]>;
+}): string {
+  const count = flattenFilePanelComments(input.commentsByFilePath).length;
+  if (count === 0) return input.prompt;
+  const cleanPrompt = input.prompt.trim();
+  const token = count === 1 ? "/comment" : `/comments(${count})`;
+  return cleanPrompt ? `${token} ${cleanPrompt}` : token;
+}
+
 const SelectedComposerExtensionIcon = memo(function SelectedComposerExtensionIcon(props: {
   extension: SelectedComposerExtension;
 }) {
@@ -551,6 +607,10 @@ const SelectedComposerShortcutIcon = memo(function SelectedComposerShortcutIcon(
 
 const SelectedInspectCaptureIcon = memo(function SelectedInspectCaptureIcon() {
   return <MousePointer2Icon className="size-4 shrink-0" />;
+});
+
+const SelectedLocalCommentIcon = memo(function SelectedLocalCommentIcon() {
+  return <MessageSquareIcon className="size-4 shrink-0" />;
 });
 
 function removeSelectedComposerExtensionById(
@@ -815,6 +875,13 @@ export default function ChatView({
   const composerImages = composerDraft.images;
   const composerInspectCaptures = composerDraft.inspectCaptures;
   const composerPinnedSelections = composerDraft.pinnedSelections;
+  const filePanelCommentsByFilePath = useFilePanelStore(
+    (store) => getFilePanelThreadState(store, threadId).commentsByFilePath,
+  );
+  const filePanelCommentCount = useMemo(
+    () => flattenFilePanelComments(filePanelCommentsByFilePath).length,
+    [filePanelCommentsByFilePath],
+  );
   const nonPersistedComposerImageIds = composerDraft.nonPersistedImageIds;
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
   const setComposerDraftProvider = useComposerDraftStore((store) => store.setProvider);
@@ -854,6 +921,7 @@ export default function ChatView({
   const setProjectDraftThreadId = useComposerDraftStore((store) => store.setProjectDraftThreadId);
   const getDraftThreadByProjectId = useComposerDraftStore((store) => store.getDraftThreadByProjectId);
   const clearComposerDraftContent = useComposerDraftStore((store) => store.clearComposerContent);
+  const clearFilePanelComments = useFilePanelStore((store) => store.clearComments);
   const clearDraftThread = useComposerDraftStore((store) => store.clearDraftThread);
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
   const draftThread = useComposerDraftStore(
@@ -1060,6 +1128,14 @@ export default function ChatView({
   const selectedServiceTierSetting = settings.codexServiceTier;
   const selectedServiceTier = resolveAppServiceTier(selectedServiceTierSetting);
   const serverConfigQuery = useQuery(serverConfigQueryOptions());
+  const homeDirectory = serverConfigQuery.data?.homeDirectory ?? null;
+  const projectPickerProjects = useMemo(
+    () => projects.filter((project) => !isHomeProject(project, homeDirectory)),
+    [homeDirectory, projects],
+  );
+  const isActiveHomeProject = activeProject
+    ? isHomeProject(activeProject, homeDirectory)
+    : false;
   const providerStatuses = serverConfigQuery.data?.providers ?? EMPTY_PROVIDER_STATUSES;
   const lockedProvider: ProviderKind | null = hasThreadStarted
     ? (sessionProvider ?? inferredProviderFromThreadModel ?? selectedProviderByThreadId ?? null)
@@ -2959,13 +3035,14 @@ export default function ChatView({
     (targetThreadId: ThreadId) => {
       promptRef.current = "";
       clearComposerDraftContent(targetThreadId);
+      clearFilePanelComments(targetThreadId);
       setSelectedComposerExtensions([]);
       setSelectedComposerShortcuts([]);
       setComposerHighlightedItemId(null);
       setComposerCursor(0);
       setComposerTrigger(null);
     },
-    [clearComposerDraftContent],
+    [clearComposerDraftContent, clearFilePanelComments],
   );
 
   const restoreQueuedTurnToComposer = useCallback(
@@ -3071,9 +3148,12 @@ export default function ChatView({
       });
     const promptForSend =
       queuedChatTurn?.prompt ??
-      promptWithInspectCaptures({
-        prompt: shortcutPromptForSend,
-        captures: composerInspectCapturesForSend,
+      promptWithFilePanelComments({
+        prompt: promptWithInspectCaptures({
+          prompt: shortcutPromptForSend,
+          captures: composerInspectCapturesForSend,
+        }),
+        commentsByFilePath: filePanelCommentsByFilePath,
       });
     const shortcutDisplayPromptForSend =
       queuedChatTurn?.displayText ??
@@ -3083,9 +3163,12 @@ export default function ChatView({
       });
     const displayPromptForSend =
       queuedChatTurn?.displayText ??
-      displayPromptWithInspectCaptures({
-        prompt: shortcutDisplayPromptForSend,
-        captures: composerInspectCapturesForSend,
+      displayPromptWithFilePanelComments({
+        prompt: displayPromptWithInspectCaptures({
+          prompt: shortcutDisplayPromptForSend,
+          captures: composerInspectCapturesForSend,
+        }),
+        commentsByFilePath: filePanelCommentsByFilePath,
       });
     const selectedModelForSend = queuedChatTurn?.selectedModel ?? selectedModel;
     const selectedEffortForSend = queuedChatTurn?.selectedEffort ?? selectedEffort;
@@ -4964,12 +5047,18 @@ export default function ChatView({
                         />
                       }
                     >
-                      <FolderClosedIcon className="size-3.5 shrink-0" />
-                      <span className="max-w-64 truncate">{activeProject.name}</span>
+                      {isActiveHomeProject ? (
+                        <MessageSquareIcon className="size-3.5 shrink-0" />
+                      ) : (
+                        <FolderClosedIcon className="size-3.5 shrink-0" />
+                      )}
+                      <span className="max-w-64 truncate">
+                        {isActiveHomeProject ? "Chat" : activeProject.name}
+                      </span>
                       <ChevronDownIcon className="size-3.5 shrink-0" />
                     </MenuTrigger>
                     <MenuPopup align="center" side="bottom">
-                      {projects.map((project) => (
+                      {projectPickerProjects.map((project) => (
                         <MenuItem
                           key={project.id}
                           data-testid={`chat-new-thread-project-option-${project.id}`}
@@ -5217,8 +5306,30 @@ export default function ChatView({
               pendingUserInputs.length === 0 &&
               (selectedComposerExtensions.length > 0 ||
                 selectedComposerShortcuts.length > 0 ||
-                composerInspectCaptures.length > 0) ? (
+                composerInspectCaptures.length > 0 ||
+                filePanelCommentCount > 0) ? (
                 <div className="mb-2 flex items-center gap-2 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                  {filePanelCommentCount > 0 ? (
+                    <button
+                      type="button"
+                      className="group inline-flex shrink-0 items-center gap-1.5 rounded-md px-0.5 py-0.5 text-sm font-medium text-amber-500 outline-none transition-colors hover:bg-amber-500/10 focus-visible:ring-2 focus-visible:ring-amber-400/45 dark:text-amber-400"
+                      title="Clear local review comments"
+                      aria-label="Clear local review comments"
+                      onClick={() => {
+                        if (activeThread) {
+                          clearFilePanelComments(activeThread.id);
+                        }
+                        scheduleComposerFocus();
+                      }}
+                    >
+                      <SelectedLocalCommentIcon />
+                      <span className="max-w-52 truncate">
+                        {filePanelCommentCount}{" "}
+                        {filePanelCommentCount === 1 ? "comment" : "comments"}
+                      </span>
+                      <XIcon className="size-3 opacity-0 transition-opacity group-hover:opacity-70 group-focus-visible:opacity-70" />
+                    </button>
+                  ) : null}
                   {composerInspectCaptures.map((capture) => (
                     <button
                       type="button"

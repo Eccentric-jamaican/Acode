@@ -1,4 +1,9 @@
-import type { GitStackedAction } from "@t3tools/contracts";
+import type {
+  GitDiffScope,
+  GitReviewAction,
+  GitReviewActionInput,
+  GitStackedAction,
+} from "@t3tools/contracts";
 import { mutationOptions, queryOptions, type QueryClient } from "@tanstack/react-query";
 import { ensureNativeApi } from "../nativeApi";
 
@@ -10,6 +15,7 @@ const GIT_BRANCHES_REFETCH_INTERVAL_MS = 60_000;
 export const gitQueryKeys = {
   all: ["git"] as const,
   status: (cwd: string | null) => ["git", "status", cwd] as const,
+  diff: (cwd: string | null, scope: GitDiffScope) => ["git", "diff", cwd, scope] as const,
   branches: (cwd: string | null) => ["git", "branches", cwd] as const,
 };
 
@@ -17,6 +23,7 @@ export const gitMutationKeys = {
   init: (cwd: string | null) => ["git", "mutation", "init", cwd] as const,
   checkout: (cwd: string | null) => ["git", "mutation", "checkout", cwd] as const,
   runStackedAction: (cwd: string | null) => ["git", "mutation", "run-stacked-action", cwd] as const,
+  reviewAction: (cwd: string | null) => ["git", "mutation", "review-action", cwd] as const,
   pull: (cwd: string | null) => ["git", "mutation", "pull", cwd] as const,
 };
 
@@ -33,6 +40,26 @@ export function gitStatusQueryOptions(cwd: string | null) {
       return api.git.status({ cwd });
     },
     enabled: cwd !== null,
+    staleTime: GIT_STATUS_STALE_TIME_MS,
+    refetchOnWindowFocus: "always",
+    refetchOnReconnect: "always",
+    refetchInterval: GIT_STATUS_REFETCH_INTERVAL_MS,
+  });
+}
+
+export function gitDiffQueryOptions(input: {
+  cwd: string | null;
+  scope: GitDiffScope;
+  enabled?: boolean;
+}) {
+  return queryOptions({
+    queryKey: gitQueryKeys.diff(input.cwd, input.scope),
+    queryFn: async () => {
+      const api = ensureNativeApi();
+      if (!input.cwd) throw new Error("Git diff is unavailable.");
+      return api.git.diff({ cwd: input.cwd, scope: input.scope });
+    },
+    enabled: input.cwd !== null && input.enabled !== false,
     staleTime: GIT_STATUS_STALE_TIME_MS,
     refetchOnWindowFocus: "always",
     refetchOnReconnect: "always",
@@ -110,6 +137,26 @@ export function gitRunStackedActionMutationOptions(input: {
         ...(commitMessage ? { commitMessage } : {}),
         ...(featureBranch ? { featureBranch } : {}),
       });
+    },
+    onSettled: async () => {
+      await invalidateGitQueries(input.queryClient);
+    },
+  });
+}
+
+export function gitReviewActionMutationOptions(input: {
+  cwd: string | null;
+  queryClient: QueryClient;
+}) {
+  return mutationOptions({
+    mutationKey: gitMutationKeys.reviewAction(input.cwd),
+    mutationFn: async (
+      action: GitReviewAction | Pick<GitReviewActionInput, "action" | "path">,
+    ) => {
+      const api = ensureNativeApi();
+      if (!input.cwd) throw new Error("Git review action is unavailable.");
+      const payload = typeof action === "string" ? { action } : action;
+      return api.git.reviewAction({ cwd: input.cwd, ...payload });
     },
     onSettled: async () => {
       await invalidateGitQueries(input.queryClient);

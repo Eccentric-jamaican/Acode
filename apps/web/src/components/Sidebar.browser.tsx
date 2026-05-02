@@ -1032,7 +1032,7 @@ describe("Sidebar browser", () => {
       .poll(() => {
         const text = document.body.textContent ?? "";
         return (
-          text.indexOf("New thread") < text.indexOf("Automations") &&
+          text.indexOf("New chat") < text.indexOf("Automations") &&
           text.indexOf("Automations") < text.indexOf("Skills") &&
           text.indexOf("Skills") < text.indexOf("Plugins") &&
           text.indexOf("Plugins") < text.indexOf("Orchestrate")
@@ -1656,7 +1656,7 @@ describe("Sidebar browser", () => {
     await remounted.cleanup();
   });
 
-  it("uses the first visible project when New thread is clicked without an active thread", async () => {
+  it("creates a Home-backed chat when New chat is clicked without an active thread", async () => {
     const projectAlpha = "project-alpha" as ProjectId;
     const projectBeta = "project-beta" as ProjectId;
     fixture = {
@@ -1669,8 +1669,13 @@ describe("Sidebar browser", () => {
         ],
         threads: [],
       },
+      serverConfig: {
+        ...fixture.serverConfig,
+        homeDirectory: "C:\\Users\\Addis",
+      },
       welcome: {
         cwd: "C:\\Users\\Addis\\source\\repos\\t3code-main",
+        homeDirectory: "C:\\Users\\Addis",
         projectName: "t3code-main",
       } as WsWelcomePayload,
     };
@@ -1682,9 +1687,13 @@ describe("Sidebar browser", () => {
     await expect
       .poll(() => {
         const draftMap = useComposerDraftStore.getState().projectDraftThreadIdByProjectId;
-        return draftMap[projectAlpha] ?? null;
+        const homeProject = useStore
+          .getState()
+          .projects.find((project) => project.cwd === "C:\\Users\\Addis" && project.name === "Home");
+        return homeProject ? (draftMap[homeProject.id] ?? null) : null;
       })
       .not.toBeNull();
+    await expect.poll(() => projectOrderLabels()).toEqual(["Alpha", "Beta"]);
 
     await mounted.cleanup();
   });
