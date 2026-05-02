@@ -4,8 +4,8 @@ import path from "node:path";
 
 import type { ProviderSkillDescriptor } from "@t3tools/contracts";
 
-const MAX_SCAN_DEPTH = 4;
-const MAX_SKILLS = 200;
+const MAX_SCAN_DEPTH = 8;
+const MAX_SKILLS = 500;
 
 function readFirstSummaryLine(skillFilePath: string): {
   displayName?: string;
@@ -16,7 +16,24 @@ function readFirstSummaryLine(skillFilePath: string): {
     const lines = raw.split(/\r?\n/);
     let displayName: string | undefined;
     let shortDescription: string | undefined;
-    for (const line of lines) {
+    let contentStartIndex = 0;
+    if (lines[0]?.trim() === "---") {
+      const frontmatterEndIndex = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
+      if (frontmatterEndIndex > 0) {
+        contentStartIndex = frontmatterEndIndex + 1;
+        for (const line of lines.slice(1, frontmatterEndIndex)) {
+          const nameMatch = /^name:\s*(.+)$/i.exec(line.trim());
+          const descriptionMatch = /^description:\s*(.+)$/i.exec(line.trim());
+          if (nameMatch?.[1] && !displayName) {
+            displayName = nameMatch[1].trim().replace(/^["']|["']$/g, "");
+          }
+          if (descriptionMatch?.[1] && !shortDescription) {
+            shortDescription = descriptionMatch[1].trim().replace(/^["']|["']$/g, "").slice(0, 200);
+          }
+        }
+      }
+    }
+    for (const line of lines.slice(contentStartIndex)) {
       const trimmed = line.trim();
       if (!trimmed) continue;
       if (!displayName) {
@@ -26,7 +43,7 @@ function readFirstSummaryLine(skillFilePath: string): {
           continue;
         }
       }
-      if (!trimmed.startsWith("#")) {
+      if (!shortDescription && !trimmed.startsWith("#")) {
         shortDescription = trimmed.slice(0, 200);
         break;
       }
@@ -40,7 +57,12 @@ function readFirstSummaryLine(skillFilePath: string): {
   }
 }
 
-function collectSkillFiles(rootDir: string, depth = 0, output: string[] = []): string[] {
+function collectSkillFiles(
+  rootDir: string,
+  depth = 0,
+  output: string[] = [],
+  options: { includeDotDirs?: boolean; skipTemporaryPluginInstalls?: boolean } = {},
+): string[] {
   if (depth > MAX_SCAN_DEPTH || output.length >= MAX_SKILLS) {
     return output;
   }
@@ -58,14 +80,19 @@ function collectSkillFiles(rootDir: string, depth = 0, output: string[] = []): s
       output.push(entryPath);
       continue;
     }
-    if (entry.isDirectory() && !entry.name.startsWith(".")) {
-      collectSkillFiles(entryPath, depth + 1, output);
+    if (entry.isDirectory()) {
+      if (!options.includeDotDirs && entry.name.startsWith(".")) continue;
+      if (options.skipTemporaryPluginInstalls && entry.name.startsWith("plugin-install-")) continue;
+      collectSkillFiles(entryPath, depth + 1, output, options);
     }
   }
   return output;
 }
 
-function toSkillDescriptor(skillFilePath: string, scope: "workspace" | "personal"): ProviderSkillDescriptor {
+function toSkillDescriptor(
+  skillFilePath: string,
+  scope: "workspace" | "personal" | "system" | "plugin",
+): ProviderSkillDescriptor {
   const skillDir = path.dirname(skillFilePath);
   const skillName = path.basename(skillDir);
   const ui = readFirstSummaryLine(skillFilePath);
@@ -94,18 +121,26 @@ function normalizePathKey(value: string): string {
 export function discoverSkillsForCwd(cwd: string): ProviderSkillDescriptor[] {
   const workspaceSkillsRoot = path.resolve(cwd, ".agents", "skills");
   const homeSkillsRoot = path.resolve(os.homedir(), ".codex", "skills");
+  const pluginSkillsRoot = path.resolve(os.homedir(), ".codex", "plugins", "cache");
   const workspaceSkillFiles = collectSkillFiles(workspaceSkillsRoot).map((skillPath) =>
     toSkillDescriptor(skillPath, "workspace"),
   );
-  const personalSkillFiles = collectSkillFiles(homeSkillsRoot).map((skillPath) =>
-    toSkillDescriptor(skillPath, "personal"),
+  const personalSkillFiles = collectSkillFiles(homeSkillsRoot, 0, [], { includeDotDirs: true }).map(
+    (skillPath) =>
+      toSkillDescriptor(
+        skillPath,
+        normalizePathKey(skillPath).includes("/.codex/skills/.system/") ? "system" : "personal",
+      ),
   );
+  const pluginSkillFiles = collectSkillFiles(pluginSkillsRoot, 0, [], {
+    skipTemporaryPluginInstalls: true,
+  }).map((skillPath) => toSkillDescriptor(skillPath, "plugin"));
   const deduped = new Map<string, ProviderSkillDescriptor>();
-  for (const skill of [...workspaceSkillFiles, ...personalSkillFiles]) {
+  for (const skill of [...workspaceSkillFiles, ...personalSkillFiles, ...pluginSkillFiles]) {
     const key = normalizePathKey(skill.path);
     if (!deduped.has(key)) {
       deduped.set(key, skill);
     }
   }
-  return [...deduped.values()].sort((left, right) => left.name.localeCompare(right.name));
+  return [...deduped.values()].toSorted((left, right) => left.name.localeCompare(right.name));
 }

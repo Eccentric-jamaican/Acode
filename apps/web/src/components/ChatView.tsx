@@ -19,6 +19,7 @@ import {
   type ServerProviderStatus,
   type ProviderKind,
   type ProviderNativeCommandDescriptor,
+  type ProviderPluginDescriptor,
   type ProviderSkillDescriptor,
   type ThreadId,
   type TurnId,
@@ -63,8 +64,10 @@ import {
   providerCommandsQueryOptions,
   providerComposerCapabilitiesQueryOptions,
   providerModelsQueryOptions,
+  providerPluginsQueryOptions,
   providerSkillsQueryOptions,
   supportsNativeSlashCommandDiscovery,
+  supportsPluginDiscovery,
   supportsSkillDiscovery,
 } from "~/lib/providerDiscoveryReactQuery";
 import { refineNewThreadSuggestionsQueryOptions } from "~/lib/newThreadSuggestionsReactQuery";
@@ -154,6 +157,8 @@ import {
   KanbanSquareIcon,
   MessageSquareIcon,
   PanelLeftIcon,
+  BoxIcon,
+  PlugIcon,
   PlusIcon,
   Maximize2Icon,
   ArrowLeftRight,
@@ -235,7 +240,10 @@ import { selectThreadTerminalState, useTerminalStateStore } from "../terminalSta
 import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "./ComposerPromptEditor";
 import { shouldUseCompactComposerFooter } from "./composerFooterLayout";
 import { buildQuotedSelectionInsertion, normalizeSelectedText } from "../chatPinnedSelections";
-import { MessagesTimeline } from "./chat/MessagesTimeline";
+import {
+  MessagesTimeline,
+  type UserMessageMentionDescriptor,
+} from "./chat/MessagesTimeline";
 import { CompactComposerControlsMenu } from "./chat/CompactComposerControlsMenu";
 import {
   ExpandedImagePreview as ExpandedImagePreviewDialog,
@@ -260,6 +268,7 @@ const EMPTY_PROJECT_ENTRIES: ProjectEntry[] = [];
 const EMPTY_AVAILABLE_EDITORS: EditorId[] = [];
 const EMPTY_PROVIDER_STATUSES: ServerProviderStatus[] = [];
 const EMPTY_PROVIDER_NATIVE_COMMANDS: ProviderNativeCommandDescriptor[] = [];
+const EMPTY_PROVIDER_PLUGINS: ProviderPluginDescriptor[] = [];
 const EMPTY_PROVIDER_SKILLS: ProviderSkillDescriptor[] = [];
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
 const EMPTY_HANDOFF_TARGET_PROVIDERS: readonly ProviderKind[] = [];
@@ -280,6 +289,169 @@ const CODEX_REASONING_LABEL_BY_OPTION: Record<CodexReasoningEffort, string> = {
 
 function skillMentionPrefix(provider: ProviderKind): string {
   return provider === "claudeAgent" ? "/" : "$";
+}
+
+type SelectedComposerExtension = {
+  id: string;
+  type: "plugin" | "skill";
+  name: string;
+  label: string;
+  mentionName: string;
+  iconUrl?: string | undefined;
+};
+
+function pluginLabel(plugin: ProviderPluginDescriptor): string {
+  return plugin.interface?.displayName ?? plugin.name;
+}
+
+function skillLabel(skill: ProviderSkillDescriptor): string {
+  return skill.interface?.displayName ?? skill.name;
+}
+
+function pluginComposerIcon(plugin: ProviderPluginDescriptor | undefined): string | undefined {
+  return plugin?.interface?.composerIcon ?? plugin?.interface?.logo;
+}
+
+function pluginForSkill(
+  skill: ProviderSkillDescriptor,
+  plugins: readonly ProviderPluginDescriptor[],
+): ProviderPluginDescriptor | undefined {
+  return plugins.find((plugin) => skill.path.startsWith(plugin.source.path));
+}
+
+function selectedComposerExtensionsFromPrompt(input: {
+  prompt: string;
+  plugins: readonly ProviderPluginDescriptor[];
+  skills: readonly ProviderSkillDescriptor[];
+}): SelectedComposerExtension[] {
+  const pluginsByName = new Map(input.plugins.map((plugin) => [plugin.name.toLowerCase(), plugin]));
+  const skillsByName = new Map(input.skills.map((skill) => [skill.name.toLowerCase(), skill]));
+  const selected = new Map<string, SelectedComposerExtension>();
+  const mentionPattern = /(^|\s)([$/])([^\s]+)/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = mentionPattern.exec(input.prompt)) !== null) {
+    const rawName = match[3]?.trim();
+    if (!rawName) continue;
+    const normalizedName = rawName.toLowerCase();
+    const plugin = pluginsByName.get(normalizedName);
+    if (plugin) {
+      selected.set(`plugin:${plugin.name}`, selectedComposerExtensionFromPlugin(plugin));
+      continue;
+    }
+    const skill = skillsByName.get(normalizedName);
+    if (skill) {
+      selected.set(
+        `skill:${skill.path}`,
+        selectedComposerExtensionFromSkill({ skill, plugins: input.plugins }),
+      );
+    }
+  }
+
+  return [...selected.values()];
+}
+
+function selectedComposerExtensionFromPlugin(
+  plugin: ProviderPluginDescriptor,
+): SelectedComposerExtension {
+  const iconUrl = pluginComposerIcon(plugin);
+  return {
+    id: `plugin:${plugin.name}`,
+    type: "plugin",
+    name: plugin.name,
+    label: pluginLabel(plugin),
+    mentionName: plugin.name,
+    ...(iconUrl ? { iconUrl } : {}),
+  };
+}
+
+function selectedComposerExtensionFromSkill(input: {
+  skill: ProviderSkillDescriptor;
+  plugins: readonly ProviderPluginDescriptor[];
+}): SelectedComposerExtension {
+  const iconUrl = pluginComposerIcon(pluginForSkill(input.skill, input.plugins));
+  return {
+    id: `skill:${input.skill.path}`,
+    type: "skill",
+    name: input.skill.name,
+    label: skillLabel(input.skill),
+    mentionName: input.skill.name,
+    ...(iconUrl ? { iconUrl } : {}),
+  };
+}
+
+function mergeSelectedComposerExtensions(
+  existing: SelectedComposerExtension[],
+  additions: SelectedComposerExtension[],
+): SelectedComposerExtension[] {
+  if (additions.length === 0) return existing;
+  const merged = new Map(existing.map((extension) => [extension.id, extension]));
+  for (const addition of additions) {
+    merged.set(addition.id, addition);
+  }
+  return [...merged.values()];
+}
+
+function selectedComposerExtensionTokens(extensions: readonly SelectedComposerExtension[]): Set<string> {
+  return new Set(extensions.map((extension) => extension.mentionName.toLowerCase()));
+}
+
+function stripSelectedComposerExtensionTokens(
+  prompt: string,
+  extensions: readonly SelectedComposerExtension[],
+): string {
+  if (extensions.length === 0 || prompt.length === 0) return prompt;
+  const selectedTokens = selectedComposerExtensionTokens(extensions);
+  return prompt
+    .replace(/(^|\s)([$/])([^\s]+)(?=\s|$)/g, (fullMatch, prefix: string, _marker: string, rawName: string) =>
+      selectedTokens.has(rawName.toLowerCase()) ? prefix : fullMatch,
+    )
+    .replace(/[ \t]{2,}/g, " ")
+    .trimStart();
+}
+
+function promptWithSelectedComposerExtensions(input: {
+  prompt: string;
+  selectedExtensions: readonly SelectedComposerExtension[];
+  provider: ProviderKind;
+}): string {
+  if (input.selectedExtensions.length === 0) return input.prompt;
+  const prefix = skillMentionPrefix(input.provider);
+  const selectedPrompt = input.selectedExtensions
+    .map((extension) => `${prefix}${extension.mentionName}`)
+    .join(" ");
+  const cleanPrompt = stripSelectedComposerExtensionTokens(input.prompt, input.selectedExtensions).trim();
+  return cleanPrompt ? `${selectedPrompt} ${cleanPrompt}` : selectedPrompt;
+}
+
+  const SelectedComposerExtensionIcon = memo(function SelectedComposerExtensionIcon(props: {
+  extension: SelectedComposerExtension;
+}) {
+  const [failedIconUrl, setFailedIconUrl] = useState<string | null>(null);
+  const failed = props.extension.iconUrl !== undefined && failedIconUrl === props.extension.iconUrl;
+  const Icon = props.extension.type === "plugin" ? PlugIcon : BoxIcon;
+
+  if (props.extension.iconUrl && !failed) {
+    return (
+      <img
+        src={props.extension.iconUrl}
+        alt=""
+        aria-hidden="true"
+        className="size-4 shrink-0 object-contain"
+        draggable={false}
+        onError={() => setFailedIconUrl(props.extension.iconUrl ?? null)}
+      />
+    );
+  }
+
+  return <Icon className="size-4 shrink-0" />;
+});
+
+function removeSelectedComposerExtensionById(
+  extensions: SelectedComposerExtension[],
+  extensionId: string,
+): SelectedComposerExtension[] {
+  return extensions.filter((extension) => extension.id !== extensionId);
 }
 
 function readLastInvokedScriptByProjectFromStorage(): Record<string, string> {
@@ -601,6 +773,9 @@ export default function ChatView({
   const [composerTrigger, setComposerTrigger] = useState<ComposerTrigger | null>(() =>
     detectComposerTrigger(prompt, prompt.length),
   );
+  const [selectedComposerExtensions, setSelectedComposerExtensions] = useState<
+    SelectedComposerExtension[]
+  >([]);
   const [queuedComposerTurns, setQueuedComposerTurns] = useState<QueuedComposerTurn[]>([]);
   const [lastInvokedScriptByProjectId, setLastInvokedScriptByProjectId] = useState<
     Record<string, string>
@@ -753,7 +928,7 @@ export default function ChatView({
       activeThread.session !== null),
   );
   const shouldShowNewThreadLanding = isLocalDraftThread && !hasThreadStarted;
-  const isPromptEmpty = prompt.trim().length === 0;
+  const isPromptEmpty = prompt.trim().length === 0 && selectedComposerExtensions.length === 0;
   const selectedServiceTierSetting = settings.codexServiceTier;
   const selectedServiceTier = resolveAppServiceTier(selectedServiceTierSetting);
   const serverConfigQuery = useQuery(serverConfigQueryOptions());
@@ -1276,7 +1451,10 @@ export default function ChatView({
   const composerTriggerKind = composerTrigger?.kind ?? null;
   const pathTriggerQuery = composerTrigger?.kind === "path" ? composerTrigger.query : "";
   const isPathTrigger = composerTriggerKind === "path";
-  const skillTriggerQuery = composerTrigger?.kind === "skill" ? composerTrigger.query : "";
+  const skillTriggerQuery =
+    composerTrigger?.kind === "skill" || composerTrigger?.kind === "slash-command"
+      ? composerTrigger.query
+      : "";
   const isSkillTrigger = composerTriggerKind === "skill";
   const [debouncedPathQuery, composerPathQueryDebouncer] = useDebouncedValue(
     pathTriggerQuery,
@@ -1330,10 +1508,19 @@ export default function ChatView({
       threadId,
       query: skillTriggerQuery,
       enabled:
-        (isSkillTrigger ||
-          (composerTriggerKind === "slash-command" && selectedProvider === "claudeAgent")) &&
+        (isSkillTrigger || composerTriggerKind === "slash-command") &&
         supportsSkillDiscovery(providerComposerCapabilitiesQuery.data) &&
         composerDiscoveryCwd !== null,
+    }),
+  );
+  const providerPluginsQuery = useQuery(
+    providerPluginsQueryOptions({
+      provider: selectedProvider,
+      cwd: composerDiscoveryCwd,
+      threadId,
+      enabled:
+        (isSkillTrigger || composerTriggerKind === "slash-command") &&
+        supportsPluginDiscovery(providerComposerCapabilitiesQuery.data),
     }),
   );
   const workspaceEntriesQuery = useQuery(
@@ -1356,6 +1543,56 @@ export default function ChatView({
   const canOfferForkCommand =
     selectedProvider === "codex" || selectedProvider === "opencode";
   const providerSkills = providerSkillsQuery.data?.skills ?? EMPTY_PROVIDER_SKILLS;
+  const providerPlugins = useMemo(
+    () =>
+      providerPluginsQuery.data?.marketplaces.flatMap((marketplace) => marketplace.plugins) ??
+      EMPTY_PROVIDER_PLUGINS,
+    [providerPluginsQuery.data?.marketplaces],
+  );
+  useEffect(() => {
+    const extractedExtensions = selectedComposerExtensionsFromPrompt({
+      prompt,
+      plugins: providerPlugins,
+      skills: providerSkills,
+    });
+    if (extractedExtensions.length === 0) return;
+
+    setSelectedComposerExtensions((existing) =>
+      mergeSelectedComposerExtensions(existing, extractedExtensions),
+    );
+    const nextPrompt = stripSelectedComposerExtensionTokens(prompt, extractedExtensions);
+    if (nextPrompt === prompt) return;
+    const nextCursor = Math.min(composerCursor, nextPrompt.length);
+    promptRef.current = nextPrompt;
+    setPrompt(nextPrompt);
+    setComposerCursor(nextCursor);
+    setComposerTrigger(detectComposerTrigger(nextPrompt, nextCursor));
+  }, [composerCursor, prompt, providerPlugins, providerSkills, setPrompt]);
+
+  const userMessageMentionDescriptors = useMemo<UserMessageMentionDescriptor[]>(() => {
+    const pluginDescriptors = providerPlugins.map((plugin) => {
+      const iconUrl = pluginComposerIcon(plugin);
+      const descriptor: UserMessageMentionDescriptor = {
+        mentionName: plugin.name,
+        label: pluginLabel(plugin),
+        type: "plugin",
+      };
+      if (iconUrl) descriptor.iconUrl = iconUrl;
+      return descriptor;
+    });
+    const skillDescriptors = providerSkills.map((skill) => {
+      const iconUrl = pluginComposerIcon(pluginForSkill(skill, providerPlugins));
+      const descriptor: UserMessageMentionDescriptor = {
+        mentionName: skill.name,
+        label: skillLabel(skill),
+        type: "skill",
+      };
+      if (iconUrl) descriptor.iconUrl = iconUrl;
+      return descriptor;
+    });
+    return [...pluginDescriptors, ...skillDescriptors];
+  }, [providerPlugins, providerSkills]);
+
   const composerMenuItems = useComposerCommandMenuItems({
     composerTrigger,
     provider: selectedProvider,
@@ -1364,6 +1601,7 @@ export default function ChatView({
     canOfferForkCommand,
     providerNativeCommands,
     providerNativeCommandNames,
+    providerPlugins,
     providerSkills,
     workspaceEntries,
     searchableModelOptions,
@@ -2581,6 +2819,7 @@ export default function ChatView({
     (targetThreadId: ThreadId) => {
       promptRef.current = "";
       clearComposerDraftContent(targetThreadId);
+      setSelectedComposerExtensions([]);
       setComposerHighlightedItemId(null);
       setComposerCursor(0);
       setComposerTrigger(null);
@@ -2661,9 +2900,15 @@ export default function ChatView({
       return true;
     }
     const queuedChatTurn = queuedTurn ?? null;
-    const promptForSend = queuedChatTurn?.prompt ?? promptRef.current;
     const composerImagesForSend = queuedChatTurn?.images ?? composerImages;
     const selectedProviderForSend = queuedChatTurn?.selectedProvider ?? selectedProvider;
+    const promptForSend =
+      queuedChatTurn?.prompt ??
+      promptWithSelectedComposerExtensions({
+        prompt: promptRef.current,
+        selectedExtensions: selectedComposerExtensions,
+        provider: selectedProviderForSend,
+      });
     const selectedModelForSend = queuedChatTurn?.selectedModel ?? selectedModel;
     const selectedEffortForSend = queuedChatTurn?.selectedEffort ?? selectedEffort;
     const selectedCodexFastModeEnabledForSend =
@@ -2714,7 +2959,11 @@ export default function ChatView({
         dispatchMode,
       });
     }
-    if (queuedChatTurn === null && composerImagesForSend.length === 0) {
+    if (
+      queuedChatTurn === null &&
+      composerImagesForSend.length === 0 &&
+      selectedComposerExtensions.length === 0
+    ) {
       const handledStandaloneSlashCommand = await handleStandaloneSlashCommand(trimmed);
       if (handledStandaloneSlashCommand) {
         return true;
@@ -4160,12 +4409,36 @@ export default function ChatView({
         const applied = applyPromptReplacement(
           trigger.rangeStart,
           trigger.rangeEnd,
-          `${skillMentionPrefix(selectedProvider)}${item.skill.name} `,
+          "",
           {
             expectedText: expectedToken,
           },
         );
         if (applied) {
+          setSelectedComposerExtensions((existing) =>
+            mergeSelectedComposerExtensions(existing, [
+              selectedComposerExtensionFromSkill({ skill: item.skill, plugins: providerPlugins }),
+            ]),
+          );
+          setComposerHighlightedItemId(null);
+        }
+        return;
+      }
+      if (item.type === "plugin") {
+        const applied = applyPromptReplacement(
+          trigger.rangeStart,
+          trigger.rangeEnd,
+          "",
+          {
+            expectedText: expectedToken,
+          },
+        );
+        if (applied) {
+          setSelectedComposerExtensions((existing) =>
+            mergeSelectedComposerExtensions(existing, [
+              selectedComposerExtensionFromPlugin(item.plugin),
+            ]),
+          );
           setComposerHighlightedItemId(null);
         }
         return;
@@ -4182,8 +4455,8 @@ export default function ChatView({
       applyPromptReplacement,
       handleSlashCommandSelection,
       onProviderModelSelect,
+      providerPlugins,
       resolveActiveComposerTrigger,
-      selectedProvider,
     ],
   );
   const onComposerMenuItemHighlighted = useCallback((itemId: string | null) => {
@@ -4214,7 +4487,8 @@ export default function ChatView({
         workspaceEntriesQuery.isFetching)) ||
     ((composerTriggerKind === "slash-command" || composerTriggerKind === "slash-model") &&
       providerCommandsQuery.isFetching) ||
-    (composerTriggerKind === "skill" && providerSkillsQuery.isFetching);
+    ((composerTriggerKind === "skill" || composerTriggerKind === "slash-command") &&
+      (providerSkillsQuery.isFetching || providerPluginsQuery.isFetching));
 
   const onPromptChange = useCallback(
     (nextPrompt: string, nextCursor: number, cursorAdjacentToMention: boolean) => {
@@ -4248,9 +4522,21 @@ export default function ChatView({
   );
 
   const onComposerCommandKey = (
-    key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab",
+    key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab" | "Backspace",
     event: KeyboardEvent,
   ) => {
+    if (
+      key === "Backspace" &&
+      !event.shiftKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      promptRef.current.length === 0 &&
+      selectedComposerExtensions.length > 0
+    ) {
+      setSelectedComposerExtensions((existing) => existing.slice(0, -1));
+      return true;
+    }
+
     if (key === "Tab" && event.shiftKey) {
       toggleInteractionMode();
       return true;
@@ -4528,6 +4814,7 @@ export default function ChatView({
               onRemovePinnedSelection={onRemovePinnedSelection}
               pendingPinnedSelectionJumpId={pendingPinnedSelectionJumpId}
               onPinnedSelectionJumpHandled={onPinnedSelectionJumpHandled}
+              userMessageMentionDescriptors={userMessageMentionDescriptors}
             />
           )}
         </div>
@@ -4706,6 +4993,32 @@ export default function ChatView({
                   />
                 </div>
               )}
+
+              {!isComposerApprovalState &&
+              pendingUserInputs.length === 0 &&
+              selectedComposerExtensions.length > 0 ? (
+                <div className="mb-2 flex items-center gap-2 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                  {selectedComposerExtensions.map((extension) => (
+                    <button
+                      type="button"
+                      key={extension.id}
+                      className="group inline-flex shrink-0 items-center gap-1.5 rounded-md px-0.5 py-0.5 text-sm font-medium text-blue-400 outline-none transition-colors hover:bg-blue-400/10 focus-visible:ring-2 focus-visible:ring-blue-400/45"
+                      title={`Remove ${extension.label}`}
+                      aria-label={`Remove ${extension.label}`}
+                      onClick={() => {
+                        setSelectedComposerExtensions((existing) =>
+                          removeSelectedComposerExtensionById(existing, extension.id),
+                        );
+                        scheduleComposerFocus();
+                      }}
+                    >
+                      <SelectedComposerExtensionIcon extension={extension} />
+                      <span className="max-w-40 truncate">{extension.label}</span>
+                      <XIcon className="size-3 opacity-0 transition-opacity group-hover:opacity-70 group-focus-visible:opacity-70" />
+                    </button>
+                  ))}
+                </div>
+              ) : null}
 
               {!isComposerApprovalState &&
               pendingUserInputs.length === 0 &&
@@ -5099,7 +5412,9 @@ export default function ChatView({
                         disabled={
                           isSendBusy ||
                           isConnecting ||
-                          (!prompt.trim() && composerImages.length === 0)
+                          (!prompt.trim() &&
+                            selectedComposerExtensions.length === 0 &&
+                            composerImages.length === 0)
                         }
                         aria-label={
                           isConnecting

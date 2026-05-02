@@ -398,7 +398,7 @@ interface ComposerPromptEditorProps {
   className?: string;
   onChange: (nextValue: string, nextCursor: number, cursorAdjacentToMention: boolean) => void;
   onCommandKeyDown?: (
-    key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab",
+    key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab" | "Backspace",
     event: KeyboardEvent,
   ) => boolean;
   onPaste: ClipboardEventHandler<HTMLElement>;
@@ -410,7 +410,7 @@ interface ComposerPromptEditorInnerProps extends ComposerPromptEditorProps {
 
 function ComposerCommandKeyPlugin(props: {
   onCommandKeyDown?: (
-    key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab",
+    key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab" | "Backspace",
     event: KeyboardEvent,
   ) => boolean;
 }) {
@@ -418,7 +418,7 @@ function ComposerCommandKeyPlugin(props: {
 
   useEffect(() => {
     const handleCommand = (
-      key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab",
+      key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab" | "Backspace",
       event: KeyboardEvent | null,
     ): boolean => {
       if (!props.onCommandKeyDown || !event) {
@@ -452,12 +452,18 @@ function ComposerCommandKeyPlugin(props: {
       (event) => handleCommand("Tab", event),
       COMMAND_PRIORITY_HIGH,
     );
+    const unregisterBackspace = editor.registerCommand(
+      KEY_BACKSPACE_COMMAND,
+      (event) => handleCommand("Backspace", event),
+      COMMAND_PRIORITY_HIGH,
+    );
 
     return () => {
       unregisterArrowDown();
       unregisterArrowUp();
       unregisterEnter();
       unregisterTab();
+      unregisterBackspace();
     };
   }, [editor, props]);
 

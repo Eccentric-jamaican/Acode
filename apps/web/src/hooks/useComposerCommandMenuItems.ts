@@ -2,11 +2,13 @@ import type {
   ProjectEntry,
   ProviderKind,
   ProviderNativeCommandDescriptor,
+  ProviderPluginDescriptor,
   ProviderSkillDescriptor,
 } from "@t3tools/contracts";
 import { useMemo } from "react";
 import {
   buildCommandSearchBlob,
+  buildPluginSearchBlob,
   buildSkillSearchBlob,
   normalizeProviderDiscoveryText,
 } from "~/lib/providerDiscovery";
@@ -31,6 +33,17 @@ type SearchableModelOption = {
   searchProvider: string;
 };
 
+function pluginComposerIcon(plugin: ProviderPluginDescriptor | undefined): string | undefined {
+  return plugin?.interface?.composerIcon ?? plugin?.interface?.logo;
+}
+
+function pluginForSkill(
+  skill: ProviderSkillDescriptor,
+  plugins: readonly ProviderPluginDescriptor[],
+): ProviderPluginDescriptor | undefined {
+  return plugins.find((plugin) => skill.path.startsWith(plugin.source.path));
+}
+
 export function useComposerCommandMenuItems(input: {
   composerTrigger: ComposerTrigger | null;
   provider: ProviderKind;
@@ -39,6 +52,7 @@ export function useComposerCommandMenuItems(input: {
   canOfferForkCommand: boolean;
   providerNativeCommands: readonly ProviderNativeCommandDescriptor[];
   providerNativeCommandNames: readonly string[];
+  providerPlugins: readonly ProviderPluginDescriptor[];
   providerSkills: readonly ProviderSkillDescriptor[];
   workspaceEntries: readonly ProjectEntry[];
   searchableModelOptions: readonly SearchableModelOption[];
@@ -52,6 +66,7 @@ export function useComposerCommandMenuItems(input: {
     canOfferForkCommand,
     providerNativeCommands,
     providerNativeCommandNames,
+    providerPlugins,
     providerSkills,
     workspaceEntries,
     searchableModelOptions,
@@ -107,36 +122,84 @@ export function useComposerCommandMenuItems(input: {
           label: `/${command.name}`,
           description: command.description ?? `Run ${provider} native command`,
         }));
-      const slashSkillItems: ComposerCommandItem[] =
-        provider === "claudeAgent"
-          ? providerSkills
-              .filter((skill) =>
-                normalizedQuery ? buildSkillSearchBlob(skill).includes(normalizedQuery) : true,
-              )
-              .map((skill) => ({
-                id: `skill:${skill.path}`,
-                type: "skill" as const,
-                skill,
-                label: skill.interface?.displayName ?? skill.name,
-                description: skill.interface?.shortDescription ?? skill.description ?? skill.path,
-              }))
-          : [];
-      return [...builtInItems, ...providerCommandItems, ...slashSkillItems];
+      const slashSkillItems: ComposerCommandItem[] = providerSkills
+        .filter((skill) =>
+          normalizedQuery ? buildSkillSearchBlob(skill).includes(normalizedQuery) : true,
+        )
+        .map((skill) => {
+          const iconUrl = pluginComposerIcon(pluginForSkill(skill, providerPlugins));
+          const item: ComposerCommandItem = {
+            id: `skill:${skill.path}`,
+            type: "skill" as const,
+            skill,
+            label: skill.interface?.displayName ?? skill.name,
+            description: skill.interface?.shortDescription ?? skill.description ?? skill.path,
+          };
+          if (iconUrl) item.iconUrl = iconUrl;
+          return item;
+        });
+      const slashPluginItems: ComposerCommandItem[] = providerPlugins
+        .filter((plugin) =>
+          normalizedQuery ? buildPluginSearchBlob(plugin).includes(normalizedQuery) : true,
+        )
+        .map((plugin) => {
+          const iconUrl = pluginComposerIcon(plugin);
+          const item: ComposerCommandItem = {
+            id: `plugin:${plugin.id}`,
+            type: "plugin" as const,
+            plugin,
+            label: plugin.interface?.displayName ?? plugin.name,
+            description:
+              plugin.interface?.shortDescription ??
+              plugin.interface?.longDescription ??
+              plugin.interface?.category ??
+              "Codex plugin",
+          };
+          if (iconUrl) item.iconUrl = iconUrl;
+          return item;
+        });
+      return [...builtInItems, ...providerCommandItems, ...slashPluginItems, ...slashSkillItems];
     }
 
     if (composerTrigger.kind === "skill") {
       const normalizedQuery = normalizeProviderDiscoveryText(composerTrigger.query);
-      return providerSkills
+      const pluginItems: ComposerCommandItem[] = providerPlugins
+        .filter((plugin) =>
+          normalizedQuery ? buildPluginSearchBlob(plugin).includes(normalizedQuery) : true,
+        )
+        .map((plugin) => {
+          const iconUrl = pluginComposerIcon(plugin);
+          const item: ComposerCommandItem = {
+            id: `plugin:${plugin.id}`,
+            type: "plugin" as const,
+            plugin,
+            label: plugin.interface?.displayName ?? plugin.name,
+            description:
+              plugin.interface?.shortDescription ??
+              plugin.interface?.longDescription ??
+              plugin.interface?.category ??
+              "Codex plugin",
+          };
+          if (iconUrl) item.iconUrl = iconUrl;
+          return item;
+        });
+      const skillItems: ComposerCommandItem[] = providerSkills
         .filter((skill) =>
           normalizedQuery ? buildSkillSearchBlob(skill).includes(normalizedQuery) : true,
         )
-        .map((skill) => ({
-          id: `skill:${skill.path}`,
-          type: "skill",
-          skill,
-          label: skill.interface?.displayName ?? skill.name,
-          description: skill.interface?.shortDescription ?? skill.description ?? skill.path,
-        }));
+        .map((skill) => {
+          const iconUrl = pluginComposerIcon(pluginForSkill(skill, providerPlugins));
+          const item: ComposerCommandItem = {
+            id: `skill:${skill.path}`,
+            type: "skill" as const,
+            skill,
+            label: skill.interface?.displayName ?? skill.name,
+            description: skill.interface?.shortDescription ?? skill.description ?? skill.path,
+          };
+          if (iconUrl) item.iconUrl = iconUrl;
+          return item;
+        });
+      return [...pluginItems, ...skillItems];
     }
 
     return searchableModelOptions
@@ -165,6 +228,7 @@ export function useComposerCommandMenuItems(input: {
     canOfferForkCommand,
     providerNativeCommandNames,
     providerNativeCommands,
+    providerPlugins,
     providerSkills,
     searchableModelOptions,
     selectedServiceTierSetting,

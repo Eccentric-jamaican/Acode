@@ -758,7 +758,7 @@ function prStatusIndicator(pr: ThreadPr): PrStatusIndicator | null {
 const PRIMARY_NAV_ITEMS: Array<{
   icon: LucideIcon;
   label: string;
-  action: "new-thread" | "placeholder" | "orchestrate";
+  action: "new-thread" | "placeholder" | "orchestrate" | "plugins" | "skills";
   testId: string;
 }> = [
   {
@@ -776,13 +776,13 @@ const PRIMARY_NAV_ITEMS: Array<{
   {
     icon: BlocksIcon ?? LayoutGridIcon,
     label: "Skills",
-    action: "placeholder",
+    action: "skills",
     testId: "sidebar-primary-skills",
   },
   {
     icon: LayoutGridIcon,
     label: "Plugins",
-    action: "placeholder",
+    action: "plugins",
     testId: "sidebar-primary-plugins",
   },
   {
@@ -3149,7 +3149,11 @@ export default function Sidebar() {
                 <SidebarMenuButton
                   render={<button type="button" data-testid={testId} />}
                   size="default"
-                  isActive={action === "orchestrate" && pathname === "/orchestrate"}
+                  isActive={
+                    (action === "orchestrate" && pathname === "/orchestrate") ||
+                    (action === "plugins" && pathname === "/plugins") ||
+                    (action === "skills" && pathname === "/skills")
+                  }
                   className="h-9 gap-3 rounded-md px-3 text-[14px] font-normal text-foreground/85 hover:bg-accent/70 data-[active=true]:bg-accent/70 data-[active=true]:text-foreground"
                   onClick={() => {
                     if (action === "placeholder") {
@@ -3158,6 +3162,10 @@ export default function Sidebar() {
                     }
                     if (action === "orchestrate") {
                       handleOpenOrchestrate();
+                      return;
+                    }
+                    if (action === "plugins" || action === "skills") {
+                      void navigate({ to: action === "plugins" ? "/plugins" : "/skills" });
                       return;
                     }
                     handlePrimaryNewThread();

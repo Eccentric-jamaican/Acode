@@ -3,6 +3,7 @@ import type {
   ProjectEntry,
   ProviderKind,
   ProviderNativeCommandDescriptor,
+  ProviderPluginDescriptor,
   ProviderSkillDescriptor,
 } from "@t3tools/contracts";
 import { memo, type ReactElement, useEffect, useMemo, useRef, useState } from "react";
@@ -18,9 +19,9 @@ import {
   GlobeIcon,
   KanbanSquareIcon,
   MessageSquareIcon,
+  BoxIcon,
   PlugIcon,
   Terminal,
-  Wand2,
   ZapIcon,
 } from "lucide-react";
 import {
@@ -69,6 +70,15 @@ export type ComposerCommandItem =
       skill: ProviderSkillDescriptor;
       label: string;
       description: string;
+      iconUrl?: string | undefined;
+    }
+  | {
+      id: string;
+      type: "plugin";
+      plugin: ProviderPluginDescriptor;
+      label: string;
+      description: string;
+      iconUrl?: string | undefined;
     }
   | {
       id: string;
@@ -229,6 +239,32 @@ const VscodeEntryIcon = memo(function VscodeEntryIcon(props: {
   );
 });
 
+const ProviderExtensionIcon = memo(function ProviderExtensionIcon(props: {
+  kind: "plugin" | "skill";
+  iconUrl?: string | undefined;
+  className?: string;
+}) {
+  const [failedIconUrl, setFailedIconUrl] = useState<string | null>(null);
+  const failed = props.iconUrl !== undefined && failedIconUrl === props.iconUrl;
+  const Icon = props.kind === "plugin" ? PlugIcon : BoxIcon;
+
+  if (props.iconUrl && !failed) {
+    return (
+      <img
+        src={props.iconUrl}
+        alt=""
+        aria-hidden="true"
+        className={cn("size-4 shrink-0 object-contain", props.className)}
+        loading="lazy"
+        draggable={false}
+        onError={() => setFailedIconUrl(props.iconUrl ?? null)}
+      />
+    );
+  }
+
+  return <Icon className={cn("size-4 text-muted-foreground", props.className)} />;
+});
+
 const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
   item: ComposerCommandItem;
   resolvedTheme: "light" | "dark";
@@ -252,7 +288,9 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
       case "provider-native-command":
         return resolveSlashLikeCommandIcon(props.item.command);
       case "skill":
-        return <Wand2 className="size-4 text-muted-foreground" />;
+        return <ProviderExtensionIcon kind="skill" iconUrl={props.item.iconUrl} />;
+      case "plugin":
+        return <ProviderExtensionIcon kind="plugin" iconUrl={props.item.iconUrl} />;
       case "model":
         return <Brain className="size-4 text-muted-foreground" />;
       default:
@@ -308,6 +346,11 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
       {props.item.type === "model" && (
         <Badge variant="outline" className="px-1 py-0 text-[9px]">
           model
+        </Badge>
+      )}
+      {props.item.type === "plugin" && (
+        <Badge variant="outline" className="px-1 py-0 text-[9px]">
+          plugin
         </Badge>
       )}
     </CommandItem>

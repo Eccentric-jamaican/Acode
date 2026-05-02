@@ -20,6 +20,7 @@ import {
 import { FileDiff } from "@pierre/diffs/react";
 import {
   BotIcon,
+  BoxIcon,
   CheckIcon,
   ChevronRightIcon,
   CircleAlertIcon,
@@ -33,6 +34,7 @@ import {
   HammerIcon,
   type LucideIcon,
   PinIcon,
+  PlugIcon,
   SquarePenIcon,
   TerminalIcon,
   Undo2Icon,
@@ -120,6 +122,7 @@ const CHAT_PIN_MARKER_SCROLL_SETTLE_MS = 96;
 const CHAT_SELECTION_IGNORE_SELECTOR =
   "button, summary, [role='button'], [role='menuitem'], input, textarea, select, option, [data-chat-selection-ignore='true']";
 const EMPTY_INVOCATION_DIFF_FILES: ReadonlyArray<InvocationDiffFile> = [];
+const LEADING_PROVIDER_MENTION_PATTERN = /^([$/])([^\s]+)(?=\s|$)/;
 
 export interface MessagesTimelineProps {
   isFocusedPane?: boolean;
@@ -154,6 +157,14 @@ export interface MessagesTimelineProps {
   onRemovePinnedSelection: (pinnedSelectionId: string) => void;
   pendingPinnedSelectionJumpId: string | null;
   onPinnedSelectionJumpHandled: (pinnedSelectionId: string) => void;
+  userMessageMentionDescriptors: readonly UserMessageMentionDescriptor[];
+}
+
+export interface UserMessageMentionDescriptor {
+  mentionName: string;
+  label: string;
+  type: "plugin" | "skill";
+  iconUrl?: string | undefined;
 }
 
 function formatSubagentModelLabel(model: string | undefined): string | null {
@@ -219,6 +230,109 @@ interface AssistantSelectionActionState {
   plainTextStart: number;
   plainTextEnd: number;
 }
+
+type UserMessageTextSegment =
+  | { type: "mention"; key: string; descriptor: UserMessageMentionDescriptor }
+  | { type: "text"; key: string; text: string };
+
+function splitUserMessageProviderMentions(
+  text: string,
+  descriptors: readonly UserMessageMentionDescriptor[],
+): UserMessageTextSegment[] {
+  const descriptorsByName = new Map(
+    descriptors.map((descriptor) => [descriptor.mentionName.toLowerCase(), descriptor]),
+  );
+  const segments: UserMessageTextSegment[] = [];
+  let remaining = text;
+  let offset = 0;
+
+  while (remaining.length > 0) {
+    const match = LEADING_PROVIDER_MENTION_PATTERN.exec(remaining);
+    if (!match?.[2]) break;
+    const rawName = match[2];
+    const descriptor =
+      descriptorsByName.get(rawName.toLowerCase()) ?? {
+        mentionName: rawName,
+        label: rawName,
+        type: "plugin" as const,
+      };
+    segments.push({
+      type: "mention",
+      key: `mention:${offset}:${rawName}`,
+      descriptor,
+    });
+    const nextRemaining = remaining.slice(match[0].length);
+    const trimmedRemaining = nextRemaining.trimStart();
+    offset += match[0].length + nextRemaining.length - trimmedRemaining.length;
+    remaining = trimmedRemaining;
+  }
+
+  if (remaining.length > 0) {
+    segments.push({ type: "text", key: `text:${offset}`, text: remaining });
+  }
+  return segments.length > 0 ? segments : [{ type: "text", key: "text:0", text }];
+}
+
+const UserMessageMentionChip = memo(function UserMessageMentionChip(props: {
+  descriptor: UserMessageMentionDescriptor;
+}) {
+  const [failedIconUrl, setFailedIconUrl] = useState<string | null>(null);
+  const failed =
+    props.descriptor.iconUrl !== undefined && failedIconUrl === props.descriptor.iconUrl;
+  const Icon = props.descriptor.type === "plugin" ? PlugIcon : BoxIcon;
+
+  return (
+    <span className="inline-flex align-middle items-center gap-1.5 rounded-md px-0.5 py-0.5 text-sm font-medium text-blue-500 dark:text-blue-400">
+      {props.descriptor.iconUrl && !failed ? (
+        <img
+          src={props.descriptor.iconUrl}
+          alt=""
+          aria-hidden="true"
+          className="size-4 shrink-0 object-contain"
+          draggable={false}
+          onError={() => setFailedIconUrl(props.descriptor.iconUrl ?? null)}
+        />
+      ) : (
+        <Icon className="size-4 shrink-0" />
+      )}
+      <span className="max-w-40 truncate">{props.descriptor.label}</span>
+    </span>
+  );
+});
+
+const UserMessageText = memo(function UserMessageText(props: {
+  text: string;
+  cwd: string | undefined;
+  descriptors: readonly UserMessageMentionDescriptor[];
+  onOpenFilePath: ((path: string) => void) | undefined;
+}) {
+  const segments = useMemo(
+    () => splitUserMessageProviderMentions(props.text, props.descriptors),
+    [props.descriptors, props.text],
+  );
+
+  return (
+    <div className="flex flex-wrap items-baseline gap-x-1.5 gap-y-1">
+      {segments.map((segment) =>
+        segment.type === "mention" ? (
+          <UserMessageMentionChip
+            key={segment.key}
+            descriptor={segment.descriptor}
+          />
+        ) : (
+          <ChatMarkdown
+            key={segment.key}
+            text={segment.text}
+            cwd={props.cwd}
+            isStreaming={false}
+            variant="user"
+            onOpenFilePath={props.onOpenFilePath}
+          />
+        ),
+      )}
+    </div>
+  );
+});
 
 interface PinnedSelectionMarker {
   id: string;
@@ -1969,11 +2083,10 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
                     </div>
                   )}
                   {row.message.text && (
-                    <ChatMarkdown
+                    <UserMessageText
                       text={row.message.text}
                       cwd={markdownCwd}
-                      isStreaming={false}
-                      variant="user"
+                      descriptors={props.userMessageMentionDescriptors}
                       onOpenFilePath={props.onOpenFilePath}
                     />
                   )}

@@ -1,7 +1,7 @@
 import { type ResolvedKeybindingsConfig } from "@t3tools/contracts";
 import { useQuery } from "@tanstack/react-query";
 import { Outlet, createFileRoute, useNavigate, useRouterState } from "@tanstack/react-router";
-import { type CSSProperties, useEffect } from "react";
+import { type CSSProperties, useEffect, useRef } from "react";
 
 import DesktopShellTitlebarBand from "../components/DesktopShellTitlebarBand";
 import { DiffWorkerPoolProvider } from "../components/DiffWorkerPoolProvider";
@@ -73,6 +73,21 @@ function ChatRouteGlobalShortcuts() {
   return null;
 }
 
+function ChatRouteSidebarSync({ collapseSidebar }: { collapseSidebar: boolean }) {
+  const { open, openMobile, setOpen, setOpenMobile } = useSidebar();
+  const previousCollapseSidebarRef = useRef(collapseSidebar);
+
+  useEffect(() => {
+    const enteredCollapsedRoute = collapseSidebar && !previousCollapseSidebarRef.current;
+    previousCollapseSidebarRef.current = collapseSidebar;
+    if (!enteredCollapsedRoute) return;
+    if (open) void setOpen(false);
+    if (openMobile) setOpenMobile(false);
+  }, [collapseSidebar, open, openMobile, setOpen, setOpenMobile]);
+
+  return null;
+}
+
 function ChatRouteLayout() {
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
@@ -83,13 +98,14 @@ function ChatRouteLayout() {
     !pathname.startsWith("/orchestrate") &&
     pathname.split("/").filter(Boolean).length === 1;
   const isSettingsRoute = pathname.startsWith("/settings");
+  const isCatalogRoute = pathname.startsWith("/plugins") || pathname.startsWith("/skills");
   const hasDesktopShellChrome =
     typeof window !== "undefined" &&
     (window.desktopBridge !== undefined || window.nativeApi !== undefined);
 
   return (
     <SidebarProvider
-      defaultOpen
+      defaultOpen={!isCatalogRoute}
       style={
         {
           "--app-desktop-main-surface": isThreadRoute
@@ -99,6 +115,7 @@ function ChatRouteLayout() {
       }
     >
       <ChatRouteGlobalShortcuts />
+      <ChatRouteSidebarSync collapseSidebar={isCatalogRoute} />
       <Sidebar
         side="left"
         collapsible="offcanvas"

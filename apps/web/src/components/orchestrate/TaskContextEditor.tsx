@@ -260,7 +260,10 @@ export function TaskContextEditor(props: {
   );
 
   const onCommandKeyDown = useCallback(
-    (key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab", event: KeyboardEvent) => {
+    (key: "ArrowDown" | "ArrowUp" | "Enter" | "Tab" | "Backspace", event: KeyboardEvent) => {
+      if (key === "Backspace") {
+        return false;
+      }
       const { trigger: activeTrigger } = resolveActiveTrigger();
       const menuIsActive =
         activeTrigger?.kind === "path" && (menuItemsRef.current.length > 0 || isMenuLoading);

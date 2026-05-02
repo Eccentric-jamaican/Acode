@@ -41,6 +41,7 @@ import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { normalizeInvocationDiffFiles } from "./InvocationDiffNormalization.ts";
+import { discoverPlugins, readDiscoveredPlugin } from "./PluginDiscovery.ts";
 import { discoverSkillsForCwd } from "./SkillDiscovery.ts";
 
 const PROVIDER = "codex" as const;
@@ -1582,8 +1583,8 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         supportsSkillMentions: true,
         supportsSkillDiscovery: true,
         supportsNativeSlashCommandDiscovery: false,
-        supportsPluginMentions: false,
-        supportsPluginDiscovery: false,
+        supportsPluginMentions: true,
+        supportsPluginDiscovery: true,
         supportsRuntimeModelList: false,
       },
       startSession,
@@ -1603,8 +1604,8 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
           supportsSkillMentions: true,
           supportsSkillDiscovery: true,
           supportsNativeSlashCommandDiscovery: false,
-          supportsPluginMentions: false,
-          supportsPluginDiscovery: false,
+          supportsPluginMentions: true,
+          supportsPluginDiscovery: true,
           supportsRuntimeModelList: false,
         }),
       listSkills: (input) =>
@@ -1618,6 +1619,26 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
           commands: [],
           source: "unsupported",
           cached: false,
+        }),
+      listPlugins: () => Effect.succeed(discoverPlugins()),
+      readPlugin: (input) =>
+        Effect.gen(function* () {
+          const plugin = readDiscoveredPlugin({
+            marketplacePath: input.marketplacePath,
+            pluginName: input.pluginName,
+          });
+          if (!plugin) {
+            return yield* new ProviderAdapterValidationError({
+              provider: PROVIDER,
+              operation: "readPlugin",
+              issue: `Plugin '${input.pluginName}' was not found.`,
+            });
+          }
+          return {
+            plugin,
+            source: "codex-home",
+            cached: false,
+          };
         }),
       listStoredThreads,
       listStoredSkills,
