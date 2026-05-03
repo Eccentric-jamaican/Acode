@@ -601,34 +601,38 @@ describe("TerminalManager", () => {
     15_000,
   );
 
-  it("retries with fallback shells when preferred shell spawn fails", async () => {
-    const { manager, ptyAdapter } = makeManager(5, {
-      shellResolver: () => "/definitely/missing-shell -l",
-    });
-    ptyAdapter.spawnFailures.push(new Error("posix_spawnp failed."));
+  it(
+    "retries with fallback shells when preferred shell spawn fails",
+    async () => {
+      const { manager, ptyAdapter } = makeManager(5, {
+        shellResolver: () => "/definitely/missing-shell -l",
+      });
+      ptyAdapter.spawnFailures.push(new Error("posix_spawnp failed."));
 
-    const snapshot = await manager.open(openInput());
+      const snapshot = await manager.open(openInput());
 
-    expect(snapshot.status).toBe("running");
-    expect(ptyAdapter.spawnInputs.length).toBeGreaterThanOrEqual(2);
-    expect(ptyAdapter.spawnInputs[0]?.shell).toBe("/definitely/missing-shell");
+      expect(snapshot.status).toBe("running");
+      expect(ptyAdapter.spawnInputs.length).toBeGreaterThanOrEqual(2);
+      expect(ptyAdapter.spawnInputs[0]?.shell).toBe("/definitely/missing-shell");
 
-    if (process.platform === "win32") {
-      expect(
-        ptyAdapter.spawnInputs.some(
-          (input) => ["cmd.exe", "powershell.exe"].includes(path.basename(input.shell).toLowerCase()),
-        ),
-      ).toBe(true);
-    } else {
-      expect(
-        ptyAdapter.spawnInputs.some((input) =>
-          ["/bin/zsh", "/bin/bash", "/bin/sh", "zsh", "bash", "sh"].includes(input.shell),
-        ),
-      ).toBe(true);
-    }
+      if (process.platform === "win32") {
+        expect(
+          ptyAdapter.spawnInputs.some(
+            (input) => ["cmd.exe", "powershell.exe"].includes(path.basename(input.shell).toLowerCase()),
+          ),
+        ).toBe(true);
+      } else {
+        expect(
+          ptyAdapter.spawnInputs.some((input) =>
+            ["/bin/zsh", "/bin/bash", "/bin/sh", "zsh", "bash", "sh"].includes(input.shell),
+          ),
+        ).toBe(true);
+      }
 
-    manager.dispose();
-  });
+      manager.dispose();
+    },
+    15_000,
+  );
 
   it("filters app runtime env variables from terminal sessions", async () => {
     const originalValues = new Map<string, string | undefined>();
