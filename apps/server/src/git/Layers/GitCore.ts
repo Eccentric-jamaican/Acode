@@ -1,4 +1,6 @@
 import { Cache, Data, Duration, Effect, Exit, FileSystem, Layer, Path } from "effect";
+import { spawn } from "node:child_process";
+import * as NodePath from "node:path";
 
 import { GitCommandError } from "../Errors.ts";
 import { GitService } from "../Services/GitService.ts";
@@ -8,6 +10,7 @@ const STATUS_UPSTREAM_REFRESH_INTERVAL = Duration.seconds(15);
 const STATUS_UPSTREAM_REFRESH_TIMEOUT = Duration.seconds(5);
 const STATUS_UPSTREAM_REFRESH_CACHE_CAPACITY = 2_048;
 const DEFAULT_BASE_BRANCH_CANDIDATES = ["main", "master"] as const;
+const GIT_FILE_PREVIEW_MAX_BYTES = 25 * 1024 * 1024;
 
 class StatusUpstreamRefreshCacheKey extends Data.Class<{
   cwd: string;
@@ -182,6 +185,65 @@ function createGitCommandError(
     cwd,
     detail,
     ...(cause !== undefined ? { cause } : {}),
+  });
+}
+
+function isPathInsideWorkspace(cwd: string, relativePath: string): boolean {
+  const root = NodePath.resolve(cwd);
+  const target = NodePath.resolve(root, relativePath);
+  const relative = NodePath.relative(root, target);
+  return relative.length === 0 || (!relative.startsWith("..") && !NodePath.isAbsolute(relative));
+}
+
+function readGitObjectBytes(input: {
+  args: readonly string[];
+  cwd: string;
+  operation: string;
+}): Effect.Effect<Buffer | null, GitCommandError> {
+  return Effect.tryPromise({
+    try: () =>
+      new Promise<Buffer | null>((resolve, reject) => {
+        const child = spawn("git", [...input.args], {
+          cwd: input.cwd,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        const stdoutChunks: Buffer[] = [];
+        let stdoutBytes = 0;
+        let settled = false;
+
+        const settle = (value: Buffer | null) => {
+          if (settled) return;
+          settled = true;
+          resolve(value);
+        };
+        const fail = (cause: unknown) => {
+          if (settled) return;
+          settled = true;
+          reject(cause);
+        };
+
+        child.stdout.on("data", (chunk: Buffer) => {
+          stdoutBytes += chunk.byteLength;
+          if (stdoutBytes > GIT_FILE_PREVIEW_MAX_BYTES) {
+            child.kill();
+            fail(new Error(`File preview exceeded ${GIT_FILE_PREVIEW_MAX_BYTES} bytes.`));
+            return;
+          }
+          stdoutChunks.push(chunk);
+        });
+        child.stderr.resume();
+        child.on("error", fail);
+        child.on("close", (code) => {
+          if (settled) return;
+          if (code === 0) {
+            settle(Buffer.concat(stdoutChunks));
+            return;
+          }
+          settle(null);
+        });
+      }),
+    catch: (cause) =>
+      createGitCommandError(input.operation, input.cwd, input.args, "Failed to read git file.", cause),
   });
 }
 
@@ -648,6 +710,83 @@ const makeGitCore = Effect.gen(function* () {
       return {
         scope: input.scope,
         patch,
+      };
+    });
+
+  const filePreview: GitCoreShape["filePreview"] = (input) =>
+    Effect.gen(function* () {
+      if (!isPathInsideWorkspace(input.cwd, input.path)) {
+        return yield* createGitCommandError(
+          "GitCore.filePreview",
+          input.cwd,
+          ["show", input.path],
+          "File preview path must stay inside the workspace.",
+        );
+      }
+
+      const readRef = (ref: string, refLabel: string) =>
+        readGitObjectBytes({
+          cwd: input.cwd,
+          operation: "GitCore.filePreview.readRef",
+          args: ["show", `${ref}:${input.path}`],
+        }).pipe(
+          Effect.map((bytes) =>
+            bytes
+              ? {
+                  contentsBase64: bytes.toString("base64"),
+                  refLabel,
+                  status: "present" as const,
+                }
+              : {
+                  refLabel,
+                  status: "missing" as const,
+                },
+          ),
+        );
+
+      const readWorktree = (refLabel: string) =>
+        fileSystem.readFile(NodePath.resolve(input.cwd, input.path)).pipe(
+          Effect.map((bytes) => ({
+            contentsBase64: Buffer.from(bytes).toString("base64"),
+            refLabel,
+            status: "present" as const,
+          })),
+          Effect.catch(() =>
+            Effect.succeed({
+              refLabel,
+              status: "missing" as const,
+            }),
+          ),
+        );
+
+      const branchBaseRef =
+        input.scope === "branch" && input.baseRef
+          ? yield* runGitStdout("GitCore.filePreview.mergeBase", input.cwd, [
+              "merge-base",
+              "HEAD",
+              input.baseRef,
+            ]).pipe(
+              Effect.map((stdout) => stdout.trim()),
+              Effect.catch(() => Effect.succeed(input.baseRef ?? "HEAD")),
+            )
+          : null;
+
+      const before =
+        input.scope === "branch"
+          ? yield* readRef(branchBaseRef ?? input.baseRef ?? "HEAD", "Before")
+          : yield* readRef("HEAD", "Before");
+      const after =
+        input.scope === "staged"
+          ? yield* readRef("", "After")
+          : input.scope === "branch"
+            ? yield* readRef("HEAD", "After")
+            : yield* readWorktree("After");
+
+      return {
+        after,
+        before,
+        path: input.path,
+        scope: input.scope,
       };
     });
 
@@ -1351,6 +1490,7 @@ const makeGitCore = Effect.gen(function* () {
     status,
     statusDetails,
     diff,
+    filePreview,
     reviewAction,
     prepareCommitContext,
     commit,

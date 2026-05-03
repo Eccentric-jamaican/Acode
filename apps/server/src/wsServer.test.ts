@@ -1982,11 +1982,12 @@ describe("WebSocket Server", () => {
 
     const status = vi.fn(() => Effect.succeed(statusResult));
     const diff = vi.fn(() => Effect.succeed({ scope: "unstaged" as const, patch: "" }));
+    const filePreview = vi.fn(() => Effect.void as any);
     const reviewAction = vi.fn(() =>
       Effect.succeed({ action: "stageAll" as const, status: "applied" as const }),
     );
     const runStackedAction = vi.fn(() => Effect.void as any);
-    const gitManager: GitManagerShape = { status, diff, reviewAction, runStackedAction };
+    const gitManager: GitManagerShape = { status, diff, filePreview, reviewAction, runStackedAction };
 
     server = await createTestServer({ cwd: "/test", gitManager });
     const addr = server.address();
@@ -2011,11 +2012,12 @@ describe("WebSocket Server", () => {
     };
     const status = vi.fn(() => Effect.void as any);
     const diff = vi.fn(() => Effect.succeed(diffResult));
+    const filePreview = vi.fn(() => Effect.void as any);
     const reviewAction = vi.fn(() =>
       Effect.succeed({ action: "stageAll" as const, status: "applied" as const }),
     );
     const runStackedAction = vi.fn(() => Effect.void as any);
-    const gitManager: GitManagerShape = { status, diff, reviewAction, runStackedAction };
+    const gitManager: GitManagerShape = { status, diff, filePreview, reviewAction, runStackedAction };
 
     server = await createTestServer({ cwd: "/test", gitManager });
     const addr = server.address();
@@ -2041,9 +2043,10 @@ describe("WebSocket Server", () => {
     };
     const status = vi.fn(() => Effect.void as any);
     const diff = vi.fn(() => Effect.succeed({ scope: "unstaged" as const, patch: "" }));
+    const filePreview = vi.fn(() => Effect.void as any);
     const reviewAction = vi.fn(() => Effect.succeed(reviewActionResult));
     const runStackedAction = vi.fn(() => Effect.void as any);
-    const gitManager: GitManagerShape = { status, diff, reviewAction, runStackedAction };
+    const gitManager: GitManagerShape = { status, diff, filePreview, reviewAction, runStackedAction };
 
     server = await createTestServer({ cwd: "/test", gitManager });
     const addr = server.address();
@@ -2074,6 +2077,7 @@ describe("WebSocket Server", () => {
     const gitManager: GitManagerShape = {
       status: vi.fn(() => Effect.void as any),
       diff: vi.fn(() => Effect.succeed({ scope: "unstaged" as const, patch: "" })),
+      filePreview: vi.fn(() => Effect.void as any),
       reviewAction: vi.fn(() =>
         Effect.succeed({ action: "stageAll" as const, status: "applied" as const }),
       ),

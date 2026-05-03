@@ -7,6 +7,8 @@ import type {
   GitCreateWorktreeResult,
   GitDiffInput,
   GitDiffResult,
+  GitFilePreviewInput,
+  GitFilePreviewResult,
   GitInitInput,
   GitListBranchesInput,
   GitListBranchesResult,
@@ -40,6 +42,8 @@ import type {
   ProjectListDirectoryResult,
   ProjectListTreeInput,
   ProjectListTreeResult,
+  ProjectFileMetadataInput,
+  ProjectFileMetadataResult,
   ProjectReadFileInput,
   ProjectReadFileResult,
   ProjectCreateDirectoryInput,
@@ -298,6 +302,7 @@ export interface NativeApi {
     searchEntries: (input: ProjectSearchEntriesInput) => Promise<ProjectSearchEntriesResult>;
     listDirectory: (input: ProjectListDirectoryInput) => Promise<ProjectListDirectoryResult>;
     listTree: (input: ProjectListTreeInput) => Promise<ProjectListTreeResult>;
+    fileMetadata: (input: ProjectFileMetadataInput) => Promise<ProjectFileMetadataResult>;
     readFile: (input: ProjectReadFileInput) => Promise<ProjectReadFileResult>;
     writeFile: (input: ProjectWriteFileInput) => Promise<ProjectWriteFileResult>;
     createDirectory: (
@@ -323,6 +328,7 @@ export interface NativeApi {
     pull: (input: GitPullInput) => Promise<GitPullResult>;
     status: (input: GitStatusInput) => Promise<GitStatusResult>;
     diff: (input: GitDiffInput) => Promise<GitDiffResult>;
+    filePreview: (input: GitFilePreviewInput) => Promise<GitFilePreviewResult>;
     reviewAction: (input: GitReviewActionInput) => Promise<GitReviewActionResult>;
     runStackedAction: (input: GitRunStackedActionInput) => Promise<GitRunStackedActionResult>;
   };

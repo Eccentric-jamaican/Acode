@@ -63,10 +63,39 @@ export const ProjectReadFileInput = Schema.Struct({
 });
 export type ProjectReadFileInput = typeof ProjectReadFileInput.Type;
 
+export const ProjectFileMetadataInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  relativePath: TrimmedNonEmptyString,
+});
+export type ProjectFileMetadataInput = typeof ProjectFileMetadataInput.Type;
+
+export const ProjectFileMetadataResult = Schema.Union([
+  Schema.Struct({
+    relativePath: TrimmedNonEmptyString,
+    status: Schema.Literal("file"),
+    sizeBytes: Schema.Number,
+    modifiedAtMs: Schema.Number,
+  }),
+  Schema.Struct({
+    relativePath: TrimmedNonEmptyString,
+    status: Schema.Literals(["missing", "unreadable"]),
+    message: Schema.String,
+  }),
+]);
+export type ProjectFileMetadataResult = typeof ProjectFileMetadataResult.Type;
+
 const ProjectReadFileTextResult = Schema.Struct({
   relativePath: TrimmedNonEmptyString,
   status: Schema.Literal("text"),
   contents: Schema.String,
+});
+
+const ProjectReadFileDocumentResult = Schema.Struct({
+  relativePath: TrimmedNonEmptyString,
+  status: Schema.Literal("document"),
+  contentsBase64: Schema.String,
+  mimeType: TrimmedNonEmptyString,
+  sizeBytes: Schema.Number,
 });
 
 const ProjectReadFileUnavailableResult = Schema.Struct({
@@ -77,6 +106,7 @@ const ProjectReadFileUnavailableResult = Schema.Struct({
 
 export const ProjectReadFileResult = Schema.Union([
   ProjectReadFileTextResult,
+  ProjectReadFileDocumentResult,
   ProjectReadFileUnavailableResult,
 ]);
 export type ProjectReadFileResult = typeof ProjectReadFileResult.Type;

@@ -9,6 +9,8 @@
 import {
   GitDiffInput,
   GitDiffResult,
+  GitFilePreviewInput,
+  GitFilePreviewResult,
   GitReviewActionInput,
   GitReviewActionResult,
   GitRunStackedActionInput,
@@ -35,6 +37,13 @@ export interface GitManagerShape {
    * Read a review patch for staged or unstaged repository changes.
    */
   readonly diff: (input: GitDiffInput) => Effect.Effect<GitDiffResult, GitManagerServiceError>;
+
+  /**
+   * Read before/after file bytes for visual review previews.
+   */
+  readonly filePreview: (
+    input: GitFilePreviewInput,
+  ) => Effect.Effect<GitFilePreviewResult, GitManagerServiceError>;
 
   /**
    * Apply a focused review action to the working tree/index.

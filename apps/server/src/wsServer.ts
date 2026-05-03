@@ -61,6 +61,7 @@ import {
   deleteWorkspaceEntry,
   listWorkspaceDirectory,
   listWorkspaceTree,
+  readWorkspaceFileMetadata,
   readWorkspaceFile,
   recordWorkspaceFileWrite,
   renameWorkspaceEntry,
@@ -1037,6 +1038,17 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         });
       }
 
+      case WS_METHODS.projectsFileMetadata: {
+        const body = stripRequestTag(request.body);
+        return yield* Effect.tryPromise({
+          try: () => readWorkspaceFileMetadata(body),
+          catch: (cause) =>
+            new RouteRequestError({
+              message: `Failed to inspect workspace file: ${String(cause)}`,
+            }),
+        });
+      }
+
       case WS_METHODS.projectsReadFile: {
         const body = stripRequestTag(request.body);
         return yield* Effect.tryPromise({
@@ -1123,6 +1135,11 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       case WS_METHODS.gitDiff: {
         const body = stripRequestTag(request.body);
         return yield* gitManager.diff(body);
+      }
+
+      case WS_METHODS.gitFilePreview: {
+        const body = stripRequestTag(request.body);
+        return yield* gitManager.filePreview(body);
       }
 
       case WS_METHODS.gitReviewAction: {

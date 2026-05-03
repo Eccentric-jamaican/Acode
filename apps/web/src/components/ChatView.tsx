@@ -834,6 +834,7 @@ interface ChatViewProps {
   onToggleFilesPanel?: () => void;
   onOpenFileViewerPanel?: (path: string) => void;
   onOpenTurnDiffPanel?: (turnId: TurnId, filePath?: string) => void;
+  floatingComposer?: boolean;
   onMaximizeSurface?: () => void;
   onSplitSurface?: () => void;
 }
@@ -849,6 +850,7 @@ export default function ChatView({
   onToggleFilesPanel,
   onOpenFileViewerPanel,
   onOpenTurnDiffPanel: _onOpenTurnDiffPanel,
+  floatingComposer = false,
   onMaximizeSurface,
   onSplitSurface,
 }: ChatViewProps) {
@@ -1916,11 +1918,11 @@ export default function ChatView({
     }
   }, [onToggleFilesPanel]);
   const onOpenFilePath = useCallback(
-    (path: string) => {
+    (path: string, options?: { cwd?: string | undefined }) => {
       if (!activeThreadId) {
         return;
       }
-      openViewerFile(activeThreadId, path);
+      openViewerFile(activeThreadId, path, options);
       if (onOpenFileViewerPanel) {
         onOpenFileViewerPanel(path);
         return;
@@ -5116,6 +5118,7 @@ export default function ChatView({
               markdownCwd={gitCwd ?? undefined}
               resolvedTheme={resolvedTheme}
               workspaceRoot={activeProject?.cwd ?? undefined}
+              homeDirectory={homeDirectory ?? undefined}
               pinnedSelections={composerPinnedSelections}
               onAskAboutSelectedText={onAskAboutSelectedText}
               onPinSelectedText={onPinSelectedText}
@@ -5145,8 +5148,10 @@ export default function ChatView({
       {/* Input bar */}
       <div
         className={cn(
-          "px-3 pt-4 sm:px-5 sm:pt-4",
-          isGitRepo ? "pb-1" : "pb-2.5 sm:pb-3",
+          floatingComposer
+            ? "fixed bottom-6 left-1/2 z-50 w-[min(44rem,calc(100vw-2rem))] -translate-x-1/2 px-0 pb-0 pt-0"
+            : "px-3 pt-4 sm:px-5 sm:pt-4",
+          !floatingComposer && (isGitRepo ? "pb-1" : "pb-2.5 sm:pb-3"),
         )}
       >
         {showNewThreadSuggestionsLoading ? (
@@ -5520,6 +5525,8 @@ export default function ChatView({
                       ? "Type your own answer, or leave this blank to use the selected option"
                       : showPlanFollowUpPrompt && activeProposedPlan
                         ? "Add feedback to refine the plan, or leave this blank to implement it"
+                        : floatingComposer
+                          ? "Ask for follow-up changes"
                         : phase === "running"
                           ? "Ask for follow-up changes"
                         : phase === "disconnected"

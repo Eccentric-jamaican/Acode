@@ -60,6 +60,16 @@ function writeTextFile(
   });
 }
 
+function writeBinaryFile(
+  filePath: string,
+  contents: Uint8Array,
+): Effect.Effect<void, PlatformError.PlatformError, FileSystem.FileSystem> {
+  return Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    yield* fileSystem.writeFile(filePath, contents);
+  });
+}
+
 /** Run a raw git command for test setup (not under test). */
 function git(
   cwd: string,
@@ -117,6 +127,7 @@ const makeIsolatedGitCore = (gitService: GitServiceShape) =>
       status: (input) => core.status(input),
       statusDetails: (cwd) => core.statusDetails(cwd),
       diff: (input) => core.diff(input),
+      filePreview: (input) => core.filePreview(input),
       reviewAction: (input) => core.reviewAction(input),
       prepareCommitContext: (cwd) => core.prepareCommitContext(cwd),
       commit: (cwd, subject, body) => core.commit(cwd, subject, body),
@@ -1331,6 +1342,33 @@ it.layer(TestLayer)("git integration", (it) => {
         const staged = yield* core.diff({ cwd: tmp, scope: "staged" });
         expect(staged.scope).toBe("staged");
         expect(staged.patch).toContain("unstaged");
+      }),
+    );
+
+    it.effect("reads before and after bytes for binary file previews", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const core = yield* GitCore;
+        const filePath = path.join(tmp, "sample.pdf");
+        const beforeBytes = new Uint8Array([0, 1, 2, 3, 4, 5]);
+        const afterBytes = new Uint8Array([5, 4, 3, 2, 1, 0]);
+
+        yield* writeBinaryFile(filePath, beforeBytes);
+        yield* git(tmp, ["add", "sample.pdf"]);
+        yield* git(tmp, ["commit", "-m", "add binary fixture"]);
+        yield* writeBinaryFile(filePath, afterBytes);
+
+        const preview = yield* core.filePreview({
+          cwd: tmp,
+          path: "sample.pdf",
+          scope: "unstaged",
+        });
+
+        expect(preview.before.status).toBe("present");
+        expect(preview.after.status).toBe("present");
+        expect(preview.before.contentsBase64).toBe(Buffer.from(beforeBytes).toString("base64"));
+        expect(preview.after.contentsBase64).toBe(Buffer.from(afterBytes).toString("base64"));
       }),
     );
 

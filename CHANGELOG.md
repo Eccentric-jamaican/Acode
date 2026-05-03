@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.41] - 2026-05-02
+
+### Added
+- Added Codex plugin and skill discovery from the local Codex plugin directories, including a new Plugins page and cleaner composer/thread chips for selected slash commands, plugins, skills, inspections, and shortcuts.
+- Added integrated T3 browser-use support that can open the in-app browser on demand, show a visible cursor while the model is acting, and avoid colliding with OpenAI's Browser Use plugin naming.
+- Added browser-use settings for browsing data, approvals, history access, blocked domains, and allowed domains, plus persistent browser session storage so cookies can survive across projects and threads.
+- Added a large-repo-ready file tree powered by the peer tree implementation, with git decorations, file opening, context menu actions, and create/rename/delete mutation wiring.
+- Added Review panel support for unstaged, staged, branch, and last-turn scopes, including git action controls for staging and reverting changes.
+- Added local line comments in the Review panel so review notes can be attached to lines and passed through the composer without cluttering the chat thread.
+- Added binary file previews from the file tree for PDFs, images, SVGs, WebP, Office documents, spreadsheets, and presentations.
+- Added side-by-side PDF previews for binary PDF changes in the Review panel using git object reads for before/after content.
+
+### Changed
+- Reworked the diff/file viewer into a calmer Review experience with compact file chips, cleaner headers, unified and split diff modes, word/whitespace toggles, and less visual noise.
+- Improved Office/PDF document viewing with document tabs, expanded viewing mode, floating follow-up composer support, lightweight live refresh while sessions are running, and cleaner document layout.
+- Improved browser integration reliability, including panel auto-open when browser use starts and faster visible cursor updates during model-controlled browsing.
+- Improved file tree performance for large repositories with git-backed indexing, cache invalidation, and safer binary/text metadata handling.
+- Refined chat/sidebar organization with a dedicated chat section and less noisy home-directory presentation.
+
+### Fixed
+- Fixed model discovery so Codex app-server model lists can surface newer Codex models without hardcoding availability in T3.
+- Fixed file tree population issues by removing the expensive fallback path and repairing the peer tree implementation.
+- Fixed file clicks from the file tree so selected files open in the viewer panel with the correct workspace context.
+- Fixed Review scope behavior for branch and last-turn changes and hardened the git action paths with focused server tests.
+- Fixed PDF preview rendering in Electron by adding PDF.js worker compatibility shims and using annotation rendering that preserves filled form values.
+- Fixed PDF preview sizing so pages no longer render as squashed thumbnails in the file viewer.
+- Fixed the Review panel PDF comparison chrome by removing redundant side labels and keeping the focus on the actual documents.
+
 ## [0.2.35] - 2026-04-19
 
 ### Added

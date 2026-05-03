@@ -17,6 +17,8 @@ import type {
   GitCreateWorktreeResult,
   GitDiffInput,
   GitDiffResult,
+  GitFilePreviewInput,
+  GitFilePreviewResult,
   GitInitInput,
   GitListBranchesInput,
   GitListBranchesResult,
@@ -80,6 +82,13 @@ export interface GitCoreShape {
    * Read a patch for staged or unstaged repository changes.
    */
   readonly diff: (input: GitDiffInput) => Effect.Effect<GitDiffResult, GitCommandError>;
+
+  /**
+   * Read before/after file bytes for visual review previews.
+   */
+  readonly filePreview: (
+    input: GitFilePreviewInput & { baseRef?: string | undefined },
+  ) => Effect.Effect<GitFilePreviewResult, GitCommandError>;
 
   /**
    * Apply a focused review action to the working tree/index.

@@ -27,7 +27,7 @@ import { Sheet, SheetPopup } from "../components/ui/sheet";
 import { Sidebar, SidebarProvider, SidebarRail, SidebarInset } from "~/components/ui/sidebar";
 import { Button } from "~/components/ui/button";
 import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogPanel, DialogPopup, DialogTitle } from "~/components/ui/dialog";
-import { ArrowLeftRight } from "lucide-react";
+import { ArrowLeftRight, Maximize2Icon, Minimize2Icon } from "lucide-react";
 import { WorkspaceFilesRail } from "../components/WorkspaceFilesRail";
 import {
   useSplitViewStore,
@@ -128,6 +128,8 @@ function ViewerPanelSurface(props: {
   };
   filesOpen: boolean;
   railOverlay?: boolean;
+  expanded?: boolean;
+  onToggleExpanded?: (() => void) | undefined;
   onClosePanel: () => void;
   onRevealFile?: (path: string) => void;
 }) {
@@ -160,6 +162,19 @@ function ViewerPanelSurface(props: {
 
   return (
     <div className="relative flex h-full min-w-0 flex-1 overflow-hidden">
+      {props.panelMode === "diff" && props.onToggleExpanded ? (
+        <Button
+          type="button"
+          size="icon-xs"
+          variant="ghost"
+          className="absolute right-3 top-3 z-20 rounded-full bg-background/80 shadow-sm backdrop-blur hover:bg-accent"
+          aria-label={props.expanded ? "Collapse panel" : "Expand panel"}
+          title={props.expanded ? "Collapse panel" : "Expand panel"}
+          onClick={props.onToggleExpanded}
+        >
+          {props.expanded ? <Minimize2Icon className="size-3.5" /> : <Maximize2Icon className="size-3.5" />}
+        </Button>
+      ) : null}
       <div
         className="flex-1 overflow-hidden"
         style={{ minWidth: `${VIEWER_PANEL_MIN_WIDTH_PX}px` }}
@@ -235,6 +250,8 @@ const PanePanelInlineSidebar = (props: {
   onClosePanel: () => void;
   onOpenPanel: () => void;
   onRevealFile: (path: string) => void;
+  onToggleExpanded?: (() => void) | undefined;
+  expanded?: boolean | undefined;
   renderPanelContent: boolean;
   panel: ChatRightPanel | null | undefined;
   threadId: ThreadId | null;
@@ -251,6 +268,8 @@ const PanePanelInlineSidebar = (props: {
     onClosePanel,
     onOpenPanel,
     onRevealFile,
+    onToggleExpanded,
+    expanded,
     renderPanelContent,
     panel,
     threadId,
@@ -328,6 +347,8 @@ const PanePanelInlineSidebar = (props: {
             cwd={threadBrowserContext?.cwd ?? null}
             threadBrowserContext={threadBrowserContext}
             filesOpen={filesOpen}
+            {...(expanded !== undefined ? { expanded } : {})}
+            {...(onToggleExpanded ? { onToggleExpanded } : {})}
             onClosePanel={onClosePanel}
             onRevealFile={onRevealFile}
           />
@@ -1094,6 +1115,7 @@ function SingleChatSurface(props: {
   const panelOpen = activePanel !== null || props.filesOpen;
   const [hasOpenedPanel, setHasOpenedPanel] = useState(panelOpen);
   const [lastOpenPanel, setLastOpenPanel] = useState<ChatRightPanel>(activePanel ?? "browser");
+  const [viewerExpanded, setViewerExpanded] = useState(false);
 
   const closePanel = useCallback(() => {
     void navigate({
@@ -1172,18 +1194,25 @@ function SingleChatSurface(props: {
     }
   }, [activePanel]);
 
+  useEffect(() => {
+    if (activePanel !== "diff") {
+      setViewerExpanded(false);
+    }
+  }, [activePanel]);
+
   const shouldRenderPanelContent =
     (activePanel !== null || props.filesOpen) && (panelOpen || hasOpenedPanel);
 
   if (!shouldUseDiffSheet) {
     return (
-      <div className="flex h-full min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
+      <div className="relative flex h-full min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
         <SidebarInset className="h-full min-h-0 overflow-hidden overscroll-y-none rounded-none bg-background text-foreground">
           <ChatView
             key={props.threadId}
             threadId={props.threadId}
             onSplitSurface={handleSplitSurface}
             onToggleFilesPanel={toggleFiles}
+            floatingComposer={viewerExpanded && activePanel === "diff"}
           />
         </SidebarInset>
         <PanePanelInlineSidebar
@@ -1196,7 +1225,28 @@ function SingleChatSurface(props: {
           panel={activePanel}
           threadId={props.threadId}
           threadBrowserContext={props.threadBrowserContext}
+          {...(activePanel === "diff"
+            ? {
+                onToggleExpanded: () => setViewerExpanded((expanded) => !expanded),
+                expanded: viewerExpanded,
+              }
+            : {})}
         />
+        {viewerExpanded && activePanel === "diff" && shouldRenderPanelContent ? (
+          <div className="absolute inset-0 z-40 flex min-h-0 min-w-0 bg-background">
+            <ViewerPanelSurface
+              panelMode="diff"
+              threadId={props.threadId}
+              cwd={props.threadBrowserContext.cwd}
+              threadBrowserContext={props.threadBrowserContext}
+              filesOpen={props.filesOpen}
+              expanded
+              onToggleExpanded={() => setViewerExpanded(false)}
+              onClosePanel={closePanel}
+              onRevealFile={openFileViewer}
+            />
+          </div>
+        ) : null}
       </div>
     );
   }

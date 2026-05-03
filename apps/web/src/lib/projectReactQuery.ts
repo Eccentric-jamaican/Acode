@@ -1,11 +1,14 @@
 import type {
   ProjectListDirectoryResult,
   ProjectListTreeResult,
+  ProjectFileMetadataResult,
   ProjectReadFileResult,
   ProjectSearchEntriesResult,
 } from "@t3tools/contracts";
 import { queryOptions } from "@tanstack/react-query";
 import { ensureNativeApi } from "~/nativeApi";
+
+const PROJECT_READ_FILE_PREVIEW_VERSION = "document-preview-v2";
 
 export const projectQueryKeys = {
   all: ["projects"] as const,
@@ -14,8 +17,10 @@ export const projectQueryKeys = {
   listDirectory: (cwd: string | null, relativePath: string | null) =>
     ["projects", "list-directory", cwd, relativePath] as const,
   listTree: (cwd: string | null) => ["projects", "list-tree", cwd] as const,
+  fileMetadata: (cwd: string | null, relativePath: string | null) =>
+    ["projects", "file-metadata", cwd, relativePath] as const,
   readFile: (cwd: string | null, relativePath: string | null) =>
-    ["projects", "read-file", cwd, relativePath] as const,
+    ["projects", "read-file", PROJECT_READ_FILE_PREVIEW_VERSION, cwd, relativePath] as const,
 };
 
 const DEFAULT_SEARCH_ENTRIES_LIMIT = 80;
@@ -33,6 +38,11 @@ const EMPTY_LIST_TREE_RESULT: ProjectListTreeResult = {
   truncated: false,
 };
 const EMPTY_READ_FILE_RESULT: ProjectReadFileResult = {
+  relativePath: "",
+  status: "missing",
+  message: "File unavailable.",
+};
+const EMPTY_FILE_METADATA_RESULT: ProjectFileMetadataResult = {
   relativePath: "",
   status: "missing",
   message: "File unavailable.",
@@ -115,6 +125,8 @@ export function projectReadFileQueryOptions(input: {
   cwd: string | null;
   relativePath: string | null;
   enabled?: boolean;
+  refetchInterval?: number | false;
+  refetchIntervalInBackground?: boolean;
   staleTime?: number;
 }) {
   return queryOptions({
@@ -130,7 +142,37 @@ export function projectReadFileQueryOptions(input: {
       });
     },
     enabled: (input.enabled ?? true) && input.cwd !== null && input.relativePath !== null,
+    ...(input.refetchInterval !== undefined ? { refetchInterval: input.refetchInterval } : {}),
+    ...(input.refetchIntervalInBackground !== undefined
+      ? { refetchIntervalInBackground: input.refetchIntervalInBackground }
+      : {}),
     staleTime: input.staleTime ?? DEFAULT_SEARCH_ENTRIES_STALE_TIME,
     placeholderData: (previous) => previous ?? EMPTY_READ_FILE_RESULT,
+  });
+}
+
+export function projectFileMetadataQueryOptions(input: {
+  cwd: string | null;
+  relativePath: string | null;
+  enabled?: boolean;
+  refetchInterval?: number | false;
+}) {
+  return queryOptions({
+    queryKey: projectQueryKeys.fileMetadata(input.cwd, input.relativePath),
+    queryFn: async () => {
+      const api = ensureNativeApi();
+      if (!input.cwd || !input.relativePath) {
+        throw new Error("Workspace file metadata is unavailable.");
+      }
+      return api.projects.fileMetadata({
+        cwd: input.cwd,
+        relativePath: input.relativePath,
+      });
+    },
+    enabled: (input.enabled ?? true) && input.cwd !== null && input.relativePath !== null,
+    ...(input.refetchInterval !== undefined ? { refetchInterval: input.refetchInterval } : {}),
+    refetchIntervalInBackground: false,
+    staleTime: 0,
+    placeholderData: (previous) => previous ?? EMPTY_FILE_METADATA_RESULT,
   });
 }

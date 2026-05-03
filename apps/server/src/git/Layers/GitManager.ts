@@ -464,6 +464,23 @@ export const makeGitManager = Effect.gen(function* () {
     );
   });
 
+  const filePreview: GitManagerShape["filePreview"] = Effect.fnUntraced(function* (input) {
+    if (input.scope === "branch") {
+      const details = yield* gitCore.statusDetails(input.cwd);
+      if (!details.branch) {
+        return yield* gitManagerError("filePreview", "Cannot read branch preview from detached HEAD.");
+      }
+      const baseRef = yield* resolveBaseBranch(input.cwd, details.branch, details.upstreamRef);
+      return yield* gitCore.filePreview({ ...input, baseRef }).pipe(
+        Effect.mapError((error) => gitManagerError("filePreview", error.message, error)),
+      );
+    }
+
+    return yield* gitCore.filePreview(input).pipe(
+      Effect.mapError((error) => gitManagerError("filePreview", error.message, error)),
+    );
+  });
+
   const reviewAction: GitManagerShape["reviewAction"] = Effect.fnUntraced(function* (input) {
     return yield* gitCore.reviewAction(input).pipe(
       Effect.mapError((error) => gitManagerError("reviewAction", error.message, error)),
@@ -562,6 +579,7 @@ export const makeGitManager = Effect.gen(function* () {
   return {
     status,
     diff,
+    filePreview,
     reviewAction,
     runStackedAction,
   } satisfies GitManagerShape;

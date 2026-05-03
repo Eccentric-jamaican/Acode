@@ -17,12 +17,13 @@ export interface FilePanelThreadState {
   expandedDirectories: string[];
   plainViewMarkdownFiles: string[];
   noWrapCodeFiles: string[];
+  cwdByFilePath: Record<string, string>;
   commentsByFilePath: Record<string, FilePanelComment[]>;
 }
 
 interface FilePanelStore {
   byThreadId: Record<string, FilePanelThreadState | undefined>;
-  openFile: (threadId: ThreadId, path: string) => void;
+  openFile: (threadId: ThreadId, path: string, options?: { cwd?: string | undefined }) => void;
   closeFile: (threadId: ThreadId, path: string) => void;
   selectReview: (threadId: ThreadId) => void;
   toggleDirectory: (threadId: ThreadId, path: string) => void;
@@ -47,6 +48,7 @@ const DEFAULT_FILE_PANEL_THREAD_STATE: FilePanelThreadState = {
   expandedDirectories: [],
   plainViewMarkdownFiles: [],
   noWrapCodeFiles: [],
+  cwdByFilePath: {},
   commentsByFilePath: {},
 };
 
@@ -57,6 +59,7 @@ function createDefaultThreadState(): FilePanelThreadState {
     expandedDirectories: [],
     plainViewMarkdownFiles: [],
     noWrapCodeFiles: [],
+    cwdByFilePath: {},
     commentsByFilePath: {},
   };
 }
@@ -83,6 +86,10 @@ function normalizeFilePanelThreadState(
     noWrapCodeFiles: Array.isArray(threadState.noWrapCodeFiles)
       ? threadState.noWrapCodeFiles
       : [],
+    cwdByFilePath:
+      threadState.cwdByFilePath && typeof threadState.cwdByFilePath === "object"
+        ? threadState.cwdByFilePath
+        : {},
     commentsByFilePath:
       threadState.commentsByFilePath && typeof threadState.commentsByFilePath === "object"
         ? threadState.commentsByFilePath
@@ -120,13 +127,18 @@ export const useFilePanelStore = create<FilePanelStore>()(
   persist(
     (set) => ({
       byThreadId: {},
-      openFile: (threadId, path) =>
+      openFile: (threadId, path, options) =>
         set((state) => ({
           byThreadId: nextThreadState(state.byThreadId, threadId, (threadState) => {
+            const requestedCwd = options?.cwd?.trim();
+            const cwdByFilePath = requestedCwd
+              ? { ...threadState.cwdByFilePath, [path]: requestedCwd }
+              : threadState.cwdByFilePath;
             if (
               threadState.activeTab.kind === "file" &&
               threadState.activeTab.path === path &&
-              threadState.openFiles.includes(path)
+              threadState.openFiles.includes(path) &&
+              cwdByFilePath === threadState.cwdByFilePath
             ) {
               return threadState;
             }
@@ -136,6 +148,7 @@ export const useFilePanelStore = create<FilePanelStore>()(
             return {
               ...threadState,
               openFiles,
+              cwdByFilePath,
               activeTab: { kind: "file", path },
             };
           }),
@@ -147,6 +160,7 @@ export const useFilePanelStore = create<FilePanelStore>()(
               return threadState;
             }
             const openFiles = threadState.openFiles.filter((entry) => entry !== path);
+            const { [path]: _removedCwd, ...cwdByFilePath } = threadState.cwdByFilePath;
             const activeTab =
               threadState.activeTab.kind === "file" && threadState.activeTab.path === path
                 ? openFiles[0]
@@ -156,6 +170,7 @@ export const useFilePanelStore = create<FilePanelStore>()(
             return {
               ...threadState,
               openFiles,
+              cwdByFilePath,
               activeTab,
             };
           }),

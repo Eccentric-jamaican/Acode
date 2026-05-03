@@ -13,6 +13,8 @@ import {
   ProjectListDirectoryResult,
   ProjectListTreeInput,
   ProjectListTreeResult,
+  ProjectFileMetadataInput,
+  ProjectFileMetadataResult,
   ProjectReadFileInput,
   ProjectReadFileResult,
   ProjectRenameEntryInput,
@@ -28,6 +30,7 @@ const WORKSPACE_INDEX_MAX_ENTRIES = 25_000;
 const WORKSPACE_SCAN_READDIR_CONCURRENCY = 32;
 const GIT_CHECK_IGNORE_MAX_STDIN_BYTES = 256 * 1024;
 const PROJECT_READ_FILE_MAX_BYTES = 256 * 1024;
+const PROJECT_READ_DOCUMENT_MAX_BYTES = 25 * 1024 * 1024;
 const IGNORED_DIRECTORY_NAMES = new Set([
   ".git",
   ".convex",
@@ -70,6 +73,54 @@ function projectEntryForPath(relativePath: string, kind: ProjectEntry["kind"]): 
     kind,
     parentPath: parentPathOf(relativePath),
   };
+}
+
+function officeDocumentMimeType(relativePath: string): string | null {
+  const extension = path.extname(relativePath).toLowerCase();
+  switch (extension) {
+    case ".docx":
+      return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    case ".xlsx":
+      return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+    case ".xls":
+      return "application/vnd.ms-excel";
+    case ".pptx":
+      return "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+    case ".pdf":
+      return "application/pdf";
+    default:
+      return null;
+  }
+}
+
+function previewAssetMimeType(relativePath: string): string | null {
+  const officeMimeType = officeDocumentMimeType(relativePath);
+  if (officeMimeType) {
+    return officeMimeType;
+  }
+
+  const extension = path.extname(relativePath).toLowerCase();
+  switch (extension) {
+    case ".avif":
+      return "image/avif";
+    case ".bmp":
+      return "image/bmp";
+    case ".gif":
+      return "image/gif";
+    case ".ico":
+      return "image/x-icon";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".png":
+      return "image/png";
+    case ".svg":
+      return "image/svg+xml";
+    case ".webp":
+      return "image/webp";
+    default:
+      return null;
+  }
 }
 
 function mutateCachedWorkspaceIndex(
@@ -655,6 +706,48 @@ export async function listWorkspaceTree(input: ProjectListTreeInput): Promise<Pr
   };
 }
 
+export async function readWorkspaceFileMetadata(
+  input: ProjectFileMetadataInput,
+): Promise<ProjectFileMetadataResult> {
+  const target = resolveWorkspaceTargetPath({
+    cwd: input.cwd,
+    relativePath: input.relativePath,
+  });
+  if (target.relativePath === null) {
+    return {
+      relativePath: input.relativePath,
+      status: "unreadable",
+      message: "Cannot inspect the workspace root as a file.",
+    };
+  }
+
+  let stats;
+  try {
+    stats = await fs.stat(target.absolutePath);
+  } catch {
+    return {
+      relativePath: target.relativePath,
+      status: "missing",
+      message: "File not found.",
+    };
+  }
+
+  if (!stats.isFile()) {
+    return {
+      relativePath: target.relativePath,
+      status: "unreadable",
+      message: "Only files can be inspected in the viewer.",
+    };
+  }
+
+  return {
+    relativePath: target.relativePath,
+    status: "file",
+    sizeBytes: stats.size,
+    modifiedAtMs: stats.mtimeMs,
+  };
+}
+
 export async function readWorkspaceFile(
   input: ProjectReadFileInput,
 ): Promise<ProjectReadFileResult> {
@@ -689,11 +782,25 @@ export async function readWorkspaceFile(
     };
   }
 
+  const previewMimeType = previewAssetMimeType(target.relativePath);
+  if (previewMimeType && stats.size <= PROJECT_READ_DOCUMENT_MAX_BYTES) {
+    const bytes = await fs.readFile(target.absolutePath);
+    return {
+      relativePath: target.relativePath,
+      status: "document",
+      contentsBase64: bytes.toString("base64"),
+      mimeType: previewMimeType,
+      sizeBytes: stats.size,
+    };
+  }
+
   if (stats.size > PROJECT_READ_FILE_MAX_BYTES) {
     return {
       relativePath: target.relativePath,
       status: "too-large",
-      message: "File is too large to display in the viewer.",
+      message: previewMimeType
+        ? "File is too large to preview in the viewer."
+        : "File is too large to display in the viewer.",
     };
   }
 

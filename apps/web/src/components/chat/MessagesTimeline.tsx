@@ -26,6 +26,7 @@ import {
   CircleAlertIcon,
   CopyIcon,
   EllipsisIcon,
+  ExternalLinkIcon,
   EyeIcon,
   FileIcon,
   FolderClosedIcon,
@@ -125,6 +126,18 @@ const CHAT_SELECTION_IGNORE_SELECTOR =
 const EMPTY_INVOCATION_DIFF_FILES: ReadonlyArray<InvocationDiffFile> = [];
 const LEADING_PROVIDER_MENTION_PATTERN = /^([$/])([^\s]+)(?=\s|$)/;
 
+type AssistantArtifactKind = "document" | "slides" | "spreadsheet" | "pdf";
+
+const ASSISTANT_ARTIFACT_EXTENSIONS: ReadonlyMap<string, AssistantArtifactKind> = new Map([
+  ["md", "document"],
+  ["mdx", "document"],
+  ["docx", "document"],
+  ["pptx", "slides"],
+  ["xls", "spreadsheet"],
+  ["xlsx", "spreadsheet"],
+  ["pdf", "pdf"],
+]);
+
 export interface MessagesTimelineProps {
   isFocusedPane?: boolean;
   hasMessages: boolean;
@@ -146,10 +159,11 @@ export interface MessagesTimelineProps {
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenThread?: ((threadId: ThreadId) => void) | undefined;
-  onOpenFilePath?: ((path: string) => void) | undefined;
+  onOpenFilePath?: ((path: string, options?: { cwd?: string | undefined }) => void) | undefined;
   markdownCwd: string | undefined;
   resolvedTheme: "light" | "dark";
   workspaceRoot: string | undefined;
+  homeDirectory: string | undefined;
   pinnedSelections: readonly PinnedSelectionDraft[];
   onAskAboutSelectedText: (selectedText: string) => void;
   onPinSelectedText: (
@@ -748,6 +762,149 @@ function buildDirectoryExpansionState(
   }
   return expandedState;
 }
+
+function fileExtension(pathValue: string): string {
+  const fileName = pathValue.split(/[\\/]/).at(-1) ?? pathValue;
+  const extensionIndex = fileName.lastIndexOf(".");
+  if (extensionIndex <= 0 || extensionIndex === fileName.length - 1) return "";
+  return fileName.slice(extensionIndex + 1).toLowerCase();
+}
+
+function artifactKindForPath(pathValue: string): AssistantArtifactKind | null {
+  return ASSISTANT_ARTIFACT_EXTENSIONS.get(fileExtension(pathValue)) ?? null;
+}
+
+function artifactFileName(pathValue: string): string {
+  return pathValue.split(/[\\/]/).at(-1) ?? pathValue;
+}
+
+function artifactKindLabel(kind: AssistantArtifactKind): string {
+  switch (kind) {
+    case "document":
+      return "Document";
+    case "slides":
+      return "Slides";
+    case "spreadsheet":
+      return "Spreadsheet";
+    case "pdf":
+      return "PDF";
+  }
+}
+
+function collectAssistantArtifacts(
+  files: ReadonlyArray<TurnDiffFileChange>,
+): AssistantArtifact[] {
+  const seenPaths = new Set<string>();
+  const artifacts: AssistantArtifact[] = [];
+  for (const file of files) {
+    const artifactKind = artifactKindForPath(file.path);
+    if (!artifactKind || seenPaths.has(file.path)) continue;
+    seenPaths.add(file.path);
+    artifacts.push({ ...file, artifactKind, source: "checkpoint" });
+  }
+  return artifacts;
+}
+
+type AssistantArtifact = TurnDiffFileChange & {
+  artifactKind: AssistantArtifactKind;
+  source: "checkpoint" | "message";
+  cwd?: string | undefined;
+};
+
+function collectMentionedAssistantArtifacts(input: {
+  text: string;
+  existingPaths: ReadonlySet<string>;
+  workspaceRoot: string | undefined;
+  homeDirectory: string | undefined;
+}): AssistantArtifact[] {
+  const normalizedText = input.text.replaceAll("\\", "/");
+  const lowerText = input.text.toLowerCase();
+  const mentionedHome =
+    lowerText.includes("user directory") ||
+    lowerText.includes("home directory") ||
+    lowerText.includes("home folder");
+  const baseCwd = mentionedHome ? input.homeDirectory : input.workspaceRoot;
+  const artifacts: AssistantArtifact[] = [];
+  const seenPaths = new Set(input.existingPaths);
+  const artifactPattern =
+    /(?:^|[\s`"'(])((?:[A-Za-z]:\/)?(?:[\w .@()[\]-]+\/)*[\w .@()[\]-]+\.(?:mdx?|docx|pptx|xlsx|xls|pdf))(?=$|[\s`"',).])/gi;
+
+  for (const match of normalizedText.matchAll(artifactPattern)) {
+    const rawPath = match[1]?.trim();
+    if (!rawPath) continue;
+    const artifactKind = artifactKindForPath(rawPath);
+    if (!artifactKind) continue;
+    const pathValue = rawPath.replace(/^[`"']|[`"']$/g, "");
+    const windowsAbsoluteMatch = /^([A-Za-z]:\/.*)\/([^/]+)$/.exec(pathValue);
+    const artifactPath = windowsAbsoluteMatch?.[2] ?? pathValue;
+    const artifactCwd = windowsAbsoluteMatch?.[1] ?? baseCwd;
+    const artifactKey = artifactCwd ? `${artifactCwd}\u0000${artifactPath}` : artifactPath;
+    if (seenPaths.has(artifactKey)) continue;
+    seenPaths.add(artifactKey);
+    artifacts.push({
+      path: artifactPath,
+      artifactKind,
+      source: "message",
+      ...(artifactCwd ? { cwd: artifactCwd } : {}),
+    });
+  }
+
+  return artifacts;
+}
+
+const AssistantArtifactCards = memo(function AssistantArtifactCards(props: {
+  artifacts: ReadonlyArray<AssistantArtifact>;
+  resolvedTheme: "light" | "dark";
+  onOpenFilePath?: ((path: string, options?: { cwd?: string | undefined }) => void) | undefined;
+}) {
+  if (props.artifacts.length === 0) return null;
+
+  return (
+    <div className="mt-2 space-y-2">
+      {props.artifacts.map((artifact) => {
+        const extension = fileExtension(artifact.path).toUpperCase();
+        const title = artifactFileName(artifact.path);
+        const canOpen = Boolean(props.onOpenFilePath);
+        return (
+          <div
+            key={`assistant-artifact:${artifact.path}`}
+            className="flex min-w-0 items-center gap-3 rounded-lg border border-border/80 bg-card/55 p-2.5"
+          >
+            <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-background/80">
+              <VscodeEntryIcon
+                pathValue={artifact.path}
+                kind="file"
+                theme={props.resolvedTheme}
+                className="size-5"
+              />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium text-foreground" title={title}>
+                {title}
+              </p>
+              <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                {artifactKindLabel(artifact.artifactKind)}
+                {extension ? ` · ${extension}` : ""}
+              </p>
+            </div>
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              disabled={!canOpen}
+              onClick={() => props.onOpenFilePath?.(artifact.path, { cwd: artifact.cwd })}
+              title={canOpen ? `Open ${title}` : "File viewer is unavailable"}
+              className="shrink-0"
+            >
+              <span>Open</span>
+              <ExternalLinkIcon className="size-3" />
+            </Button>
+          </div>
+        );
+      })}
+    </div>
+  );
+});
 
 const ChangedFilesTree = memo(function ChangedFilesTree(props: {
   turnId: TurnId;
@@ -2225,58 +2382,103 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
                     (row.message.turnId
                       ? turnDiffSummaryByTurnId.get(row.message.turnId)
                       : undefined);
-                  if (!turnSummary) return null;
+                  if (!turnSummary) {
+                    const mentionedArtifacts = collectMentionedAssistantArtifacts({
+                      text: messageText,
+                      existingPaths: new Set(),
+                      workspaceRoot,
+                      homeDirectory: props.homeDirectory,
+                    });
+                    return (
+                      <AssistantArtifactCards
+                        artifacts={mentionedArtifacts}
+                        resolvedTheme={resolvedTheme}
+                        onOpenFilePath={props.onOpenFilePath}
+                      />
+                    );
+                  }
                   const checkpointFiles = turnSummary.files;
-                  if (checkpointFiles.length === 0) return null;
+                  if (checkpointFiles.length === 0) {
+                    const mentionedArtifacts = collectMentionedAssistantArtifacts({
+                      text: messageText,
+                      existingPaths: new Set(),
+                      workspaceRoot,
+                      homeDirectory: props.homeDirectory,
+                    });
+                    return (
+                      <AssistantArtifactCards
+                        artifacts={mentionedArtifacts}
+                        resolvedTheme={resolvedTheme}
+                        onOpenFilePath={props.onOpenFilePath}
+                      />
+                    );
+                  }
                   const summaryStat = summarizeTurnDiffStats(checkpointFiles);
                   const changedFileCountLabel = String(checkpointFiles.length);
+                  const checkpointArtifacts = collectAssistantArtifacts(checkpointFiles);
+                  const assistantArtifacts = [
+                    ...checkpointArtifacts,
+                    ...collectMentionedAssistantArtifacts({
+                      text: messageText,
+                      existingPaths: new Set(checkpointArtifacts.map((artifact) => artifact.path)),
+                      workspaceRoot,
+                      homeDirectory: props.homeDirectory,
+                    }),
+                  ];
                   const allDirectoriesExpanded =
                     allDirectoriesExpandedByTurnId[turnSummary.turnId] ?? true;
                   return (
-                    <div className="mt-2 rounded-lg border border-border/80 bg-card/45 p-2.5">
-                      <div className="mb-1.5 flex items-center justify-between gap-2">
-                        <p className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground/65">
-                          <span>Changed files ({changedFileCountLabel})</span>
-                          {hasNonZeroStat(summaryStat) && (
-                            <>
-                              <span className="mx-1">•</span>
-                              <DiffStatLabel
-                                additions={summaryStat.additions}
-                                deletions={summaryStat.deletions}
-                              />
-                            </>
-                          )}
-                        </p>
-                        <div className="flex items-center gap-1.5">
-                          <Button
-                            type="button"
-                            size="xs"
-                            variant="outline"
-                            onClick={() => onToggleAllDirectories(turnSummary.turnId)}
-                          >
-                            {allDirectoriesExpanded ? "Collapse all" : "Expand all"}
-                          </Button>
-                          <Button
-                            type="button"
-                            size="xs"
-                            variant="outline"
-                            onClick={() =>
-                              onOpenTurnDiff(turnSummary.turnId, checkpointFiles[0]?.path)
-                            }
-                          >
-                            View diff
-                          </Button>
-                        </div>
-                      </div>
-                      <ChangedFilesTree
-                        key={`changed-files-tree:${turnSummary.turnId}`}
-                        turnId={turnSummary.turnId}
-                        files={checkpointFiles}
-                        allDirectoriesExpanded={allDirectoriesExpanded}
+                    <>
+                      <AssistantArtifactCards
+                        artifacts={assistantArtifacts}
                         resolvedTheme={resolvedTheme}
-                        onOpenTurnDiff={onOpenTurnDiff}
+                        onOpenFilePath={props.onOpenFilePath}
                       />
-                    </div>
+                      <div className="mt-2 rounded-lg border border-border/80 bg-card/45 p-2.5">
+                        <div className="mb-1.5 flex items-center justify-between gap-2">
+                          <p className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground/65">
+                            <span>Changed files ({changedFileCountLabel})</span>
+                            {hasNonZeroStat(summaryStat) && (
+                              <>
+                                <span className="mx-1">•</span>
+                                <DiffStatLabel
+                                  additions={summaryStat.additions}
+                                  deletions={summaryStat.deletions}
+                                />
+                              </>
+                            )}
+                          </p>
+                          <div className="flex items-center gap-1.5">
+                            <Button
+                              type="button"
+                              size="xs"
+                              variant="outline"
+                              onClick={() => onToggleAllDirectories(turnSummary.turnId)}
+                            >
+                              {allDirectoriesExpanded ? "Collapse all" : "Expand all"}
+                            </Button>
+                            <Button
+                              type="button"
+                              size="xs"
+                              variant="outline"
+                              onClick={() =>
+                                onOpenTurnDiff(turnSummary.turnId, checkpointFiles[0]?.path)
+                              }
+                            >
+                              View diff
+                            </Button>
+                          </div>
+                        </div>
+                        <ChangedFilesTree
+                          key={`changed-files-tree:${turnSummary.turnId}`}
+                          turnId={turnSummary.turnId}
+                          files={checkpointFiles}
+                          allDirectoriesExpanded={allDirectoriesExpanded}
+                          resolvedTheme={resolvedTheme}
+                          onOpenTurnDiff={onOpenTurnDiff}
+                        />
+                      </div>
+                    </>
                   );
                 })()}
                 <div

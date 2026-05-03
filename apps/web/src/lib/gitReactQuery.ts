@@ -16,6 +16,8 @@ export const gitQueryKeys = {
   all: ["git"] as const,
   status: (cwd: string | null) => ["git", "status", cwd] as const,
   diff: (cwd: string | null, scope: GitDiffScope) => ["git", "diff", cwd, scope] as const,
+  filePreview: (cwd: string | null, scope: GitDiffScope, path: string | null) =>
+    ["git", "file-preview", cwd, scope, path] as const,
   branches: (cwd: string | null) => ["git", "branches", cwd] as const,
 };
 
@@ -60,6 +62,27 @@ export function gitDiffQueryOptions(input: {
       return api.git.diff({ cwd: input.cwd, scope: input.scope });
     },
     enabled: input.cwd !== null && input.enabled !== false,
+    staleTime: GIT_STATUS_STALE_TIME_MS,
+    refetchOnWindowFocus: "always",
+    refetchOnReconnect: "always",
+    refetchInterval: GIT_STATUS_REFETCH_INTERVAL_MS,
+  });
+}
+
+export function gitFilePreviewQueryOptions(input: {
+  cwd: string | null;
+  path: string | null;
+  scope: GitDiffScope;
+  enabled?: boolean;
+}) {
+  return queryOptions({
+    queryKey: gitQueryKeys.filePreview(input.cwd, input.scope, input.path),
+    queryFn: async () => {
+      const api = ensureNativeApi();
+      if (!input.cwd || !input.path) throw new Error("Git file preview is unavailable.");
+      return api.git.filePreview({ cwd: input.cwd, path: input.path, scope: input.scope });
+    },
+    enabled: input.cwd !== null && input.path !== null && input.enabled !== false,
     staleTime: GIT_STATUS_STALE_TIME_MS,
     refetchOnWindowFocus: "always",
     refetchOnReconnect: "always",

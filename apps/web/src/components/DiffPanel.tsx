@@ -12,6 +12,14 @@ import { parsePatchFiles } from "@pierre/diffs";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams, useSearch } from "@tanstack/react-router";
 import { type GitDiffScope, type GitReviewAction, ThreadId } from "@t3tools/contracts";
+import JSZip from "jszip";
+import {
+  AnnotationMode,
+  GlobalWorkerOptions,
+  getDocument,
+  type PDFDocumentProxy,
+} from "pdfjs-dist";
+import pdfWorkerUrl from "../pdfWorkerCompat.mjs?url";
 import {
   EllipsisIcon,
   XIcon,
@@ -27,7 +35,8 @@ import {
   Undo2Icon,
   PlusIcon,
 } from "lucide-react";
-import { Suspense, useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import * as XLSX from "xlsx";
 
 import { parseDiffRouteSearch } from "../diffRouteSearch";
 import { isElectronRuntime } from "../env";
@@ -36,11 +45,12 @@ import { useTheme } from "../hooks/useTheme";
 import { buildPatchCacheKey, resolveDiffThemeName } from "../lib/diffRendering";
 import {
   gitDiffQueryOptions,
+  gitFilePreviewQueryOptions,
   gitReviewActionMutationOptions,
   gitStatusQueryOptions,
 } from "../lib/gitReactQuery";
 import { checkpointDiffQueryOptions } from "../lib/providerReactQuery";
-import { projectReadFileQueryOptions } from "../lib/projectReactQuery";
+import { projectFileMetadataQueryOptions, projectReadFileQueryOptions } from "../lib/projectReactQuery";
 import { normalizeSyntaxLanguage } from "../lib/syntaxLanguage";
 import { cn } from "../lib/utils";
 import { readNativeApi } from "../nativeApi";
@@ -57,6 +67,41 @@ interface DiffPanelProps {
 }
 
 export { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
+
+type PdfJsMapCompatibilityPrototype = Map<unknown, unknown> & {
+  getOrInsertComputed?: (
+    key: unknown,
+    callback: (key: unknown) => unknown,
+  ) => unknown;
+};
+
+function pdfJsMapGetOrInsertComputed(
+  this: Map<unknown, unknown>,
+  key: unknown,
+  callback: (key: unknown) => unknown,
+): unknown {
+  if (this.has(key)) {
+    return this.get(key);
+  }
+  const value = callback(key);
+  this.set(key, value);
+  return value;
+}
+
+function installPdfJsMapCompatibilityShim(): void {
+  const mapPrototype = Map.prototype as PdfJsMapCompatibilityPrototype;
+  if (mapPrototype.getOrInsertComputed) {
+    return;
+  }
+  Object.defineProperty(mapPrototype, "getOrInsertComputed", {
+    configurable: true,
+    value: pdfJsMapGetOrInsertComputed,
+    writable: true,
+  });
+}
+
+installPdfJsMapCompatibilityShim();
+GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 function inferFileViewerLanguage(filePath: string): string {
   const extension = filePath.split(".").pop()?.toLowerCase() ?? "";
@@ -78,6 +123,41 @@ function inferFileViewerLanguage(filePath: string): string {
 function isMarkdownFile(filePath: string): boolean {
   const extension = filePath.split(".").pop()?.toLowerCase() ?? "";
   return extension === "md" || extension === "mdx" || extension === "markdown";
+}
+
+function officeDocumentKind(filePath: string): "spreadsheet" | "document" | "slides" | "pdf" | null {
+  const extension = filePath.split(".").pop()?.toLowerCase() ?? "";
+  if (extension === "xls" || extension === "xlsx") return "spreadsheet";
+  if (extension === "docx") return "document";
+  if (extension === "pptx") return "slides";
+  if (extension === "pdf") return "pdf";
+  return null;
+}
+
+function previewMediaKind(filePath: string): "image" | null {
+  const extension = filePath.split(".").pop()?.toLowerCase() ?? "";
+  if (
+    extension === "avif" ||
+    extension === "bmp" ||
+    extension === "gif" ||
+    extension === "ico" ||
+    extension === "jpg" ||
+    extension === "jpeg" ||
+    extension === "png" ||
+    extension === "svg" ||
+    extension === "webp"
+  ) {
+    return "image";
+  }
+  return null;
+}
+
+function previewFileKind(filePath: string): "spreadsheet" | "document" | "slides" | "pdf" | "image" | null {
+  return officeDocumentKind(filePath) ?? previewMediaKind(filePath);
+}
+
+function isPdfFile(filePath: string): boolean {
+  return filePath.split(".").pop()?.toLowerCase() === "pdf";
 }
 
 export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
@@ -115,34 +195,94 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
   }, [activeThreadId, diffSearch.diffFilePath, openFile]);
 
   const activeFilePath = filePanelState.activeTab.kind === "file" ? filePanelState.activeTab.path : null;
+  const activeFileCwd =
+    activeFilePath !== null ? (filePanelState.cwdByFilePath[activeFilePath] ?? activeCwd) : activeCwd;
   const markdownRichViewEnabled = Boolean(
     activeFilePath && !filePanelState.plainViewMarkdownFiles.includes(activeFilePath),
   );
   const codeWordWrapEnabled = Boolean(
     activeFilePath && filePanelState.noWrapCodeFiles.includes(activeFilePath),
   );
+  const activeFileDocumentKind = activeFilePath ? previewFileKind(activeFilePath) : null;
+  const activeThreadSessionStatus = activeThread?.session?.status ?? null;
+  const liveDocumentMetadataRefreshInterval =
+    activeFileDocumentKind !== null && activeThreadSessionStatus === "running" ? 1_500 : false;
   const activeFileQuery = useQuery(
     projectReadFileQueryOptions({
-      cwd: activeCwd,
+      cwd: activeFileCwd,
       relativePath: activeFilePath,
-      enabled: activeCwd !== null && activeFilePath !== null,
+      enabled: activeFileCwd !== null && activeFilePath !== null,
+      ...(activeFileDocumentKind !== null ? { staleTime: 0 } : {}),
     }),
   );
+  const { refetch: refetchActiveFile } = activeFileQuery;
+  const activeFileMetadataQuery = useQuery(
+    projectFileMetadataQueryOptions({
+      cwd: activeFileCwd,
+      relativePath: activeFilePath,
+      enabled:
+        activeFileDocumentKind !== null &&
+        activeFileCwd !== null &&
+        activeFilePath !== null &&
+        activeThreadSessionStatus === "running",
+      refetchInterval: liveDocumentMetadataRefreshInterval,
+    }),
+  );
+  const activeDocumentMetadataSignatureRef = useRef<string | null>(null);
 
   const breadcrumbs = useMemo(() => {
     if (!activeFilePath) return [] as string[];
     return activeFilePath.split("/").filter((segment) => segment.length > 0);
   }, [activeFilePath]);
   const activeFileName = breadcrumbs.at(-1) ?? null;
+  const showFileSubheader = activeFilePath !== null && activeFileDocumentKind === null;
+  useEffect(() => {
+    if (activeFileDocumentKind === null || activeFileCwd === null || activeFilePath === null) {
+      return;
+    }
+    void refetchActiveFile();
+  }, [
+    activeFileCwd,
+    activeFileDocumentKind,
+    activeFilePath,
+    refetchActiveFile,
+    activeThreadSessionStatus,
+  ]);
+  useEffect(() => {
+    if (activeFileDocumentKind === null || activeFileCwd === null || activeFilePath === null) {
+      activeDocumentMetadataSignatureRef.current = null;
+      return;
+    }
+    const metadata = activeFileMetadataQuery.data;
+    if (!metadata || metadata.status !== "file") {
+      return;
+    }
+
+    const signature = `${activeFileCwd}:${activeFilePath}:${metadata.sizeBytes}:${metadata.modifiedAtMs}`;
+    if (activeDocumentMetadataSignatureRef.current === null) {
+      activeDocumentMetadataSignatureRef.current = signature;
+      return;
+    }
+    if (activeDocumentMetadataSignatureRef.current !== signature) {
+      activeDocumentMetadataSignatureRef.current = signature;
+      void refetchActiveFile();
+    }
+  }, [
+    activeFileCwd,
+    activeFileDocumentKind,
+    activeFileMetadataQuery.data,
+    activeFilePath,
+    refetchActiveFile,
+  ]);
   const openActiveFileInEditor = () => {
-    if (!activeCwd || !activeFilePath) {
+    if (!activeFileCwd || !activeFilePath) {
       return;
     }
     const api = readNativeApi();
     if (!api) {
       return;
     }
-    const targetPath = resolvePathLinkTarget(activeFilePath, activeCwd);
+    const targetPath = resolvePathLinkTarget(activeFilePath, activeFileCwd);
     void api.shell.openInEditor(targetPath, preferredTerminalEditor());
   };
 
@@ -197,7 +337,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
             </div>
           </div>
         </div>
-        {filePanelState.activeTab.kind === "file" ? (
+        {filePanelState.activeTab.kind === "file" && showFileSubheader ? (
           <div className="desktop-top-edge-actions-safe flex h-11 items-center justify-between gap-3 px-4 text-[12px] text-muted-foreground/72">
             {activeFilePath ? (
             <div className="min-w-0" data-testid="viewer-breadcrumbs">
@@ -293,14 +433,30 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
           />
         ) : activeFileQuery.isLoading ? (
           <PanelEmptyState message="Loading file…" />
-        ) : activeFileQuery.data?.status !== "text" ? (
-          <PanelEmptyState message={activeFileQuery.data?.message ?? "File unavailable."} />
-        ) : activeFilePath !== null ? (
+        ) : activeFileQuery.data?.status === "document" && activeFilePath !== null ? (
+          <OfficeDocumentViewer
+            filePath={activeFilePath}
+            contentsBase64={activeFileQuery.data.contentsBase64}
+            mimeType={activeFileQuery.data.mimeType}
+          />
+        ) : activeFileQuery.data && activeFileQuery.data.status !== "text" ? (
+          <PanelEmptyState
+            message={
+              activeFilePath !== null &&
+              activeFileQuery.data.status === "binary" &&
+              previewFileKind(activeFilePath) !== null
+                ? "Preview is available, but the running server returned the old binary-file response. Restart the T3 server and reopen this file."
+                : "message" in activeFileQuery.data
+                ? activeFileQuery.data.message
+                : "File unavailable."
+            }
+          />
+        ) : activeFilePath !== null && activeFileQuery.data?.status === "text" ? (
           isMarkdownFile(activeFilePath) && markdownRichViewEnabled ? (
             <MarkdownFileViewer
               filePath={activeFilePath}
               contents={activeFileQuery.data.contents}
-              cwd={activeCwd}
+              cwd={activeFileCwd}
             />
           ) : (
             <Suspense fallback={<PanelEmptyState message="Loading syntax highlighting…" />}>
@@ -700,69 +856,79 @@ function ReviewSurface(props: {
                 key={fileDiff.cacheKey ?? `${fileDiff.prevName ?? ""}:${fileDiff.name}:${index}`}
                 className="scroll-mt-20"
               >
-                <FileDiff
-                  fileDiff={fileDiff}
-                  lineAnnotations={reviewLineAnnotationsForFile({
-                    filePath: fileDiff.name,
-                    comments: props.commentsByFilePath[fileDiff.name] ?? [],
-                    draft: draftComment,
-                  })}
-                  options={{
-                    collapsed,
-                    diffStyle,
-                    enableGutterUtility: true,
-                    hunkSeparators: "line-info",
-                    lineDiffType: wordDiffs ? "word" : "none",
-                    maxLineDiffLength: 2_000,
-                    overflow: wordWrap ? "wrap" : "scroll",
-                    preferredHighlighter: "shiki-js",
-                    theme: themeName,
-                    themeType: props.theme,
-                    tokenizeMaxLineLength: 1_000,
-                    unsafeCSS: REVIEW_DIFF_UNSAFE_CSS,
-                    onGutterUtilityClick: (range) => {
-                      setDraftComment({
-                        filePath: fileDiff.name,
-                        line: range.start,
-                        side: range.side ?? "additions",
-                      });
-                      setDraftText("");
-                    },
-                  }}
-                  renderAnnotation={(annotation) => (
-                    <FileLineAnnotation
-                      annotation={annotation}
-                      draftText={draftText}
-                      label={`Comment on ${annotation.side === "additions" ? "new" : "old"} line ${annotation.lineNumber}`}
-                      onCancelDraft={() => setDraftComment(null)}
-                      onChangeDraftText={setDraftText}
-                      onDeleteComment={(commentId) =>
-                        props.onDeleteComment(fileDiff.name, commentId)
-                      }
-                      onSaveComment={(lineNumber) => {
-                        props.onAddComment(
-                          fileDiff.name,
-                          lineNumber,
-                          draftText.trim(),
-                          annotation.side,
-                        );
+                {scope !== "last-turn" && isPdfFile(fileDiff.name) ? (
+                  <ReviewPdfDiff
+                    cwd={props.cwd}
+                    fileDiff={fileDiff}
+                    scope={scope}
+                    disabled={reviewActionMutation.isPending}
+                    onAction={(action) => void runReviewAction(action, fileDiff.name)}
+                  />
+                ) : (
+                  <FileDiff
+                    fileDiff={fileDiff}
+                    lineAnnotations={reviewLineAnnotationsForFile({
+                      filePath: fileDiff.name,
+                      comments: props.commentsByFilePath[fileDiff.name] ?? [],
+                      draft: draftComment,
+                    })}
+                    options={{
+                      collapsed,
+                      diffStyle,
+                      enableGutterUtility: true,
+                      hunkSeparators: "line-info",
+                      lineDiffType: wordDiffs ? "word" : "none",
+                      maxLineDiffLength: 2_000,
+                      overflow: wordWrap ? "wrap" : "scroll",
+                      preferredHighlighter: "shiki-js",
+                      theme: themeName,
+                      themeType: props.theme,
+                      tokenizeMaxLineLength: 1_000,
+                      unsafeCSS: REVIEW_DIFF_UNSAFE_CSS,
+                      onGutterUtilityClick: (range) => {
+                        setDraftComment({
+                          filePath: fileDiff.name,
+                          line: range.start,
+                          side: range.side ?? "additions",
+                        });
                         setDraftText("");
-                        setDraftComment(null);
-                      }}
-                      onUpdateComment={(commentId, text) =>
-                        props.onUpdateComment(fileDiff.name, commentId, text)
-                      }
-                    />
-                  )}
-                  renderHeaderMetadata={() => (
-                    <ReviewFileActions
-                      filePath={fileDiff.name}
-                      scope={scope}
-                      disabled={reviewActionMutation.isPending}
-                      onAction={(action) => void runReviewAction(action, fileDiff.name)}
-                    />
-                  )}
-                />
+                      },
+                    }}
+                    renderAnnotation={(annotation) => (
+                      <FileLineAnnotation
+                        annotation={annotation}
+                        draftText={draftText}
+                        label={`Comment on ${annotation.side === "additions" ? "new" : "old"} line ${annotation.lineNumber}`}
+                        onCancelDraft={() => setDraftComment(null)}
+                        onChangeDraftText={setDraftText}
+                        onDeleteComment={(commentId) =>
+                          props.onDeleteComment(fileDiff.name, commentId)
+                        }
+                        onSaveComment={(lineNumber) => {
+                          props.onAddComment(
+                            fileDiff.name,
+                            lineNumber,
+                            draftText.trim(),
+                            annotation.side,
+                          );
+                          setDraftText("");
+                          setDraftComment(null);
+                        }}
+                        onUpdateComment={(commentId, text) =>
+                          props.onUpdateComment(fileDiff.name, commentId, text)
+                        }
+                      />
+                    )}
+                    renderHeaderMetadata={() => (
+                      <ReviewFileActions
+                        filePath={fileDiff.name}
+                        scope={scope}
+                        disabled={reviewActionMutation.isPending}
+                        onAction={(action) => void runReviewAction(action, fileDiff.name)}
+                      />
+                    )}
+                  />
+                )}
               </div>
             ))}
           </div>
@@ -815,7 +981,135 @@ function parseReviewPatchFiles(patch: string): FileDiffMetadata[] {
   if (trimmed.length === 0) {
     return [];
   }
-  return parsePatchFiles(trimmed, "review").flatMap((parsedPatch) => parsedPatch.files);
+  const parsedFiles = parsePatchFiles(trimmed, "review").flatMap((parsedPatch) => parsedPatch.files);
+  const binaryFiles = parseBinaryReviewPatchFiles(trimmed);
+  const parsedNames = new Set(parsedFiles.map((file) => file.name));
+  return [
+    ...parsedFiles,
+    ...binaryFiles.filter((file) => !parsedNames.has(file.name)),
+  ];
+}
+
+function parseBinaryReviewPatchFiles(patch: string): FileDiffMetadata[] {
+  const files: FileDiffMetadata[] = [];
+  const diffHeaderPattern = /^diff --git a\/(.+) b\/(.+)$/gm;
+  let match: RegExpExecArray | null;
+  while ((match = diffHeaderPattern.exec(patch)) !== null) {
+    const previousName = match[1] ?? "";
+    const name = match[2] ?? previousName;
+    const nextHeaderIndex = patch.indexOf("\ndiff --git ", diffHeaderPattern.lastIndex);
+    const section = patch.slice(
+      match.index,
+      nextHeaderIndex >= 0 ? nextHeaderIndex : patch.length,
+    );
+    if (!/Binary files .* differ|GIT binary patch/.test(section)) {
+      continue;
+    }
+    files.push({
+      name,
+      type: "change",
+      hunks: [],
+      splitLineCount: 0,
+      unifiedLineCount: 0,
+      isPartial: true,
+      additionLines: [],
+      deletionLines: [],
+      ...(previousName !== name ? { prevName: previousName } : {}),
+      cacheKey: `review-binary-${files.length}`,
+    } as FileDiffMetadata);
+  }
+  return files;
+}
+
+function ReviewPdfDiff(props: {
+  cwd: string | null;
+  disabled: boolean;
+  fileDiff: FileDiffMetadata;
+  onAction: (action: GitReviewAction) => void;
+  scope: GitDiffScope;
+}) {
+  const previewQuery = useQuery(
+    gitFilePreviewQueryOptions({
+      cwd: props.cwd,
+      path: props.fileDiff.name,
+      scope: props.scope,
+    }),
+  );
+  const stats = summarizeReviewFile(props.fileDiff);
+
+  return (
+    <section className="border-b border-border/60 bg-background">
+      <div className="sticky top-10 z-[9] flex min-h-11 items-center justify-between gap-3 border-b border-border/55 bg-background/95 px-3 py-2 backdrop-blur">
+        <div className="min-w-0">
+          <div className="truncate text-[13px] font-medium text-foreground">
+            {props.fileDiff.name}
+            <span className="ml-2 font-mono text-[12px] text-emerald-600 dark:text-emerald-400">
+              +{stats.additions}
+            </span>
+            <span className="ml-1 font-mono text-[12px] text-red-600 dark:text-red-400">
+              -{stats.deletions}
+            </span>
+          </div>
+          {props.fileDiff.prevName && props.fileDiff.prevName !== props.fileDiff.name ? (
+            <div className="truncate text-[11px] text-muted-foreground/70">
+              {props.fileDiff.prevName}
+            </div>
+          ) : null}
+        </div>
+        <ReviewFileActions
+          filePath={props.fileDiff.name}
+          scope={props.scope}
+          disabled={props.disabled}
+          onAction={props.onAction}
+        />
+      </div>
+      {previewQuery.isLoading ? (
+        <div className="flex h-64 items-center justify-center text-xs text-muted-foreground/70">
+          Loading PDF preview...
+        </div>
+      ) : previewQuery.isError || !previewQuery.data ? (
+        <div className="flex h-64 items-center justify-center text-xs text-muted-foreground/70">
+          Unable to load PDF preview.
+        </div>
+      ) : (
+        <div className="grid gap-4 bg-muted/28 p-4 xl:grid-cols-2">
+          <ReviewPdfSide
+            contentsBase64={previewQuery.data.before.contentsBase64}
+            status={previewQuery.data.before.status}
+            filePath={props.fileDiff.prevName ?? props.fileDiff.name}
+          />
+          <ReviewPdfSide
+            contentsBase64={previewQuery.data.after.contentsBase64}
+            status={previewQuery.data.after.status}
+            filePath={props.fileDiff.name}
+          />
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ReviewPdfSide(props: {
+  contentsBase64?: string | undefined;
+  filePath: string;
+  status: "missing" | "present";
+}) {
+  return (
+    <div className="min-w-0 overflow-hidden">
+      {props.status === "present" && props.contentsBase64 ? (
+        <PdfPreview
+          bytes={bytesFromBase64(props.contentsBase64)}
+          filePath={props.filePath}
+          layout="embedded"
+          mimeType="application/pdf"
+        />
+      ) : (
+        <div className="flex h-72 items-center justify-center rounded-md border border-border/55 bg-background text-xs text-muted-foreground/70">
+          No file on this side.
+        </div>
+      )}
+    </div>
+  );
 }
 
 function reviewFileDomId(index: number): string {
@@ -1051,6 +1345,479 @@ function MarkdownFileViewer(props: {
     <div className="h-full overflow-auto bg-background">
       <div className="px-6 py-6">
         <ChatMarkdown text={props.contents} cwd={props.cwd ?? undefined} />
+      </div>
+    </div>
+  );
+}
+
+function bytesFromBase64(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function textFromXmlNode(node: Element): string {
+  return [...node.getElementsByTagName("a:t"), ...node.getElementsByTagName("w:t")]
+    .map((entry) => entry.textContent ?? "")
+    .join("");
+}
+
+function previewKey(parts: readonly unknown[]): string {
+  return parts.map((part) => String(part)).join(":");
+}
+
+function parseXml(text: string): Document {
+  return new DOMParser().parseFromString(text, "application/xml");
+}
+
+type ParsedDocx = { paragraphs: string[] };
+type ParsedPptxSlide = { slideNumber: number; title: string; lines: string[] };
+
+async function parseDocx(bytes: Uint8Array): Promise<ParsedDocx> {
+  const zip = await JSZip.loadAsync(bytes);
+  const documentXml = await zip.file("word/document.xml")?.async("text");
+  if (!documentXml) return { paragraphs: [] };
+  const doc = parseXml(documentXml);
+  const paragraphs = [...doc.getElementsByTagName("w:p")]
+    .map((paragraph) =>
+      [...paragraph.getElementsByTagName("w:t")].map((node) => node.textContent ?? "").join(""),
+    )
+    .map((text) => text.trim())
+    .filter((text) => text.length > 0);
+  return { paragraphs };
+}
+
+async function parsePptx(bytes: Uint8Array): Promise<ParsedPptxSlide[]> {
+  const zip = await JSZip.loadAsync(bytes);
+  const slideFiles = Object.keys(zip.files)
+    .filter((name) => /^ppt\/slides\/slide\d+\.xml$/.test(name))
+    .toSorted((left, right) => {
+      const leftNumber = Number.parseInt(left.match(/slide(\d+)\.xml$/)?.[1] ?? "0", 10);
+      const rightNumber = Number.parseInt(right.match(/slide(\d+)\.xml$/)?.[1] ?? "0", 10);
+      return leftNumber - rightNumber;
+    });
+
+  const slides: ParsedPptxSlide[] = [];
+  for (const [index, fileName] of slideFiles.entries()) {
+    const slideXml = await zip.file(fileName)?.async("text");
+    if (!slideXml) continue;
+    const doc = parseXml(slideXml);
+    const lines = [...doc.getElementsByTagName("a:p")]
+      .map(textFromXmlNode)
+      .map((text) => text.trim())
+      .filter((text) => text.length > 0);
+    slides.push({
+      slideNumber: index + 1,
+      title: lines[0] ?? `Slide ${index + 1}`,
+      lines,
+    });
+  }
+  return slides;
+}
+
+function OfficeDocumentViewer(props: {
+  filePath: string;
+  contentsBase64: string;
+  mimeType: string;
+}) {
+  const kind = previewFileKind(props.filePath);
+  const [docx, setDocx] = useState<ParsedDocx | null>(null);
+  const [pptx, setPptx] = useState<ParsedPptxSlide[] | null>(null);
+  const [selectedSlideIndex, setSelectedSlideIndex] = useState(0);
+  const [error, setError] = useState<string | null>(null);
+  const bytes = useMemo(() => bytesFromBase64(props.contentsBase64), [props.contentsBase64]);
+
+  const workbook = useMemo(() => {
+    if (kind !== "spreadsheet") return null;
+    try {
+      setError(null);
+      return XLSX.read(bytes, { type: "array" });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to preview spreadsheet.");
+      return null;
+    }
+  }, [bytes, kind]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setDocx(null);
+    setPptx(null);
+    setError(null);
+    setSelectedSlideIndex(0);
+
+    if (kind === "document") {
+      void parseDocx(bytes)
+        .then((parsed) => {
+          if (!cancelled) setDocx(parsed);
+        })
+        .catch((cause: unknown) => {
+          if (!cancelled) {
+            setError(cause instanceof Error ? cause.message : "Unable to preview document.");
+          }
+        });
+    }
+
+    if (kind === "slides") {
+      void parsePptx(bytes)
+        .then((parsed) => {
+          if (!cancelled) setPptx(parsed);
+        })
+        .catch((cause: unknown) => {
+          if (!cancelled) {
+            setError(cause instanceof Error ? cause.message : "Unable to preview slides.");
+          }
+        });
+    }
+
+    return () => {
+      cancelled = true;
+    };
+  }, [bytes, kind]);
+
+  if (!kind) {
+    return <PanelEmptyState message={`Preview unavailable for ${props.mimeType}.`} />;
+  }
+
+  if (error) {
+    return <PanelEmptyState message={error} />;
+  }
+
+  if (kind === "spreadsheet") {
+    return <SpreadsheetPreview workbook={workbook} />;
+  }
+
+  if (kind === "pdf") {
+    return <PdfPreview bytes={bytes} filePath={props.filePath} mimeType={props.mimeType} />;
+  }
+
+  if (kind === "image") {
+    return (
+      <ImagePreview
+        contentsBase64={props.contentsBase64}
+        filePath={props.filePath}
+        mimeType={props.mimeType}
+      />
+    );
+  }
+
+  if (kind === "document") {
+    return docx ? <WordPreview document={docx} /> : <PanelEmptyState message="Loading document..." />;
+  }
+
+  return pptx ? (
+    <SlidesPreview
+      slides={pptx}
+      selectedSlideIndex={selectedSlideIndex}
+      onSelectSlide={setSelectedSlideIndex}
+    />
+  ) : (
+    <PanelEmptyState message="Loading slides..." />
+  );
+}
+
+function SpreadsheetPreview(props: { workbook: XLSX.WorkBook | null }) {
+  const [sheetName, setSheetName] = useState<string | null>(null);
+  const activeSheetName = sheetName ?? props.workbook?.SheetNames[0] ?? null;
+  const rows = useMemo(() => {
+    if (!props.workbook || !activeSheetName) return [];
+    const sheet = props.workbook.Sheets[activeSheetName];
+    return sheet ? XLSX.utils.sheet_to_json<Array<string | number | boolean | null>>(sheet, { header: 1 }) : [];
+  }, [activeSheetName, props.workbook]);
+
+  if (!props.workbook || !activeSheetName) {
+    return <PanelEmptyState message="Spreadsheet is empty." />;
+  }
+
+  return (
+    <div className="flex h-full min-w-0 flex-col bg-background">
+      <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border/55 px-3">
+        {props.workbook.SheetNames.map((name) => (
+          <Button
+            key={name}
+            type="button"
+            size="xs"
+            variant={name === activeSheetName ? "secondary" : "ghost"}
+            onClick={() => setSheetName(name)}
+          >
+            {name}
+          </Button>
+        ))}
+      </div>
+      <div className="min-h-0 overflow-auto p-4">
+        <table className="min-w-full border-separate border-spacing-0 text-left text-xs">
+          <tbody>
+            {rows.slice(0, 500).map((row, rowIndex) => (
+              <tr key={previewKey(["row", rowIndex, row.join("|")])} className="odd:bg-muted/24">
+                {Array.from({ length: Math.max(1, row.length) }).map((_, cellIndex) => (
+                  <td
+                    key={previewKey(["cell", rowIndex, cellIndex, row[cellIndex] ?? ""])}
+                    className="max-w-72 truncate border-b border-r border-border/45 px-2 py-1.5"
+                    title={String(row[cellIndex] ?? "")}
+                  >
+                    {String(row[cellIndex] ?? "")}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function PdfPreview(props: {
+  bytes: Uint8Array;
+  filePath: string;
+  layout?: "embedded" | "panel";
+  mimeType: string;
+}) {
+  const [pdfDocument, setPdfDocument] = useState<PDFDocumentProxy | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPdfDocument(null);
+    setError(null);
+    const loadingTask = getDocument({
+      data: props.bytes.slice(),
+      enableXfa: true,
+      isImageDecoderSupported: false,
+      isOffscreenCanvasSupported: false,
+      useSystemFonts: true,
+      useWasm: false,
+    });
+    void loadingTask.promise
+      .then((document) => {
+        if (!cancelled) {
+          setPdfDocument(document);
+        } else {
+          void document.destroy();
+        }
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) {
+          setError(cause instanceof Error ? cause.message : "Unable to preview PDF.");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      void loadingTask.destroy();
+    };
+  }, [props.bytes]);
+
+  if (error) {
+    return <PanelEmptyState message={error} />;
+  }
+
+  if (!pdfDocument) {
+    return <PanelEmptyState message="Loading PDF..." />;
+  }
+
+  const layout = props.layout ?? "panel";
+
+  return (
+    <div
+      className={cn(
+        "bg-muted/28",
+        layout === "panel" ? "h-full overflow-auto px-6 py-6" : "px-3 py-3",
+      )}
+    >
+      <div
+        className={cn(
+          "mx-auto flex flex-col items-center gap-5",
+          layout === "panel" ? "max-w-5xl" : "max-w-full",
+        )}
+      >
+        {Array.from({ length: pdfDocument.numPages }).map((_, pageIndex) => (
+          <PdfPage
+            key={previewKey([props.filePath, props.mimeType, pageIndex])}
+            document={pdfDocument}
+            pageNumber={pageIndex + 1}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PdfPage(props: { document: PDFDocumentProxy; pageNumber: number }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [renderState, setRenderState] = useState<"loading" | "rendered" | "error">("loading");
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [pageSize, setPageSize] = useState<{ height: number; width: number } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      return;
+    }
+
+    setRenderState("loading");
+    setErrorMessage(null);
+    let cleanupRender: (() => void) | null = null;
+    void props.document
+      .getPage(props.pageNumber)
+      .then(async (page) => {
+        if (cancelled) {
+          return;
+        }
+        const viewport = page.getViewport({ scale: 1.75 });
+        const outputScale = window.devicePixelRatio || 1;
+        const cssWidth = Math.ceil(viewport.width);
+        const cssHeight = Math.ceil(viewport.height);
+        setPageSize({ height: cssHeight, width: cssWidth });
+        canvas.width = Math.ceil(cssWidth * outputScale);
+        canvas.height = Math.ceil(cssHeight * outputScale);
+        canvas.style.width = "100%";
+        canvas.style.height = "auto";
+        const context = canvas.getContext("2d", { alpha: false });
+        if (!context) {
+          throw new Error("Canvas rendering is unavailable.");
+        }
+        context.save();
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.restore();
+        const transform =
+          outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0];
+        const renderTask = page.render({
+          annotationMode: AnnotationMode.ENABLE_STORAGE,
+          background: "rgb(255, 255, 255)",
+          canvas,
+          canvasContext: context,
+          transform,
+          viewport,
+        });
+        cleanupRender = () => renderTask.cancel();
+        await renderTask.promise;
+        if (!cancelled) {
+          setRenderState("rendered");
+        }
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) {
+          setErrorMessage(cause instanceof Error ? cause.message : "Unable to render this page.");
+          setRenderState("error");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+      cleanupRender?.();
+    };
+  }, [props.document, props.pageNumber]);
+
+  return (
+    <div
+      className="relative max-w-full rounded-md border border-border/55 bg-white shadow-sm"
+      style={{
+        aspectRatio: pageSize ? `${pageSize.width} / ${pageSize.height}` : undefined,
+        width: pageSize ? `${pageSize.width}px` : "min(100%, 820px)",
+      }}
+    >
+      <canvas
+        ref={canvasRef}
+        aria-label={`Page ${props.pageNumber}`}
+        className="block h-auto w-full rounded-md bg-white"
+      />
+      {renderState !== "rendered" ? (
+        <div className="absolute inset-0 flex items-center justify-center rounded-md bg-white text-xs text-muted-foreground/70">
+          {renderState === "error" ? (errorMessage ?? "Unable to render this page.") : "Loading page..."}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ImagePreview(props: {
+  contentsBase64: string;
+  filePath: string;
+  mimeType: string;
+}) {
+  const imageUrl = useMemo(
+    () => `data:${props.mimeType};base64,${props.contentsBase64}`,
+    [props.contentsBase64, props.mimeType],
+  );
+
+  return (
+    <div className="flex h-full min-w-0 items-center justify-center overflow-auto bg-muted/20 p-6">
+      <img
+        alt={props.filePath}
+        src={imageUrl}
+        className="max-h-full max-w-full rounded-md object-contain shadow-sm"
+      />
+    </div>
+  );
+}
+
+function WordPreview(props: { document: ParsedDocx }) {
+  return (
+    <div className="h-full overflow-auto bg-background">
+      <article className="min-h-full max-w-5xl px-8 py-8 text-left">
+        {props.document.paragraphs.length > 0 ? (
+          props.document.paragraphs.map((paragraph, index) => (
+            <p
+              key={previewKey(["paragraph", index, paragraph])}
+              className="mb-5 text-[15px] leading-8 text-foreground/82"
+            >
+              {paragraph}
+            </p>
+          ))
+        ) : (
+          <p className="text-sm text-muted-foreground">Document has no readable text.</p>
+        )}
+      </article>
+    </div>
+  );
+}
+
+function SlidesPreview(props: {
+  slides: ParsedPptxSlide[];
+  selectedSlideIndex: number;
+  onSelectSlide: (index: number) => void;
+}) {
+  const selectedSlide = props.slides[props.selectedSlideIndex] ?? props.slides[0];
+  if (!selectedSlide) {
+    return <PanelEmptyState message="Presentation has no readable slides." />;
+  }
+
+  return (
+    <div className="grid h-full min-w-0 grid-cols-[168px_1fr] bg-background">
+      <div className="min-h-0 overflow-auto border-r border-border/55 p-3">
+        {props.slides.map((slide, index) => (
+          <button
+            key={slide.slideNumber}
+            type="button"
+            className={cn(
+              "mb-3 block w-full rounded-md border p-2 text-left text-xs",
+              index === props.selectedSlideIndex
+                ? "border-primary/70 bg-primary/8"
+                : "border-border/60 bg-muted/18 hover:bg-accent",
+            )}
+            onClick={() => props.onSelectSlide(index)}
+          >
+            <div className="mb-1 font-medium text-foreground/80">{slide.slideNumber}</div>
+            <div className="aspect-video overflow-hidden rounded-sm bg-background p-2 text-[8px] leading-tight text-muted-foreground">
+              {slide.title}
+            </div>
+          </button>
+        ))}
+      </div>
+      <div className="min-h-0 overflow-auto bg-muted/25 p-8">
+        <div className="mx-auto aspect-video max-w-5xl rounded-lg border border-border/60 bg-background p-12 shadow-sm">
+          <h1 className="mb-8 text-3xl font-semibold text-foreground">{selectedSlide.title}</h1>
+          <div className="space-y-4 text-lg leading-8 text-foreground/82">
+            {selectedSlide.lines.slice(1).map((line, index) => (
+              <p key={previewKey(["slide-line", selectedSlide.slideNumber, index, line])}>{line}</p>
+            ))}
+          </div>
+        </div>
       </div>
     </div>
   );

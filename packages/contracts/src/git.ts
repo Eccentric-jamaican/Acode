@@ -62,6 +62,13 @@ export const GitDiffInput = Schema.Struct({
 });
 export type GitDiffInput = typeof GitDiffInput.Type;
 
+export const GitFilePreviewInput = Schema.Struct({
+  cwd: TrimmedNonEmptyStringSchema,
+  path: TrimmedNonEmptyStringSchema,
+  scope: GitDiffScope,
+});
+export type GitFilePreviewInput = typeof GitFilePreviewInput.Type;
+
 export const GitReviewActionInput = Schema.Struct({
   cwd: TrimmedNonEmptyStringSchema,
   action: GitReviewAction,
@@ -163,6 +170,20 @@ export const GitDiffResult = Schema.Struct({
   patch: Schema.String,
 });
 export type GitDiffResult = typeof GitDiffResult.Type;
+
+const GitFilePreviewSide = Schema.Struct({
+  contentsBase64: Schema.optional(Schema.String),
+  refLabel: TrimmedNonEmptyStringSchema,
+  status: Schema.Literals(["present", "missing"]),
+});
+
+export const GitFilePreviewResult = Schema.Struct({
+  after: GitFilePreviewSide,
+  before: GitFilePreviewSide,
+  path: TrimmedNonEmptyStringSchema,
+  scope: GitDiffScope,
+});
+export type GitFilePreviewResult = typeof GitFilePreviewResult.Type;
 
 export const GitReviewActionResult = Schema.Struct({
   action: GitReviewAction,

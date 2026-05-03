@@ -12,19 +12,19 @@ export interface TaskWithRuntime {
 }
 
 export function buildTaskRuntimeMap(taskRuntimes: readonly TaskRuntime[]): Map<string, TaskRuntime> {
-  return new Map(taskRuntimes.map((runtime) => [runtime.taskId, runtime] as const));
+  return new Map<string, TaskRuntime>(taskRuntimes.map((runtime) => [runtime.taskId, runtime]));
 }
 
 export function buildThreadMap(threads: readonly Thread[]): Map<string, Thread> {
-  return new Map(threads.map((thread) => [thread.id, thread] as const));
+  return new Map<string, Thread>(threads.map((thread) => [thread.id, thread]));
 }
 
 export function buildProjectMap(projects: readonly Project[]): Map<string, Project> {
-  return new Map(projects.map((project) => [project.id, project] as const));
+  return new Map<string, Project>(projects.map((project) => [project.id, project]));
 }
 
 export function buildProjectRulesMap(projectRules: readonly ProjectRules[]): Map<string, ProjectRules> {
-  return new Map(projectRules.map((rules) => [rules.projectId, rules] as const));
+  return new Map<string, ProjectRules>(projectRules.map((rules) => [rules.projectId, rules]));
 }
 
 export function taskNeedsAttention(task: Task, runtime: TaskRuntime | null): boolean {
