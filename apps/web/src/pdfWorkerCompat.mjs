@@ -32,4 +32,4 @@ if (!Math.sumPrecise) {
   });
 }
 
-await import("pdfjs-dist/build/pdf.worker.mjs");
+import "pdfjs-dist/build/pdf.worker.mjs";

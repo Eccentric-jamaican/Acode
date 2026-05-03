@@ -281,7 +281,7 @@ export function buildBrowserUseComposerPrompt(
 
   return [
     "Use T3 Browser Use for this request. Do not use OpenAI Browser Use, Chrome MCP, `t3_browser` MCP, Playwright, or an external browser unless T3 Browser Use is unavailable and I explicitly approve a fallback.",
-    "Load the client with `const { setupT3BrowserUse } = await import(process.env.T3CODE_BROWSER_USE_CLIENT_PATH); const browser = setupT3BrowserUse({ globals: globalThis, projectId: \"PROJECT_ID\" });`, replacing `PROJECT_ID` with the T3 project id below.",
+    "Load the client with `const { pathToFileURL } = await import(\"node:url\"); const clientUrl = pathToFileURL(process.env.T3CODE_BROWSER_USE_CLIENT_PATH).href; const { setupT3BrowserUse } = await import(clientUrl); const browser = setupT3BrowserUse({ globals: globalThis, projectId: \"PROJECT_ID\" });`, replacing `PROJECT_ID` with the T3 project id below.",
     "Use the `browser` object to open tabs, click, type, scroll, inspect snapshots, capture screenshots, and evaluate page state. Prefer `browser.open(url)`, `browser.snapshot()`, `browser.click(selector)`, `browser.fill(selector, value)`, `browser.pressKey(key)`, and `browser.scrollBy(y)`.",
     "Respect T3 browser settings for approvals, history access, allowed domains, blocked domains, and persisted browsing data.",
     projectHint,

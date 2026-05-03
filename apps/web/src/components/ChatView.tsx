@@ -57,9 +57,7 @@ import {
 } from "~/lib/gitReactQuery";
 import { projectSearchEntriesQueryOptions } from "~/lib/projectReactQuery";
 import { serverConfigQueryOptions, serverQueryKeys } from "~/lib/serverReactQuery";
-import {
-  resolveProviderDiscoveryCwd,
-} from "~/lib/providerDiscovery";
+import { resolveProviderDiscoveryCwd } from "~/lib/providerDiscovery";
 import {
   providerCommandsQueryOptions,
   providerComposerCapabilitiesQueryOptions,
@@ -169,6 +167,7 @@ import {
   MessageSquareIcon,
   PanelLeftIcon,
   BoxIcon,
+  ImageIcon,
   MousePointer2Icon,
   PlugIcon,
   PlusIcon,
@@ -180,6 +179,7 @@ import {
   XIcon,
   ZapIcon,
   PinIcon,
+  PinOffIcon,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Separator } from "./ui/separator";
@@ -254,24 +254,19 @@ import { selectThreadTerminalState, useTerminalStateStore } from "../terminalSta
 import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "./ComposerPromptEditor";
 import { shouldUseCompactComposerFooter } from "./composerFooterLayout";
 import { buildQuotedSelectionInsertion, normalizeSelectedText } from "../chatPinnedSelections";
-import {
-  MessagesTimeline,
-  type UserMessageMentionDescriptor,
-} from "./chat/MessagesTimeline";
+import { MessagesTimeline, type UserMessageMentionDescriptor } from "./chat/MessagesTimeline";
 import { CompactComposerControlsMenu } from "./chat/CompactComposerControlsMenu";
 import {
   ExpandedImagePreview as ExpandedImagePreviewDialog,
   buildExpandedImagePreview,
   type ExpandedImagePreview,
 } from "./chat/ExpandedImagePreview";
-import {
-  ComposerCommandMenu,
-  type ComposerCommandItem,
-} from "./chat/ComposerCommandMenu";
+import { ComposerCommandMenu, type ComposerCommandItem } from "./chat/ComposerCommandMenu";
 import { ComposerExtrasMenu } from "./chat/ComposerExtrasMenu";
 
 const LAST_EDITOR_KEY = "t3code:last-editor";
 const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by-project";
+const THREAD_CONTEXT_PANEL_PINNED_KEY = "t3code:thread-context-panel-pinned";
 const ATTACHMENT_PREVIEW_HANDOFF_TTL_MS = 5000;
 const IMAGE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / (1024 * 1024))}MB`;
 const IMAGE_ONLY_BOOTSTRAP_PROMPT =
@@ -295,6 +290,25 @@ const HEADER_COMPACT_BREAKPOINT = 480;
 const HANDOFF_WHEEL_SNAP_DELTA = 36;
 const HANDOFF_WHEEL_RESET_GAP_MS = 220;
 const HANDOFF_WHEEL_COOLDOWN_MS = 180;
+const THREAD_CONTEXT_ARTIFACT_EXTENSIONS = new Set([
+  "avif",
+  "bmp",
+  "docx",
+  "gif",
+  "heic",
+  "jpeg",
+  "jpg",
+  "md",
+  "mdown",
+  "mdx",
+  "mkd",
+  "pdf",
+  "png",
+  "pptx",
+  "webp",
+  "xls",
+  "xlsx",
+]);
 const CODEX_REASONING_LABEL_BY_OPTION: Record<CodexReasoningEffort, string> = {
   low: "Low",
   medium: "Medium",
@@ -302,8 +316,8 @@ const CODEX_REASONING_LABEL_BY_OPTION: Record<CodexReasoningEffort, string> = {
   xhigh: "Extra High",
 };
 
-function skillMentionPrefix(provider: ProviderKind): string {
-  return provider === "claudeAgent" ? "/" : "$";
+function skillMentionPrefix(): string {
+  return "$";
 }
 
 type SelectedComposerExtension = {
@@ -322,6 +336,372 @@ function isHomeProject(project: Project, homeDirectory: string | null | undefine
     project.cwd === homeDirectory &&
     project.name === HOME_PROJECT_TITLE
   );
+}
+
+interface ThreadContextArtifact {
+  path: string;
+  label: string;
+  kind: "generated" | "workspace";
+}
+
+interface ThreadContextSource {
+  id: string;
+  label: string;
+  icon: "browser" | "file" | "web";
+}
+
+interface ThreadContextProgressItem {
+  id: string;
+  label: string;
+  status: "pending" | "inProgress" | "completed" | "failed";
+  createdAt: string;
+}
+
+function extensionOf(pathValue: string): string {
+  const filename = pathValue.split(/[\\/]/).at(-1) ?? pathValue;
+  const dotIndex = filename.lastIndexOf(".");
+  if (dotIndex <= 0 || dotIndex === filename.length - 1) {
+    return "";
+  }
+  return filename.slice(dotIndex + 1).toLowerCase();
+}
+
+function basenameOfPath(pathValue: string): string {
+  return pathValue.split(/[\\/]/).at(-1) ?? pathValue;
+}
+
+function normalizeThreadContextPath(pathValue: string): string {
+  return pathValue.replaceAll("\\", "/").trim();
+}
+
+function isThreadContextArtifactPath(pathValue: string): boolean {
+  return THREAD_CONTEXT_ARTIFACT_EXTENSIONS.has(extensionOf(pathValue));
+}
+
+function compareThreadContextActivities(
+  left: Thread["activities"][number],
+  right: Thread["activities"][number],
+): number {
+  if (left.sequence !== undefined && right.sequence !== undefined) {
+    if (left.sequence !== right.sequence) {
+      return left.sequence - right.sequence;
+    }
+  } else if (left.sequence !== undefined) {
+    return 1;
+  } else if (right.sequence !== undefined) {
+    return -1;
+  }
+
+  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+}
+
+function progressLabelFromPayload(
+  payload: Record<string, unknown> | null,
+  fallback: string,
+): string {
+  if (payload && typeof payload.detail === "string" && payload.detail.trim().length > 0) {
+    return payload.detail.trim();
+  }
+  return fallback;
+}
+
+function latestUserMessageCreatedAt(thread: Thread): string | null {
+  return (
+    thread.messages
+      .filter((message) => message.role === "user")
+      .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .at(-1)?.createdAt ?? null
+  );
+}
+
+function isAfterProgressBoundary(
+  activity: Thread["activities"][number],
+  boundary: string | null,
+): boolean {
+  return boundary === null || activity.createdAt >= boundary;
+}
+
+function collectLatestPlanProgress(
+  thread: Thread,
+  boundary: string | null,
+): ThreadContextProgressItem[] {
+  const latestPlanActivity = [...thread.activities]
+    .filter((activity) => activity.kind === "turn.plan.updated")
+    .filter((activity) => isAfterProgressBoundary(activity, boundary))
+    .filter((activity) =>
+      thread.latestTurn?.turnId ? activity.turnId === thread.latestTurn.turnId : true,
+    )
+    .toSorted(compareThreadContextActivities)
+    .at(-1);
+  const payload =
+    latestPlanActivity?.payload && typeof latestPlanActivity.payload === "object"
+      ? (latestPlanActivity.payload as Record<string, unknown>)
+      : null;
+  const rawPlan = payload?.plan;
+  if (!latestPlanActivity || !Array.isArray(rawPlan)) {
+    return [];
+  }
+
+  return rawPlan
+    .map<ThreadContextProgressItem | null>((entry, index) => {
+      if (!entry || typeof entry !== "object") return null;
+      const record = entry as Record<string, unknown>;
+      if (typeof record.step !== "string" || record.step.trim().length === 0) {
+        return null;
+      }
+      const status =
+        record.status === "completed"
+          ? "completed"
+          : record.status === "inProgress"
+            ? "inProgress"
+            : "pending";
+      return {
+        id: `${latestPlanActivity.id}:plan:${index}`,
+        label: record.step.trim(),
+        status,
+        createdAt: latestPlanActivity.createdAt,
+      };
+    })
+    .filter((item): item is ThreadContextProgressItem => item !== null)
+    .slice(0, 6);
+}
+
+function collectTaskProgress(thread: Thread, boundary: string | null): ThreadContextProgressItem[] {
+  const byTaskId = new Map<string, ThreadContextProgressItem>();
+  for (const activity of [...thread.activities].toSorted(compareThreadContextActivities)) {
+    if (
+      activity.kind !== "task.started" &&
+      activity.kind !== "task.progress" &&
+      activity.kind !== "task.completed"
+    ) {
+      continue;
+    }
+    if (!isAfterProgressBoundary(activity, boundary)) {
+      continue;
+    }
+    const payload =
+      activity.payload && typeof activity.payload === "object"
+        ? (activity.payload as Record<string, unknown>)
+        : null;
+    const taskId = typeof payload?.taskId === "string" ? payload.taskId : activity.id;
+    const previous = byTaskId.get(taskId);
+    if (activity.kind === "task.completed") {
+      const rawStatus = typeof payload?.status === "string" ? payload.status : "completed";
+      byTaskId.set(taskId, {
+        id: taskId,
+        label: progressLabelFromPayload(payload, previous?.label ?? activity.summary),
+        status: rawStatus === "failed" ? "failed" : "completed",
+        createdAt: activity.createdAt,
+      });
+      continue;
+    }
+    byTaskId.set(taskId, {
+      id: taskId,
+      label: progressLabelFromPayload(payload, activity.summary),
+      status: "inProgress",
+      createdAt: activity.createdAt,
+    });
+  }
+
+  return [...byTaskId.values()]
+    .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .slice(-6);
+}
+
+function toolProgressKey(payload: Record<string, unknown> | null, fallback: string): string {
+  const data =
+    payload?.data && typeof payload.data === "object"
+      ? (payload.data as Record<string, unknown>)
+      : null;
+  const toolName = typeof data?.toolName === "string" ? data.toolName : null;
+  return toolName ?? fallback;
+}
+
+function isTaskLikeToolProgress(payload: Record<string, unknown> | null, summary: string): boolean {
+  const data =
+    payload?.data && typeof payload.data === "object"
+      ? (payload.data as Record<string, unknown>)
+      : null;
+  const toolName = typeof data?.toolName === "string" ? data.toolName : "";
+  const itemType = typeof payload?.itemType === "string" ? payload.itemType : "";
+  const haystack = `${summary} ${toolName} ${itemType}`.toLowerCase();
+  return haystack.includes("task") || haystack.includes("todo") || haystack.includes("plan");
+}
+
+function collectTaskLikeToolProgress(
+  thread: Thread,
+  boundary: string | null,
+): ThreadContextProgressItem[] {
+  const byTool = new Map<string, ThreadContextProgressItem>();
+  for (const activity of [...thread.activities].toSorted(compareThreadContextActivities)) {
+    if (
+      activity.kind !== "tool.started" &&
+      activity.kind !== "tool.updated" &&
+      activity.kind !== "tool.completed"
+    ) {
+      continue;
+    }
+    if (!isAfterProgressBoundary(activity, boundary)) {
+      continue;
+    }
+    const payload =
+      activity.payload && typeof activity.payload === "object"
+        ? (activity.payload as Record<string, unknown>)
+        : null;
+    if (!isTaskLikeToolProgress(payload, activity.summary)) {
+      continue;
+    }
+    const key = toolProgressKey(payload, activity.summary);
+    const status =
+      activity.kind === "tool.completed"
+        ? "completed"
+        : payload?.status === "completed"
+          ? "completed"
+          : "inProgress";
+    byTool.set(key, {
+      id: key,
+      label: progressLabelFromPayload(payload, activity.summary.replace(/\s+started$/i, "")),
+      status,
+      createdAt: activity.createdAt,
+    });
+  }
+
+  return [...byTool.values()]
+    .toSorted((left, right) => left.createdAt.localeCompare(right.createdAt))
+    .slice(-6);
+}
+
+function collectProposedPlanMarkdownProgress(
+  thread: Thread,
+  boundary: string | null,
+): ThreadContextProgressItem[] {
+  const latestPlan = [...thread.proposedPlans]
+    .filter((plan) => (boundary === null ? true : plan.createdAt >= boundary))
+    .filter((plan) => (thread.latestTurn?.turnId ? plan.turnId === thread.latestTurn.turnId : true))
+    .toSorted(
+      (left, right) =>
+        left.updatedAt.localeCompare(right.updatedAt) || left.id.localeCompare(right.id),
+    )
+    .at(-1);
+  if (!latestPlan) {
+    return [];
+  }
+
+  const markdownLines = latestPlan.planMarkdown.split("\n");
+  const numberedSteps: string[] = [];
+  let collectingNumberedBlock = false;
+  for (const line of markdownLines) {
+    if (/^\s*#{1,6}\s+/.test(line) && collectingNumberedBlock) {
+      break;
+    }
+    const numberedStep = line.match(/^\s*\d+[.)]\s+(.+)$/)?.[1]?.trim();
+    if (numberedStep) {
+      collectingNumberedBlock = true;
+      numberedSteps.push(numberedStep);
+    }
+  }
+
+  const steps =
+    numberedSteps.length > 0
+      ? numberedSteps
+      : markdownLines
+          .map((line) => line.match(/^\s*(?:[-*])\s+(.+)$/)?.[1]?.trim() ?? null)
+          .filter((line): line is string => Boolean(line))
+          .filter((line) => !line.toLowerCase().startsWith("fresh session"));
+  const visibleSteps = steps.slice(0, 6);
+
+  return visibleSteps.map((step, index) => ({
+    id: `${latestPlan.id}:markdown:${index}`,
+    label: step,
+    status: "pending",
+    createdAt: latestPlan.updatedAt,
+  }));
+}
+
+function collectThreadContextProgress(thread: Thread): ThreadContextProgressItem[] {
+  const boundary = latestUserMessageCreatedAt(thread);
+  const planProgress = collectLatestPlanProgress(thread, boundary);
+  if (planProgress.length > 0) {
+    return planProgress;
+  }
+  const taskProgress = collectTaskProgress(thread, boundary);
+  if (taskProgress.length > 0) {
+    return taskProgress;
+  }
+  const taskLikeToolProgress = collectTaskLikeToolProgress(thread, boundary);
+  if (taskLikeToolProgress.length > 0) {
+    return taskLikeToolProgress;
+  }
+  return collectProposedPlanMarkdownProgress(thread, boundary);
+}
+
+function collectThreadContextArtifacts(input: { thread: Thread }): ThreadContextArtifact[] {
+  const seen = new Set<string>();
+  const artifacts: ThreadContextArtifact[] = [];
+  const pushArtifact = (pathValue: string, kind: ThreadContextArtifact["kind"]) => {
+    const normalizedPath = normalizeThreadContextPath(pathValue);
+    const dedupeKey = normalizedPath.toLowerCase();
+    if (!isThreadContextArtifactPath(normalizedPath) || seen.has(dedupeKey)) {
+      return;
+    }
+    seen.add(dedupeKey);
+    artifacts.push({
+      path: normalizedPath,
+      label: basenameOfPath(normalizedPath),
+      kind,
+    });
+  };
+
+  for (const summary of input.thread.turnDiffSummaries) {
+    for (const file of summary.files) {
+      pushArtifact(file.path, "workspace");
+    }
+  }
+  for (const message of input.thread.messages) {
+    const pathPattern =
+      /(?:^|[\s`"'(])((?:[A-Za-z]:[\\/])?(?:[\w .@()[\]-]+[\\/])*[\w .@()[\]-]+\.(?:avif|bmp|docx|gif|heic|jpe?g|md|mdown|mdx|mkd|pdf|png|pptx|webp|xls|xlsx))(?=$|[\s`"',).])/gi;
+    for (const match of message.text.matchAll(pathPattern)) {
+      const pathValue = match[1];
+      if (pathValue) {
+        pushArtifact(pathValue, "workspace");
+      }
+    }
+  }
+
+  return artifacts.slice(0, 8);
+}
+
+function collectThreadContextSources(thread: Thread): ThreadContextSource[] {
+  const sources = new Map<string, ThreadContextSource>();
+  const addSource = (source: ThreadContextSource) => {
+    sources.set(source.id, source);
+  };
+
+  for (const message of thread.messages) {
+    if ((message.attachments?.length ?? 0) > 0) {
+      addSource({ id: "attachments", label: "Attachments", icon: "file" });
+    }
+  }
+
+  for (const activity of thread.activities) {
+    const payload =
+      activity.payload && typeof activity.payload === "object"
+        ? (activity.payload as Record<string, unknown>)
+        : {};
+    const itemType = typeof payload.itemType === "string" ? payload.itemType : "";
+    const summary = `${activity.summary} ${JSON.stringify(payload)}`.toLowerCase();
+    if (itemType === "web_search" || summary.includes("web search")) {
+      addSource({ id: "web-search", label: "Web search", icon: "web" });
+    }
+    if (summary.includes("browser")) {
+      addSource({ id: "browser", label: "Browser", icon: "browser" });
+    }
+    if (itemType === "file_change" || summary.includes("read") || summary.includes("file")) {
+      addSource({ id: "files", label: "Files", icon: "file" });
+    }
+  }
+
+  return [...sources.values()].slice(0, 5);
 }
 
 type SelectedComposerShortcut = {
@@ -364,7 +744,7 @@ function selectedComposerExtensionsFromPrompt(input: {
   while ((match = mentionPattern.exec(input.prompt)) !== null) {
     const rawName = match[3]?.trim();
     if (!rawName) continue;
-    const normalizedName = rawName.toLowerCase();
+    const normalizedName = rawName.replace(/^\[|\]$/g, "").toLowerCase();
     const plugin = pluginsByName.get(normalizedName);
     if (plugin) {
       selected.set(`plugin:${plugin.name}`, selectedComposerExtensionFromPlugin(plugin));
@@ -423,7 +803,9 @@ function mergeSelectedComposerExtensions(
   return [...merged.values()];
 }
 
-function selectedComposerExtensionTokens(extensions: readonly SelectedComposerExtension[]): Set<string> {
+function selectedComposerExtensionTokens(
+  extensions: readonly SelectedComposerExtension[],
+): Set<string> {
   return new Set(extensions.map((extension) => extension.mentionName.toLowerCase()));
 }
 
@@ -434,8 +816,10 @@ function stripSelectedComposerExtensionTokens(
   if (extensions.length === 0 || prompt.length === 0) return prompt;
   const selectedTokens = selectedComposerExtensionTokens(extensions);
   return prompt
-    .replace(/(^|\s)([$/])([^\s]+)(?=\s|$)/g, (fullMatch, prefix: string, _marker: string, rawName: string) =>
-      selectedTokens.has(rawName.toLowerCase()) ? prefix : fullMatch,
+    .replace(
+      /(^|\s)([$/])([^\s]+)(?=\s|$)/g,
+      (fullMatch, prefix: string, _marker: string, rawName: string) =>
+        selectedTokens.has(rawName.replace(/^\[|\]$/g, "").toLowerCase()) ? prefix : fullMatch,
     )
     .replace(/[ \t]{2,}/g, " ")
     .trimStart();
@@ -444,20 +828,20 @@ function stripSelectedComposerExtensionTokens(
 function promptWithSelectedComposerExtensions(input: {
   prompt: string;
   selectedExtensions: readonly SelectedComposerExtension[];
-  provider: ProviderKind;
 }): string {
   if (input.selectedExtensions.length === 0) return input.prompt;
-  const prefix = skillMentionPrefix(input.provider);
+  const prefix = skillMentionPrefix();
   const selectedPrompt = input.selectedExtensions
     .map((extension) => `${prefix}${extension.mentionName}`)
     .join(" ");
-  const cleanPrompt = stripSelectedComposerExtensionTokens(input.prompt, input.selectedExtensions).trim();
+  const cleanPrompt = stripSelectedComposerExtensionTokens(
+    input.prompt,
+    input.selectedExtensions,
+  ).trim();
   return cleanPrompt ? `${selectedPrompt} ${cleanPrompt}` : selectedPrompt;
 }
 
-function selectedComposerShortcutLabel(
-  command: SelectedComposerShortcut["command"],
-): string {
+function selectedComposerShortcutLabel(command: SelectedComposerShortcut["command"]): string {
   switch (command) {
     case "browser":
       return "T3 Browser Use";
@@ -512,7 +896,9 @@ function promptWithInspectCaptures(input: {
   captures: readonly ComposerInspectCaptureDraft[];
 }): string {
   if (input.captures.length === 0) return input.prompt;
-  const inspectPrompt = input.captures.map((entry) => buildInspectPrompt(entry.capture)).join("\n\n");
+  const inspectPrompt = input.captures
+    .map((entry) => buildInspectPrompt(entry.capture))
+    .join("\n\n");
   const cleanPrompt = input.prompt.trim();
   return cleanPrompt ? `${inspectPrompt}\n\n${cleanPrompt}` : inspectPrompt;
 }
@@ -897,9 +1283,7 @@ export default function ChatView({
   const setComposerDraftOpencodeVariant = useComposerDraftStore(
     (store) => store.setOpencodeVariant,
   );
-  const setComposerDraftOpencodeAgent = useComposerDraftStore(
-    (store) => store.setOpencodeAgent,
-  );
+  const setComposerDraftOpencodeAgent = useComposerDraftStore((store) => store.setOpencodeAgent);
   const addComposerDraftImage = useComposerDraftStore((store) => store.addImage);
   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
   const removeComposerDraftImage = useComposerDraftStore((store) => store.removeImage);
@@ -907,7 +1291,9 @@ export default function ChatView({
     (store) => store.removeInspectCapture,
   );
   const addComposerDraftInspectCapture = useComposerDraftStore((store) => store.addInspectCapture);
-  const addComposerDraftPinnedSelection = useComposerDraftStore((store) => store.addPinnedSelection);
+  const addComposerDraftPinnedSelection = useComposerDraftStore(
+    (store) => store.addPinnedSelection,
+  );
   const removeComposerDraftPinnedSelection = useComposerDraftStore(
     (store) => store.removePinnedSelection,
   );
@@ -921,7 +1307,9 @@ export default function ChatView({
     (store) => store.syncPersistedAttachments,
   );
   const setProjectDraftThreadId = useComposerDraftStore((store) => store.setProjectDraftThreadId);
-  const getDraftThreadByProjectId = useComposerDraftStore((store) => store.getDraftThreadByProjectId);
+  const getDraftThreadByProjectId = useComposerDraftStore(
+    (store) => store.getDraftThreadByProjectId,
+  );
   const clearComposerDraftContent = useComposerDraftStore((store) => store.clearComposerContent);
   const clearFilePanelComments = useFilePanelStore((store) => store.clearComments);
   const clearDraftThread = useComposerDraftStore((store) => store.clearDraftThread);
@@ -1135,9 +1523,7 @@ export default function ChatView({
     () => projects.filter((project) => !isHomeProject(project, homeDirectory)),
     [homeDirectory, projects],
   );
-  const isActiveHomeProject = activeProject
-    ? isHomeProject(activeProject, homeDirectory)
-    : false;
+  const isActiveHomeProject = activeProject ? isHomeProject(activeProject, homeDirectory) : false;
   const providerStatuses = serverConfigQuery.data?.providers ?? EMPTY_PROVIDER_STATUSES;
   const lockedProvider: ProviderKind | null = hasThreadStarted
     ? (sessionProvider ?? inferredProviderFromThreadModel ?? selectedProviderByThreadId ?? null)
@@ -1167,9 +1553,7 @@ export default function ChatView({
     setComposerDraftProvider,
   ]);
   const assistantDeliveryMode =
-    selectedProvider === "opencode" || settings.enableAssistantStreaming
-      ? "streaming"
-      : "buffered";
+    selectedProvider === "opencode" || settings.enableAssistantStreaming ? "streaming" : "buffered";
   const baseThreadModel = resolveModelSlugForProvider(
     selectedProvider,
     activeThread?.model ?? activeProject?.model ?? getDefaultModel(selectedProvider),
@@ -1177,8 +1561,10 @@ export default function ChatView({
   const selectedEffort = composerDraft.effort ?? getDefaultReasoningEffort(selectedProvider);
   const selectedCodexFastModeEnabled =
     selectedProvider === "codex" ? composerDraft.codexFastMode : false;
-  const selectedOpencodeVariant = selectedProvider === "opencode" ? composerDraft.opencodeVariant : null;
-  const selectedOpencodeAgent = selectedProvider === "opencode" ? composerDraft.opencodeAgent : null;
+  const selectedOpencodeVariant =
+    selectedProvider === "opencode" ? composerDraft.opencodeVariant : null;
+  const selectedOpencodeAgent =
+    selectedProvider === "opencode" ? composerDraft.opencodeAgent : null;
   const opencodeRuntimeModelsQuery = useQuery(
     providerModelsQueryOptions({
       provider: "opencode",
@@ -1247,7 +1633,8 @@ export default function ChatView({
   const showNewThreadSuggestionsLoading =
     shouldShowNewThreadSuggestions &&
     selectedProvider === "codex" &&
-    (newThreadGitStatusQuery.isLoading || newThreadGitStatusQuery.data?.hasWorkingTreeChanges === true) &&
+    (newThreadGitStatusQuery.isLoading ||
+      newThreadGitStatusQuery.data?.hasWorkingTreeChanges === true) &&
     refinedNewThreadSuggestionsQuery.isLoading &&
     newThreadSuggestionCount === 0;
   const reasoningOptions = getReasoningEffortOptions(selectedProvider);
@@ -1337,7 +1724,9 @@ export default function ChatView({
     [activeThread],
   );
   const handoffBadgeSourceProvider = activeThread?.handoff?.sourceProvider ?? null;
-  const handoffBadgeTargetProvider = activeThread ? inferProviderFromModel(activeThread.model) : null;
+  const handoffBadgeTargetProvider = activeThread
+    ? inferProviderFromModel(activeThread.model)
+    : null;
   const handoffTargetProviders = useMemo(
     () =>
       activeThread
@@ -1352,18 +1741,27 @@ export default function ChatView({
   }, [activeThread?.id, handoffTargetProvidersKey]);
   const handoffTargetProvider: ProviderKind | null =
     handoffTargetProviders.length > 0
-      ? handoffTargetProviders[((handoffTargetProviderIndex % handoffTargetProviders.length) + handoffTargetProviders.length) % handoffTargetProviders.length] ?? null
+      ? (handoffTargetProviders[
+          ((handoffTargetProviderIndex % handoffTargetProviders.length) +
+            handoffTargetProviders.length) %
+            handoffTargetProviders.length
+        ] ?? null)
       : null;
-  const onCycleHandoffTargetProvider = useCallback((direction: 1 | -1) => {
-    setHandoffTargetProviderIndex((currentIndex) => {
-      if (handoffTargetProviders.length <= 1) {
-        return 0;
-      }
-      const nextIndex = currentIndex + direction;
-      const normalized = ((nextIndex % handoffTargetProviders.length) + handoffTargetProviders.length) % handoffTargetProviders.length;
-      return normalized;
-    });
-  }, [handoffTargetProviders.length]);
+  const onCycleHandoffTargetProvider = useCallback(
+    (direction: 1 | -1) => {
+      setHandoffTargetProviderIndex((currentIndex) => {
+        if (handoffTargetProviders.length <= 1) {
+          return 0;
+        }
+        const nextIndex = currentIndex + direction;
+        const normalized =
+          ((nextIndex % handoffTargetProviders.length) + handoffTargetProviders.length) %
+          handoffTargetProviders.length;
+        return normalized;
+      });
+    },
+    [handoffTargetProviders.length],
+  );
   const handoffActionLabel = useMemo(() => {
     if (!activeThread) {
       return "Create handoff thread";
@@ -1582,13 +1980,16 @@ export default function ChatView({
       deriveTimelineEntries(timelineMessages, activeThread?.proposedPlans ?? [], workLogEntries),
     [activeThread?.proposedPlans, timelineMessages, workLogEntries],
   );
-  const syncScrollToBottomPillVisibility = useCallback((scrollContainer: HTMLDivElement | null) => {
-    const nextVisible =
-      scrollContainer !== null &&
-      timelineEntries.length > 0 &&
-      !isScrollContainerNearBottom(scrollContainer);
-    setShowScrollToBottomPill((current) => (current === nextVisible ? current : nextVisible));
-  }, [timelineEntries.length]);
+  const syncScrollToBottomPillVisibility = useCallback(
+    (scrollContainer: HTMLDivElement | null) => {
+      const nextVisible =
+        scrollContainer !== null &&
+        timelineEntries.length > 0 &&
+        !isScrollContainerNearBottom(scrollContainer);
+      setShowScrollToBottomPill((current) => (current === nextVisible ? current : nextVisible));
+    },
+    [timelineEntries.length],
+  );
   const { turnDiffSummaries, inferredCheckpointTurnCountByTurnId } =
     useTurnDiffSummaries(activeThread);
   const turnDiffSummaryByAssistantMessageId = useMemo(() => {
@@ -1750,16 +2151,15 @@ export default function ChatView({
     }),
   );
   const workspaceEntries = workspaceEntriesQuery.data?.entries ?? EMPTY_PROJECT_ENTRIES;
-  const providerNativeCommands = providerCommandsQuery.data?.commands ?? EMPTY_PROVIDER_NATIVE_COMMANDS;
+  const providerNativeCommands =
+    providerCommandsQuery.data?.commands ?? EMPTY_PROVIDER_NATIVE_COMMANDS;
   const providerNativeCommandNames = useMemo(
     () => providerNativeCommands.map((command) => command.name),
     [providerNativeCommands],
   );
   const supportsFastSlashCommand = selectedProvider === "codex";
-  const canOfferReviewCommand =
-    selectedProvider === "codex" || selectedProvider === "opencode";
-  const canOfferForkCommand =
-    selectedProvider === "codex" || selectedProvider === "opencode";
+  const canOfferReviewCommand = selectedProvider === "codex" || selectedProvider === "opencode";
+  const canOfferForkCommand = selectedProvider === "codex" || selectedProvider === "opencode";
   const providerSkills = providerSkillsQuery.data?.skills ?? EMPTY_PROVIDER_SKILLS;
   const providerPlugins = useMemo(
     () =>
@@ -2299,7 +2699,9 @@ export default function ChatView({
     handleInteractionModeChange(interactionMode === "plan" ? "default" : "plan");
   }, [handleInteractionModeChange, interactionMode]);
   const toggleRuntimeMode = useCallback(() => {
-    void handleRuntimeModeChange(runtimeMode === "full-access" ? "approval-required" : "full-access");
+    void handleRuntimeModeChange(
+      runtimeMode === "full-access" ? "approval-required" : "full-access",
+    );
   }, [handleRuntimeModeChange, runtimeMode]);
 
   const persistThreadSettingsForNextTurn = useCallback(
@@ -3054,7 +3456,7 @@ export default function ChatView({
       }
       const nextPrompt =
         queuedTurn.kind === "chat"
-          ? queuedTurn.displayText ?? queuedTurn.prompt
+          ? (queuedTurn.displayText ?? queuedTurn.prompt)
           : queuedTurn.text;
       promptRef.current = nextPrompt;
       setSelectedComposerShortcuts(queuedTurn.kind === "chat" ? (queuedTurn.shortcuts ?? []) : []);
@@ -3139,7 +3541,6 @@ export default function ChatView({
       promptWithSelectedComposerExtensions({
         prompt: promptRef.current,
         selectedExtensions: selectedComposerExtensions,
-        provider: selectedProviderForSend,
       });
     const shortcutPromptForSend =
       queuedChatTurn?.prompt ??
@@ -3324,13 +3725,13 @@ export default function ChatView({
     }));
     setOptimisticUserMessages((existing) => [
       ...existing,
-        {
-          id: messageIdForSend,
-          role: "user",
-          text: displayTrimmed || IMAGE_ONLY_BOOTSTRAP_PROMPT,
-          ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
-          createdAt: messageCreatedAt,
-          streaming: false,
+      {
+        id: messageIdForSend,
+        role: "user",
+        text: displayTrimmed || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+        ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
+        createdAt: messageCreatedAt,
+        streaming: false,
       },
     ]);
     // Sending a message should always bring the latest user turn into view.
@@ -3387,7 +3788,9 @@ export default function ChatView({
       }
       const title = truncateTitle(titleSeed);
       let threadCreateModel: ModelSlug =
-        selectedModelForSend || (activeProject.model as ModelSlug) || DEFAULT_MODEL_BY_PROVIDER.codex;
+        selectedModelForSend ||
+        (activeProject.model as ModelSlug) ||
+        DEFAULT_MODEL_BY_PROVIDER.codex;
 
       if (isLocalDraftThread) {
         await api.orchestration.dispatchCommand({
@@ -3463,9 +3866,7 @@ export default function ChatView({
           role: "user",
           text: displayTrimmed || IMAGE_ONLY_BOOTSTRAP_PROMPT,
           attachments: turnAttachments,
-          ...(promptForSend !== displayPromptForSend
-            ? { providerInputText: promptForSend }
-            : {}),
+          ...(promptForSend !== displayPromptForSend ? { providerInputText: promptForSend } : {}),
         },
         model: selectedModelForSend || undefined,
         serviceTier: selectedServiceTier,
@@ -4426,9 +4827,7 @@ export default function ChatView({
   }, []);
 
   const onPinnedSelectionJumpHandled = useCallback((pinnedSelectionId: string) => {
-    setPendingPinnedSelectionJumpId((current) =>
-      current === pinnedSelectionId ? null : current,
-    );
+    setPendingPinnedSelectionJumpId((current) => (current === pinnedSelectionId ? null : current));
   }, []);
 
   const resolveActiveComposerTrigger = useCallback((): {
@@ -4591,9 +4990,7 @@ export default function ChatView({
         type: "error",
         title: "Unable to add project",
         description:
-          error instanceof Error
-            ? error.message
-            : "The project could not be created. Try again.",
+          error instanceof Error ? error.message : "The project could not be created. Try again.",
       });
     }
   }, [onSelectNewThreadLandingProject, projects, syncServerReadModel]);
@@ -4699,14 +5096,9 @@ export default function ChatView({
         return;
       }
       if (item.type === "skill") {
-        const applied = applyPromptReplacement(
-          trigger.rangeStart,
-          trigger.rangeEnd,
-          "",
-          {
-            expectedText: expectedToken,
-          },
-        );
+        const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
+          expectedText: expectedToken,
+        });
         if (applied) {
           setSelectedComposerExtensions((existing) =>
             mergeSelectedComposerExtensions(existing, [
@@ -4718,14 +5110,9 @@ export default function ChatView({
         return;
       }
       if (item.type === "plugin") {
-        const applied = applyPromptReplacement(
-          trigger.rangeStart,
-          trigger.rangeEnd,
-          "",
-          {
-            expectedText: expectedToken,
-          },
-        );
+        const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
+          expectedText: expectedToken,
+        });
         if (applied) {
           setSelectedComposerExtensions((existing) =>
             mergeSelectedComposerExtensions(existing, [
@@ -4936,7 +5323,7 @@ export default function ChatView({
 
   return (
     <div
-      className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[var(--app-thread-surface)]"
+      className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-[var(--app-thread-surface)]"
       data-testid="chat-view-root"
     >
       {/* Top bar */}
@@ -4971,7 +5358,6 @@ export default function ChatView({
           terminalOpen={terminalState.terminalOpen}
           filesRailOpen={filesRailOpen}
           browserPaneOpen={resolvedBrowserPaneOpen}
-          gitCwd={gitCwd}
           diffOpen={resolvedDiffOpen}
           surfaceMode={surfaceMode}
           isFocusedPane={isFocusedPane}
@@ -5010,6 +5396,16 @@ export default function ChatView({
         <ThreadErrorBanner error={activeThread.error} />
         <PlanModePanel activePlan={activePlan} />
       </div>
+
+      {!resolvedDiffOpen ? (
+        <ThreadContextPanel
+          thread={activeThread}
+          gitCwd={gitCwd}
+          activeThreadId={activeThread.id}
+          onOpenFilePath={onOpenFilePath}
+          onOpenChanges={onToggleDiff}
+        />
+      ) : null}
 
       {/* Messages */}
       <div className="relative min-h-0 flex-1">
@@ -5266,272 +5662,275 @@ export default function ChatView({
               )}
             >
               {activePendingApproval ? (
-              <div className="rounded-t-[19px] border-b border-border/65 bg-muted/20">
-                <ComposerPendingApprovalPanel
-                  approval={activePendingApproval}
-                  pendingCount={pendingApprovals.length}
-                />
-              </div>
-            ) : pendingUserInputs.length > 0 ? (
-              <div className="rounded-t-[19px] border-b border-border/65 bg-muted/20">
-                <ComposerPendingUserInputPanel
-                  pendingUserInputs={pendingUserInputs}
-                  respondingRequestIds={respondingUserInputRequestIds}
-                  answers={activePendingDraftAnswers}
-                  questionIndex={activePendingQuestionIndex}
-                  onSelectOption={onSelectActivePendingUserInputOption}
-                />
-              </div>
-            ) : showPlanFollowUpPrompt && activeProposedPlan ? (
-              <div className="rounded-t-[19px] border-b border-border/65 bg-muted/20">
-                <ComposerPlanFollowUpBanner
-                  key={activeProposedPlan.id}
-                  planTitle={proposedPlanTitle(activeProposedPlan.planMarkdown) ?? null}
-                />
-              </div>
-            ) : null}
+                <div className="rounded-t-[19px] border-b border-border/65 bg-muted/20">
+                  <ComposerPendingApprovalPanel
+                    approval={activePendingApproval}
+                    pendingCount={pendingApprovals.length}
+                  />
+                </div>
+              ) : pendingUserInputs.length > 0 ? (
+                <div className="rounded-t-[19px] border-b border-border/65 bg-muted/20">
+                  <ComposerPendingUserInputPanel
+                    pendingUserInputs={pendingUserInputs}
+                    respondingRequestIds={respondingUserInputRequestIds}
+                    answers={activePendingDraftAnswers}
+                    questionIndex={activePendingQuestionIndex}
+                    onSelectOption={onSelectActivePendingUserInputOption}
+                  />
+                </div>
+              ) : showPlanFollowUpPrompt && activeProposedPlan ? (
+                <div className="rounded-t-[19px] border-b border-border/65 bg-muted/20">
+                  <ComposerPlanFollowUpBanner
+                    key={activeProposedPlan.id}
+                    planTitle={proposedPlanTitle(activeProposedPlan.planMarkdown) ?? null}
+                  />
+                </div>
+              ) : null}
 
               {/* Textarea area */}
               <div className="relative px-4 pb-1 pt-3.5">
-              {composerMenuOpen && !isComposerApprovalState && (
-                <div className="absolute inset-x-0 bottom-full z-20 mb-2 px-1">
-                  <ComposerCommandMenu
-                    items={composerMenuItems}
-                    resolvedTheme={resolvedTheme}
-                    isLoading={isComposerMenuLoading}
-                    triggerKind={composerTriggerKind}
-                    activeItemId={activeComposerMenuItem?.id ?? null}
-                    onHighlightedItemChange={onComposerMenuItemHighlighted}
-                    onSelect={onSelectComposerItem}
-                  />
-                </div>
-              )}
+                {composerMenuOpen && !isComposerApprovalState && (
+                  <div className="absolute inset-x-0 bottom-full z-20 mb-2 px-1">
+                    <ComposerCommandMenu
+                      items={composerMenuItems}
+                      resolvedTheme={resolvedTheme}
+                      isLoading={isComposerMenuLoading}
+                      triggerKind={composerTriggerKind}
+                      activeItemId={activeComposerMenuItem?.id ?? null}
+                      onHighlightedItemChange={onComposerMenuItemHighlighted}
+                      onSelect={onSelectComposerItem}
+                    />
+                  </div>
+                )}
 
-              {!isComposerApprovalState &&
-              pendingUserInputs.length === 0 &&
-              (selectedComposerExtensions.length > 0 ||
-                selectedComposerShortcuts.length > 0 ||
-                composerInspectCaptures.length > 0 ||
-                filePanelCommentCount > 0) ? (
-                <div className="mb-2 flex items-center gap-2 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-                  {filePanelCommentCount > 0 ? (
-                    <button
-                      type="button"
-                      className="group inline-flex shrink-0 items-center gap-1.5 rounded-md px-0.5 py-0.5 text-sm font-medium text-amber-500 outline-none transition-colors hover:bg-amber-500/10 focus-visible:ring-2 focus-visible:ring-amber-400/45 dark:text-amber-400"
-                      title="Clear local review comments"
-                      aria-label="Clear local review comments"
-                      onClick={() => {
-                        if (activeThread) {
-                          clearFilePanelComments(activeThread.id);
-                        }
-                        scheduleComposerFocus();
-                      }}
-                    >
-                      <SelectedLocalCommentIcon />
-                      <span className="max-w-52 truncate">
-                        {filePanelCommentCount}{" "}
-                        {filePanelCommentCount === 1 ? "comment" : "comments"}
-                      </span>
-                      <XIcon className="size-3 opacity-0 transition-opacity group-hover:opacity-70 group-focus-visible:opacity-70" />
-                    </button>
-                  ) : null}
-                  {composerInspectCaptures.map((capture) => (
-                    <button
-                      type="button"
-                      key={capture.id}
-                      className="group inline-flex shrink-0 items-center gap-1.5 rounded-md px-0.5 py-0.5 text-sm font-medium text-cyan-500 outline-none transition-colors hover:bg-cyan-500/10 focus-visible:ring-2 focus-visible:ring-cyan-400/45 dark:text-cyan-400"
-                      title={`Remove inspected element: ${capture.label}`}
-                      aria-label={`Remove inspected element: ${capture.label}`}
-                      onClick={() => {
-                        if (activeThread) {
-                          removeComposerDraftInspectCapture(activeThread.id, capture.id);
-                        }
-                        scheduleComposerFocus();
-                      }}
-                    >
-                      <SelectedInspectCaptureIcon />
-                      <span className="max-w-52 truncate">Inspect: {capture.label}</span>
-                      <XIcon className="size-3 opacity-0 transition-opacity group-hover:opacity-70 group-focus-visible:opacity-70" />
-                    </button>
-                  ))}
-                  {selectedComposerShortcuts.map((shortcut) => (
-                    <button
-                      type="button"
-                      key={shortcut.id}
-                      className="group inline-flex shrink-0 items-center gap-1.5 rounded-md px-0.5 py-0.5 text-sm font-medium text-emerald-400 outline-none transition-colors hover:bg-emerald-400/10 focus-visible:ring-2 focus-visible:ring-emerald-400/45"
-                      title={`Remove ${shortcut.label}`}
-                      aria-label={`Remove ${shortcut.label}`}
-                      onClick={() => {
-                        setSelectedComposerShortcuts((existing) =>
-                          removeSelectedComposerShortcutById(existing, shortcut.id),
-                        );
-                        scheduleComposerFocus();
-                      }}
-                    >
-                      <SelectedComposerShortcutIcon shortcut={shortcut} />
-                      <span className="max-w-40 truncate">
-                        {shortcut.args ? `${shortcut.label}: ${shortcut.args}` : shortcut.label}
-                      </span>
-                      <XIcon className="size-3 opacity-0 transition-opacity group-hover:opacity-70 group-focus-visible:opacity-70" />
-                    </button>
-                  ))}
-                  {selectedComposerExtensions.map((extension) => (
-                    <button
-                      type="button"
-                      key={extension.id}
-                      className="group inline-flex shrink-0 items-center gap-1.5 rounded-md px-0.5 py-0.5 text-sm font-medium text-blue-400 outline-none transition-colors hover:bg-blue-400/10 focus-visible:ring-2 focus-visible:ring-blue-400/45"
-                      title={`Remove ${extension.label}`}
-                      aria-label={`Remove ${extension.label}`}
-                      onClick={() => {
-                        setSelectedComposerExtensions((existing) =>
-                          removeSelectedComposerExtensionById(existing, extension.id),
-                        );
-                        scheduleComposerFocus();
-                      }}
-                    >
-                      <SelectedComposerExtensionIcon extension={extension} />
-                      <span className="max-w-40 truncate">{extension.label}</span>
-                      <XIcon className="size-3 opacity-0 transition-opacity group-hover:opacity-70 group-focus-visible:opacity-70" />
-                    </button>
-                  ))}
-                </div>
-              ) : null}
-
-              {!isComposerApprovalState &&
-              pendingUserInputs.length === 0 &&
-              composerPinnedSelections.length > 0 ? (
-                <div className="mb-2 flex items-center gap-1.5 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-                  {composerPinnedSelections.map((selection, index) => (
-                    <div
-                      key={selection.id}
-                      className="group/pinned-pill relative inline-flex shrink-0 items-center rounded-full border border-border/70 bg-muted/25 px-2 py-1 text-[11px] text-muted-foreground/90"
-                    >
+                {!isComposerApprovalState &&
+                pendingUserInputs.length === 0 &&
+                (selectedComposerExtensions.length > 0 ||
+                  selectedComposerShortcuts.length > 0 ||
+                  composerInspectCaptures.length > 0 ||
+                  filePanelCommentCount > 0) ? (
+                  <div className="mb-2 flex items-center gap-2 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                    {filePanelCommentCount > 0 ? (
                       <button
                         type="button"
-                        className="inline-flex items-center gap-1 rounded-full pr-0.5 text-left text-foreground/90 transition-[padding,color] hover:text-foreground group-hover/pinned-pill:pr-5 group-focus-within/pinned-pill:pr-5"
-                        onClick={() => onJumpToPinnedSelection(selection.id)}
-                        title={selection.selectedText}
+                        className="group inline-flex shrink-0 items-center gap-1.5 rounded-md px-0.5 py-0.5 text-sm font-medium text-amber-500 outline-none transition-colors hover:bg-amber-500/10 focus-visible:ring-2 focus-visible:ring-amber-400/45 dark:text-amber-400"
+                        title="Clear local review comments"
+                        aria-label="Clear local review comments"
+                        onClick={() => {
+                          if (activeThread) {
+                            clearFilePanelComments(activeThread.id);
+                          }
+                          scheduleComposerFocus();
+                        }}
                       >
-                        <PinIcon className="size-3" />
-                        <span className="font-medium">{index + 1}</span>
-                        <span className="max-w-44 truncate">{selection.selectedText}</span>
+                        <SelectedLocalCommentIcon />
+                        <span className="max-w-52 truncate">
+                          {filePanelCommentCount}{" "}
+                          {filePanelCommentCount === 1 ? "comment" : "comments"}
+                        </span>
+                        <XIcon className="size-3 opacity-0 transition-opacity group-hover:opacity-70 group-focus-visible:opacity-70" />
                       </button>
+                    ) : null}
+                    {composerInspectCaptures.map((capture) => (
+                      <button
+                        type="button"
+                        key={capture.id}
+                        className="group inline-flex shrink-0 items-center gap-1.5 rounded-md px-0.5 py-0.5 text-sm font-medium text-cyan-500 outline-none transition-colors hover:bg-cyan-500/10 focus-visible:ring-2 focus-visible:ring-cyan-400/45 dark:text-cyan-400"
+                        title={`Remove inspected element: ${capture.label}`}
+                        aria-label={`Remove inspected element: ${capture.label}`}
+                        onClick={() => {
+                          if (activeThread) {
+                            removeComposerDraftInspectCapture(activeThread.id, capture.id);
+                          }
+                          scheduleComposerFocus();
+                        }}
+                      >
+                        <SelectedInspectCaptureIcon />
+                        <span className="max-w-52 truncate">Inspect: {capture.label}</span>
+                        <XIcon className="size-3 opacity-0 transition-opacity group-hover:opacity-70 group-focus-visible:opacity-70" />
+                      </button>
+                    ))}
+                    {selectedComposerShortcuts.map((shortcut) => (
+                      <button
+                        type="button"
+                        key={shortcut.id}
+                        className="group inline-flex shrink-0 items-center gap-1.5 rounded-md px-0.5 py-0.5 text-sm font-medium text-emerald-400 outline-none transition-colors hover:bg-emerald-400/10 focus-visible:ring-2 focus-visible:ring-emerald-400/45"
+                        title={`Remove ${shortcut.label}`}
+                        aria-label={`Remove ${shortcut.label}`}
+                        onClick={() => {
+                          setSelectedComposerShortcuts((existing) =>
+                            removeSelectedComposerShortcutById(existing, shortcut.id),
+                          );
+                          scheduleComposerFocus();
+                        }}
+                      >
+                        <SelectedComposerShortcutIcon shortcut={shortcut} />
+                        <span className="max-w-40 truncate">
+                          {shortcut.args ? `${shortcut.label}: ${shortcut.args}` : shortcut.label}
+                        </span>
+                        <XIcon className="size-3 opacity-0 transition-opacity group-hover:opacity-70 group-focus-visible:opacity-70" />
+                      </button>
+                    ))}
+                    {selectedComposerExtensions.map((extension) => (
+                      <button
+                        type="button"
+                        key={extension.id}
+                        className="group inline-flex shrink-0 items-center gap-1.5 rounded-md px-0.5 py-0.5 text-sm font-medium text-blue-400 outline-none transition-colors hover:bg-blue-400/10 focus-visible:ring-2 focus-visible:ring-blue-400/45"
+                        title={`Remove ${extension.label}`}
+                        aria-label={`Remove ${extension.label}`}
+                        onClick={() => {
+                          setSelectedComposerExtensions((existing) =>
+                            removeSelectedComposerExtensionById(existing, extension.id),
+                          );
+                          scheduleComposerFocus();
+                        }}
+                      >
+                        <SelectedComposerExtensionIcon extension={extension} />
+                        <span className="max-w-40 truncate">{extension.label}</span>
+                        <XIcon className="size-3 opacity-0 transition-opacity group-hover:opacity-70 group-focus-visible:opacity-70" />
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+
+                {!isComposerApprovalState &&
+                pendingUserInputs.length === 0 &&
+                composerPinnedSelections.length > 0 ? (
+                  <div className="mb-2 flex items-center gap-1.5 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                    {composerPinnedSelections.map((selection, index) => (
+                      <div
+                        key={selection.id}
+                        className="group/pinned-pill relative inline-flex shrink-0 items-center rounded-full border border-border/70 bg-muted/25 px-2 py-1 text-[11px] text-muted-foreground/90"
+                      >
+                        <button
+                          type="button"
+                          className="inline-flex items-center gap-1 rounded-full pr-0.5 text-left text-foreground/90 transition-[padding,color] hover:text-foreground group-hover/pinned-pill:pr-5 group-focus-within/pinned-pill:pr-5"
+                          onClick={() => onJumpToPinnedSelection(selection.id)}
+                          title={selection.selectedText}
+                        >
+                          <PinIcon className="size-3" />
+                          <span className="font-medium">{index + 1}</span>
+                          <span className="max-w-44 truncate">{selection.selectedText}</span>
+                        </button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-xs"
+                          className="pointer-events-none absolute right-1 top-1/2 size-4 -translate-y-1/2 rounded-full text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover/pinned-pill:pointer-events-auto group-hover/pinned-pill:opacity-100 group-focus-within/pinned-pill:pointer-events-auto group-focus-within/pinned-pill:opacity-100"
+                          onClick={() => onRemovePinnedSelection(selection.id)}
+                          aria-label={`Remove pinned passage ${index + 1}`}
+                        >
+                          <XIcon className="size-3" />
+                        </Button>
+                      </div>
+                    ))}
+                    {composerPinnedSelections.length > 1 ? (
                       <Button
                         type="button"
                         variant="ghost"
-                        size="icon-xs"
-                        className="pointer-events-none absolute right-1 top-1/2 size-4 -translate-y-1/2 rounded-full text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover/pinned-pill:pointer-events-auto group-hover/pinned-pill:opacity-100 group-focus-within/pinned-pill:pointer-events-auto group-focus-within/pinned-pill:opacity-100"
-                        onClick={() => onRemovePinnedSelection(selection.id)}
-                        aria-label={`Remove pinned passage ${index + 1}`}
+                        size="xs"
+                        className="shrink-0 rounded-full px-2 text-[11px] text-muted-foreground hover:text-foreground"
+                        onClick={onClearPinnedSelections}
                       >
-                        <XIcon className="size-3" />
+                        Clear all
                       </Button>
-                    </div>
-                  ))}
-                  {composerPinnedSelections.length > 1 ? (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="xs"
-                      className="shrink-0 rounded-full px-2 text-[11px] text-muted-foreground hover:text-foreground"
-                      onClick={onClearPinnedSelections}
-                    >
-                      Clear all
-                    </Button>
-                  ) : null}
-                </div>
-              ) : null}
-              {!isComposerApprovalState && pendingUserInputs.length === 0 && composerImages.length > 0 && (
-                <div className="mb-2.5 flex flex-wrap gap-1.5">
-                  {composerImages.map((image) => (
-                    <div
-                      key={image.id}
-                      className="relative h-14 w-14 overflow-hidden rounded-md border border-border/50 bg-background"
-                    >
-                      {image.previewUrl ? (
-                        <button
-                          type="button"
-                          className="h-full w-full cursor-zoom-in"
-                          aria-label={`Preview ${image.name}`}
-                          onClick={() => {
-                            const preview = buildExpandedImagePreview(composerImages, image.id);
-                            if (!preview) return;
-                            setExpandedImage(preview);
-                          }}
+                    ) : null}
+                  </div>
+                ) : null}
+                {!isComposerApprovalState &&
+                  pendingUserInputs.length === 0 &&
+                  composerImages.length > 0 && (
+                    <div className="mb-2.5 flex flex-wrap gap-1.5">
+                      {composerImages.map((image) => (
+                        <div
+                          key={image.id}
+                          className="relative h-14 w-14 overflow-hidden rounded-md border border-border/50 bg-background"
                         >
-                          <img
-                            src={image.previewUrl}
-                            alt={image.name}
-                            className="h-full w-full object-cover"
-                          />
-                        </button>
-                      ) : (
-                        <div className="flex h-full w-full items-center justify-center px-1 text-center text-[10px] text-muted-foreground/70">
-                          {image.name}
-                        </div>
-                      )}
-                      {nonPersistedComposerImageIdSet.has(image.id) && (
-                        <Tooltip>
-                          <TooltipTrigger
-                            render={
-                              <span
-                                role="img"
-                                aria-label="Draft attachment may not persist"
-                                className="absolute left-1 top-1 inline-flex items-center justify-center rounded bg-background/85 p-0.5 text-amber-600"
+                          {image.previewUrl ? (
+                            <button
+                              type="button"
+                              className="h-full w-full cursor-zoom-in"
+                              aria-label={`Preview ${image.name}`}
+                              onClick={() => {
+                                const preview = buildExpandedImagePreview(composerImages, image.id);
+                                if (!preview) return;
+                                setExpandedImage(preview);
+                              }}
+                            >
+                              <img
+                                src={image.previewUrl}
+                                alt={image.name}
+                                className="h-full w-full object-cover"
+                              />
+                            </button>
+                          ) : (
+                            <div className="flex h-full w-full items-center justify-center px-1 text-center text-[10px] text-muted-foreground/70">
+                              {image.name}
+                            </div>
+                          )}
+                          {nonPersistedComposerImageIdSet.has(image.id) && (
+                            <Tooltip>
+                              <TooltipTrigger
+                                render={
+                                  <span
+                                    role="img"
+                                    aria-label="Draft attachment may not persist"
+                                    className="absolute left-1 top-1 inline-flex items-center justify-center rounded bg-background/85 p-0.5 text-amber-600"
+                                  >
+                                    <CircleAlertIcon className="size-3" />
+                                  </span>
+                                }
+                              />
+                              <TooltipPopup
+                                side="top"
+                                className="max-w-64 whitespace-normal leading-tight"
                               >
-                                <CircleAlertIcon className="size-3" />
-                              </span>
-                            }
-                          />
-                          <TooltipPopup
-                            side="top"
-                            className="max-w-64 whitespace-normal leading-tight"
+                                Draft attachment could not be saved locally and may be lost on
+                                navigation.
+                              </TooltipPopup>
+                            </Tooltip>
+                          )}
+                          <Button
+                            variant="ghost"
+                            size="icon-xs"
+                            className="absolute right-1 top-1 bg-background/80 hover:bg-background/90"
+                            onClick={() => removeComposerImage(image.id)}
+                            aria-label={`Remove ${image.name}`}
                           >
-                            Draft attachment could not be saved locally and may be lost on
-                            navigation.
-                          </TooltipPopup>
-                        </Tooltip>
-                      )}
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        className="absolute right-1 top-1 bg-background/80 hover:bg-background/90"
-                        onClick={() => removeComposerImage(image.id)}
-                        aria-label={`Remove ${image.name}`}
-                      >
-                        <XIcon />
-                      </Button>
+                            <XIcon />
+                          </Button>
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
-              )}
+                  )}
                 <ComposerPromptEditor
                   ref={composerEditorRef}
-                value={
-                  isComposerApprovalState
-                    ? ""
-                    : activePendingProgress
-                      ? activePendingProgress.customAnswer
-                      : prompt
-                }
-                cursor={composerCursor}
-                onChange={onPromptChange}
-                onCommandKeyDown={onComposerCommandKey}
-                onPaste={onComposerPaste}
+                  value={
+                    isComposerApprovalState
+                      ? ""
+                      : activePendingProgress
+                        ? activePendingProgress.customAnswer
+                        : prompt
+                  }
+                  cursor={composerCursor}
+                  onChange={onPromptChange}
+                  onCommandKeyDown={onComposerCommandKey}
+                  onPaste={onComposerPaste}
                   placeholder={
                     isComposerApprovalState
-                      ? (activePendingApproval?.detail ?? "Resolve this approval request to continue")
+                      ? (activePendingApproval?.detail ??
+                        "Resolve this approval request to continue")
                       : activePendingProgress
-                      ? "Type your own answer, or leave this blank to use the selected option"
-                      : showPlanFollowUpPrompt && activeProposedPlan
-                        ? "Add feedback to refine the plan, or leave this blank to implement it"
-                        : floatingComposer
-                          ? "Ask for follow-up changes"
-                        : phase === "running"
-                          ? "Ask for follow-up changes"
-                        : phase === "disconnected"
-                          ? "Ask for follow-up changes or attach images"
-                          : "Ask anything, @tag files/folders, or use / to show available commands"
+                        ? "Type your own answer, or leave this blank to use the selected option"
+                        : showPlanFollowUpPrompt && activeProposedPlan
+                          ? "Add feedback to refine the plan, or leave this blank to implement it"
+                          : floatingComposer
+                            ? "Ask for follow-up changes"
+                            : phase === "running"
+                              ? "Ask for follow-up changes"
+                              : phase === "disconnected"
+                                ? "Ask for follow-up changes or attach images"
+                                : "Ask anything, @tag files/folders, or use / to show available commands"
                   }
                   disabled={isConnecting || isComposerApprovalState}
                 />
@@ -5556,295 +5955,314 @@ export default function ChatView({
                       : "flex-wrap gap-1.5 sm:flex-nowrap sm:gap-0",
                   )}
                 >
-                <div
-                  className={cn(
-                    "flex min-w-0 flex-1 items-center",
-                    isComposerFooterCompact
-                      ? "gap-1 overflow-hidden"
-                      : "gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:min-w-max sm:overflow-visible",
-                  )}
-                >
-                  <ComposerExtrasMenu
-                    interactionMode={interactionMode}
-                    showInteractionModeToggle={selectedProvider !== "opencode"}
-                    supportsFastMode={selectedProvider === "codex"}
-                    fastModeEnabled={selectedCodexFastModeEnabled}
-                    onAddPhotos={addComposerImages}
-                    onSetFastMode={onCodexFastModeChange}
-                    onSetPlanMode={(enabled) => {
-                      handleInteractionModeChange(enabled ? "plan" : "default");
-                    }}
-                  />
-
-                  {/* Provider/model picker */}
-                  <ProviderModelPicker
-                    compact={isComposerFooterCompact}
-                    provider={selectedProvider}
-                    model={selectedModelForPickerWithCustomFallback}
-                    lockedProvider={lockedProvider}
-                    modelOptionsByProvider={modelOptionsByProvider}
-                    serviceTierSetting={selectedServiceTierSetting}
-                    onProviderModelChange={onProviderModelSelect}
-                  />
-
-                  {isComposerFooterCompact ? (
-                    <CompactComposerControlsMenu
-                      traitsMenuContent={compactTraitsMenuContent}
+                  <div
+                    className={cn(
+                      "flex min-w-0 flex-1 items-center",
+                      isComposerFooterCompact
+                        ? "gap-1 overflow-hidden"
+                        : "gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:min-w-max sm:overflow-visible",
+                    )}
+                  >
+                    <ComposerExtrasMenu
                       interactionMode={interactionMode}
                       showInteractionModeToggle={selectedProvider !== "opencode"}
-                      onToggleInteractionMode={toggleInteractionMode}
-                      {...(showRuntimeControlInComposer
-                        ? {
-                            runtimeMode,
-                            onToggleRuntimeMode: toggleRuntimeMode,
-                          }
-                        : {})}
+                      supportsFastMode={selectedProvider === "codex"}
+                      fastModeEnabled={selectedCodexFastModeEnabled}
+                      onAddPhotos={addComposerImages}
+                      onSetFastMode={onCodexFastModeChange}
+                      onSetPlanMode={(enabled) => {
+                        handleInteractionModeChange(enabled ? "plan" : "default");
+                      }}
                     />
-                  ) : null}
 
-                  {isComposerFooterCompact ? null : (
-                    <>
-                      {selectedProvider === "codex" && selectedEffort != null ? (
-                        <>
-                          <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
-                          <CodexTraitsPicker
-                            effort={selectedEffort}
-                            fastModeEnabled={selectedCodexFastModeEnabled}
-                            options={reasoningOptions}
-                            onEffortChange={onEffortSelect}
-                            onFastModeChange={onCodexFastModeChange}
+                    {/* Provider/model picker */}
+                    <ProviderModelPicker
+                      compact={isComposerFooterCompact}
+                      provider={selectedProvider}
+                      model={selectedModelForPickerWithCustomFallback}
+                      lockedProvider={lockedProvider}
+                      modelOptionsByProvider={modelOptionsByProvider}
+                      serviceTierSetting={selectedServiceTierSetting}
+                      onProviderModelChange={onProviderModelSelect}
+                    />
+
+                    {isComposerFooterCompact ? (
+                      <CompactComposerControlsMenu
+                        traitsMenuContent={compactTraitsMenuContent}
+                        interactionMode={interactionMode}
+                        showInteractionModeToggle={selectedProvider !== "opencode"}
+                        onToggleInteractionMode={toggleInteractionMode}
+                        {...(showRuntimeControlInComposer
+                          ? {
+                              runtimeMode,
+                              onToggleRuntimeMode: toggleRuntimeMode,
+                            }
+                          : {})}
+                      />
+                    ) : null}
+
+                    {isComposerFooterCompact ? null : (
+                      <>
+                        {selectedProvider === "codex" && selectedEffort != null ? (
+                          <>
+                            <Separator
+                              orientation="vertical"
+                              className="mx-0.5 hidden h-4 sm:block"
+                            />
+                            <CodexTraitsPicker
+                              effort={selectedEffort}
+                              fastModeEnabled={selectedCodexFastModeEnabled}
+                              options={reasoningOptions}
+                              onEffortChange={onEffortSelect}
+                              onFastModeChange={onCodexFastModeChange}
+                            />
+                          </>
+                        ) : null}
+                        {selectedProvider === "opencode" &&
+                        ((selectedOpencodeModelCapabilities?.variantOptions?.length ?? 0) > 0 ||
+                          (selectedOpencodeModelCapabilities?.agentOptions?.length ?? 0) > 0) ? (
+                          <>
+                            <Separator
+                              orientation="vertical"
+                              className="mx-0.5 hidden h-4 sm:block"
+                            />
+                            <OpenCodeTraitsPicker
+                              variantOptions={
+                                selectedOpencodeModelCapabilities?.variantOptions ?? []
+                              }
+                              agentOptions={selectedOpencodeModelCapabilities?.agentOptions ?? []}
+                              selectedVariant={selectedOpencodeVariant}
+                              selectedAgent={selectedOpencodeAgent}
+                              onVariantChange={onOpencodeVariantChange}
+                              onAgentChange={onOpencodeAgentChange}
+                            />
+                          </>
+                        ) : null}
+
+                        {/* Divider */}
+                        {selectedProvider !== "opencode" ? (
+                          <Separator
+                            orientation="vertical"
+                            className="mx-0.5 hidden h-4 sm:block"
                           />
-                        </>
-                      ) : null}
-                      {selectedProvider === "opencode" &&
-                      ((selectedOpencodeModelCapabilities?.variantOptions?.length ?? 0) > 0 ||
-                        (selectedOpencodeModelCapabilities?.agentOptions?.length ?? 0) > 0) ? (
-                        <>
-                          <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
-                          <OpenCodeTraitsPicker
-                            variantOptions={selectedOpencodeModelCapabilities?.variantOptions ?? []}
-                            agentOptions={selectedOpencodeModelCapabilities?.agentOptions ?? []}
-                            selectedVariant={selectedOpencodeVariant}
-                            selectedAgent={selectedOpencodeAgent}
-                            onVariantChange={onOpencodeVariantChange}
-                            onAgentChange={onOpencodeAgentChange}
-                          />
-                        </>
-                      ) : null}
+                        ) : null}
 
-                      {/* Divider */}
-                      {selectedProvider !== "opencode" ? (
-                        <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
-                      ) : null}
-
-                      {/* Interaction mode toggle */}
-                      {selectedProvider !== "opencode" ? (
-                        <Button
-                          variant="ghost"
-                          className="shrink-0 whitespace-nowrap px-2 text-muted-foreground/70 hover:text-foreground/80 sm:px-3"
-                          size="sm"
-                          type="button"
-                          onClick={toggleInteractionMode}
-                          title={
-                            interactionMode === "plan"
-                              ? "Plan mode — click to return to normal chat mode"
-                              : "Default mode — click to enter plan mode"
-                          }
-                        >
-                          <BotIcon />
-                          <span className="sr-only sm:not-sr-only">
-                            {interactionMode === "plan" ? "Plan" : "Chat"}
-                          </span>
-                        </Button>
-                      ) : null}
-
-                      {showRuntimeControlInComposer ? (
-                        <>
-                          {/* Divider */}
-                          <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
-
-                          {/* Runtime mode toggle */}
+                        {/* Interaction mode toggle */}
+                        {selectedProvider !== "opencode" ? (
                           <Button
                             variant="ghost"
                             className="shrink-0 whitespace-nowrap px-2 text-muted-foreground/70 hover:text-foreground/80 sm:px-3"
                             size="sm"
                             type="button"
-                            onClick={toggleRuntimeMode}
+                            onClick={toggleInteractionMode}
                             title={
-                              runtimeMode === "full-access"
-                                ? "Full access — click to require approvals"
-                                : "Approval required — click for full access"
+                              interactionMode === "plan"
+                                ? "Plan mode — click to return to normal chat mode"
+                                : "Default mode — click to enter plan mode"
                             }
                           >
-                            {runtimeMode === "full-access" ? "Full access" : "Supervised"}
+                            <BotIcon />
+                            <span className="sr-only sm:not-sr-only">
+                              {interactionMode === "plan" ? "Plan" : "Chat"}
+                            </span>
                           </Button>
-                        </>
-                      ) : null}
-                    </>
-                  )}
-                </div>
+                        ) : null}
 
-                {/* Right side: send / stop button */}
-                <div data-chat-composer-actions="right" className="flex shrink-0 items-center gap-2">
-                  {isPreparingWorktree ? (
-                    <span className="text-muted-foreground/70 text-xs">Preparing worktree...</span>
-                  ) : null}
-                  {activePendingProgress ? (
-                    <div className="flex items-center gap-2">
-                      {activePendingProgress.questionIndex > 0 ? (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="rounded-full"
-                          onClick={onPreviousActivePendingUserInputQuestion}
-                          disabled={activePendingIsResponding}
-                        >
-                          Previous
-                        </Button>
-                      ) : null}
-                      <Button
-                        type="submit"
-                        size="sm"
-                        className="rounded-full px-4"
-                        disabled={
-                          activePendingIsResponding ||
-                          (activePendingProgress.isLastQuestion
-                            ? !activePendingResolvedAnswers
-                            : !activePendingProgress.canAdvance)
-                        }
-                      >
-                        {activePendingIsResponding
-                          ? "Submitting..."
-                          : activePendingProgress.isLastQuestion
-                            ? "Submit answers"
-                            : "Next question"}
-                      </Button>
-                    </div>
-                  ) : phase === "running" ? (
-                    <button
-                      type="button"
-                      className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-foreground/80 text-background transition-all duration-150 hover:bg-foreground hover:scale-105"
-                      onClick={() => void onInterrupt()}
-                      aria-label="Stop generation"
-                      title="Stop the current response. Press Enter to queue or Cmd/Ctrl+Enter to steer."
-                    >
-                      <svg
-                        width="12"
-                        height="12"
-                        viewBox="0 0 16 16"
-                        fill="currentColor"
-                        aria-hidden="true"
-                      >
-                        <rect x="3" y="3" width="10" height="10" rx="2" />
-                      </svg>
-                    </button>
-                  ) : pendingUserInputs.length === 0 ? (
-                    showPlanFollowUpPrompt ? (
-                      prompt.trim().length > 0 ? (
+                        {showRuntimeControlInComposer ? (
+                          <>
+                            {/* Divider */}
+                            <Separator
+                              orientation="vertical"
+                              className="mx-0.5 hidden h-4 sm:block"
+                            />
+
+                            {/* Runtime mode toggle */}
+                            <Button
+                              variant="ghost"
+                              className="shrink-0 whitespace-nowrap px-2 text-muted-foreground/70 hover:text-foreground/80 sm:px-3"
+                              size="sm"
+                              type="button"
+                              onClick={toggleRuntimeMode}
+                              title={
+                                runtimeMode === "full-access"
+                                  ? "Full access — click to require approvals"
+                                  : "Approval required — click for full access"
+                              }
+                            >
+                              {runtimeMode === "full-access" ? "Full access" : "Supervised"}
+                            </Button>
+                          </>
+                        ) : null}
+                      </>
+                    )}
+                  </div>
+
+                  {/* Right side: send / stop button */}
+                  <div
+                    data-chat-composer-actions="right"
+                    className="flex shrink-0 items-center gap-2"
+                  >
+                    {isPreparingWorktree ? (
+                      <span className="text-muted-foreground/70 text-xs">
+                        Preparing worktree...
+                      </span>
+                    ) : null}
+                    {activePendingProgress ? (
+                      <div className="flex items-center gap-2">
+                        {activePendingProgress.questionIndex > 0 ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="rounded-full"
+                            onClick={onPreviousActivePendingUserInputQuestion}
+                            disabled={activePendingIsResponding}
+                          >
+                            Previous
+                          </Button>
+                        ) : null}
                         <Button
                           type="submit"
                           size="sm"
-                          className="h-9 rounded-full px-4 sm:h-8"
-                          disabled={isSendBusy || isConnecting}
+                          className="rounded-full px-4"
+                          disabled={
+                            activePendingIsResponding ||
+                            (activePendingProgress.isLastQuestion
+                              ? !activePendingResolvedAnswers
+                              : !activePendingProgress.canAdvance)
+                          }
                         >
-                          {isConnecting || isSendBusy ? "Sending..." : "Refine"}
+                          {activePendingIsResponding
+                            ? "Submitting..."
+                            : activePendingProgress.isLastQuestion
+                              ? "Submit answers"
+                              : "Next question"}
                         </Button>
-                      ) : (
-                        <div className="flex items-center">
+                      </div>
+                    ) : phase === "running" ? (
+                      <button
+                        type="button"
+                        className="flex size-8 cursor-pointer items-center justify-center rounded-full bg-foreground/80 text-background transition-all duration-150 hover:bg-foreground hover:scale-105"
+                        onClick={() => void onInterrupt()}
+                        aria-label="Stop generation"
+                        title="Stop the current response. Press Enter to queue or Cmd/Ctrl+Enter to steer."
+                      >
+                        <svg
+                          width="12"
+                          height="12"
+                          viewBox="0 0 16 16"
+                          fill="currentColor"
+                          aria-hidden="true"
+                        >
+                          <rect x="3" y="3" width="10" height="10" rx="2" />
+                        </svg>
+                      </button>
+                    ) : pendingUserInputs.length === 0 ? (
+                      showPlanFollowUpPrompt ? (
+                        prompt.trim().length > 0 ? (
                           <Button
                             type="submit"
                             size="sm"
-                            className="h-9 rounded-l-full rounded-r-none px-4 sm:h-8"
+                            className="h-9 rounded-full px-4 sm:h-8"
                             disabled={isSendBusy || isConnecting}
                           >
-                            {isConnecting || isSendBusy ? "Sending..." : "Implement"}
+                            {isConnecting || isSendBusy ? "Sending..." : "Refine"}
                           </Button>
-                          <Menu>
-                            <MenuTrigger
-                              render={
-                                <Button
-                                  size="sm"
-                                  variant="default"
-                                  className="h-9 rounded-l-none rounded-r-full border-l-white/12 px-2 sm:h-8"
-                                  aria-label="Implementation actions"
-                                  disabled={isSendBusy || isConnecting}
-                                />
-                              }
-                            >
-                              <ChevronDownIcon className="size-3.5" />
-                            </MenuTrigger>
-                            <MenuPopup align="end" side="top">
-                              <MenuItem
-                                disabled={isSendBusy || isConnecting}
-                                onClick={() => void onImplementPlanInNewThread()}
-                              >
-                                Implement in new thread
-                              </MenuItem>
-                            </MenuPopup>
-                          </Menu>
-                        </div>
-                      )
-                    ) : (
-                      <button
-                        type="submit"
-                        className="flex h-8 w-8 items-center justify-center rounded-full bg-foreground/80 text-background transition-all duration-150 hover:bg-foreground hover:scale-105 disabled:opacity-20 disabled:hover:scale-100 sm:h-7 sm:w-7"
-                        disabled={
-                          isSendBusy ||
-                          isConnecting ||
-                          (!prompt.trim() &&
-                            selectedComposerExtensions.length === 0 &&
-                            composerImages.length === 0)
-                        }
-                        aria-label={
-                          isConnecting
-                            ? "Connecting"
-                            : isPreparingWorktree
-                              ? "Preparing worktree"
-                              : isSendBusy
-                                ? "Sending"
-                                : "Send message"
-                        }
-                      >
-                        {isConnecting || isSendBusy ? (
-                          <svg
-                            width="14"
-                            height="14"
-                            viewBox="0 0 14 14"
-                            fill="none"
-                            className="animate-spin"
-                            aria-hidden="true"
-                          >
-                            <circle
-                              cx="7"
-                              cy="7"
-                              r="5.5"
-                              stroke="currentColor"
-                              strokeWidth="1.5"
-                              strokeLinecap="round"
-                              strokeDasharray="20 12"
-                            />
-                          </svg>
                         ) : (
-                          <svg
-                            width="14"
-                            height="14"
-                            viewBox="0 0 14 14"
-                            fill="none"
-                            aria-hidden="true"
-                          >
-                            <path
-                              d="M7 11.5V2.5M7 2.5L3 6.5M7 2.5L11 6.5"
-                              stroke="currentColor"
-                              strokeWidth="1.8"
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                            />
-                          </svg>
-                        )}
-                      </button>
-                    )
-                  ) : null}
-                </div>
+                          <div className="flex items-center">
+                            <Button
+                              type="submit"
+                              size="sm"
+                              className="h-9 rounded-l-full rounded-r-none px-4 sm:h-8"
+                              disabled={isSendBusy || isConnecting}
+                            >
+                              {isConnecting || isSendBusy ? "Sending..." : "Implement"}
+                            </Button>
+                            <Menu>
+                              <MenuTrigger
+                                render={
+                                  <Button
+                                    size="sm"
+                                    variant="default"
+                                    className="h-9 rounded-l-none rounded-r-full border-l-white/12 px-2 sm:h-8"
+                                    aria-label="Implementation actions"
+                                    disabled={isSendBusy || isConnecting}
+                                  />
+                                }
+                              >
+                                <ChevronDownIcon className="size-3.5" />
+                              </MenuTrigger>
+                              <MenuPopup align="end" side="top">
+                                <MenuItem
+                                  disabled={isSendBusy || isConnecting}
+                                  onClick={() => void onImplementPlanInNewThread()}
+                                >
+                                  Implement in new thread
+                                </MenuItem>
+                              </MenuPopup>
+                            </Menu>
+                          </div>
+                        )
+                      ) : (
+                        <button
+                          type="submit"
+                          className="flex h-8 w-8 items-center justify-center rounded-full bg-foreground/80 text-background transition-all duration-150 hover:bg-foreground hover:scale-105 disabled:opacity-20 disabled:hover:scale-100 sm:h-7 sm:w-7"
+                          disabled={
+                            isSendBusy ||
+                            isConnecting ||
+                            (!prompt.trim() &&
+                              selectedComposerExtensions.length === 0 &&
+                              composerImages.length === 0)
+                          }
+                          aria-label={
+                            isConnecting
+                              ? "Connecting"
+                              : isPreparingWorktree
+                                ? "Preparing worktree"
+                                : isSendBusy
+                                  ? "Sending"
+                                  : "Send message"
+                          }
+                        >
+                          {isConnecting || isSendBusy ? (
+                            <svg
+                              width="14"
+                              height="14"
+                              viewBox="0 0 14 14"
+                              fill="none"
+                              className="animate-spin"
+                              aria-hidden="true"
+                            >
+                              <circle
+                                cx="7"
+                                cy="7"
+                                r="5.5"
+                                stroke="currentColor"
+                                strokeWidth="1.5"
+                                strokeLinecap="round"
+                                strokeDasharray="20 12"
+                              />
+                            </svg>
+                          ) : (
+                            <svg
+                              width="14"
+                              height="14"
+                              viewBox="0 0 14 14"
+                              fill="none"
+                              aria-hidden="true"
+                            >
+                              <path
+                                d="M7 11.5V2.5M7 2.5L3 6.5M7 2.5L11 6.5"
+                                stroke="currentColor"
+                                strokeWidth="1.8"
+                                strokeLinecap="round"
+                                strokeLinejoin="round"
+                              />
+                            </svg>
+                          )}
+                        </button>
+                      )
+                    ) : null}
+                  </div>
                 </div>
               )}
             </div>
@@ -5911,6 +6329,209 @@ export default function ChatView({
   );
 }
 
+interface ThreadContextPanelProps {
+  thread: Thread;
+  gitCwd: string | null;
+  activeThreadId: ThreadId;
+  onOpenFilePath: (path: string, options?: { cwd?: string | undefined }) => void;
+  onOpenChanges: () => void;
+}
+
+const ThreadContextPanel = memo(function ThreadContextPanel({
+  thread,
+  gitCwd,
+  activeThreadId,
+  onOpenFilePath,
+  onOpenChanges,
+}: ThreadContextPanelProps) {
+  const [pinned, setPinned] = useState(() => {
+    if (typeof window === "undefined") {
+      return true;
+    }
+    return localStorage.getItem(THREAD_CONTEXT_PANEL_PINNED_KEY) !== "false";
+  });
+  const { data: gitStatus = null } = useQuery(gitStatusQueryOptions(gitCwd));
+  const progressItems = useMemo(() => collectThreadContextProgress(thread), [thread]);
+  const artifacts = useMemo(() => collectThreadContextArtifacts({ thread }), [thread]);
+  const sources = useMemo(() => collectThreadContextSources(thread), [thread]);
+  const hasChanges =
+    (gitStatus?.workingTree.insertions ?? 0) > 0 || (gitStatus?.workingTree.deletions ?? 0) > 0;
+
+  const togglePinned = useCallback(() => {
+    setPinned((current) => {
+      const next = !current;
+      localStorage.setItem(THREAD_CONTEXT_PANEL_PINNED_KEY, next ? "true" : "false");
+      return next;
+    });
+  }, []);
+
+  const panel = (
+    <aside
+      className={cn(
+        "w-[19rem] overflow-hidden rounded-lg border border-border/70 bg-background/88 text-sm text-foreground shadow-none backdrop-blur supports-[backdrop-filter]:bg-background/76",
+        "transition-[opacity,transform] duration-150",
+        pinned
+          ? "opacity-100"
+          : "pointer-events-none translate-x-2 opacity-0 group-hover/thread-context:pointer-events-auto group-hover/thread-context:translate-x-0 group-hover/thread-context:opacity-100 focus-within:pointer-events-auto focus-within:translate-x-0 focus-within:opacity-100",
+      )}
+      aria-label="Branch details"
+    >
+      <div className="flex items-center justify-between px-3 py-2">
+        <p className="text-sm font-medium text-foreground/82">
+          {progressItems.length > 0 ? "Progress" : "Branch details"}
+        </p>
+        <Button
+          type="button"
+          size="icon-xs"
+          variant="ghost"
+          className="size-7 text-muted-foreground/70 hover:text-foreground"
+          aria-label={pinned ? "Unpin branch details" : "Pin branch details"}
+          onClick={togglePinned}
+        >
+          {pinned ? <PinOffIcon className="size-4" /> : <PinIcon className="size-4" />}
+        </Button>
+      </div>
+
+      <div className="px-3 pb-3">
+        {progressItems.length > 0 ? (
+          <>
+            <div className="space-y-1">
+              {progressItems.map((item) => (
+                <div
+                  key={item.id}
+                  className="flex items-start gap-2 rounded-md px-1.5 py-1.5 text-foreground/78"
+                  title={item.label}
+                >
+                  <span
+                    className={cn(
+                      "mt-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded-full border text-[10px] leading-none",
+                      item.status === "completed"
+                        ? "border-muted-foreground/35 bg-muted-foreground/80 text-background"
+                        : item.status === "failed"
+                          ? "border-destructive/45 text-destructive"
+                          : item.status === "inProgress"
+                            ? "border-muted-foreground/45 text-muted-foreground"
+                            : "border-muted-foreground/30 text-muted-foreground/60",
+                    )}
+                    aria-hidden="true"
+                  >
+                    {item.status === "completed" ? (
+                      <span className="size-1.5 rounded-full bg-background" />
+                    ) : item.status === "failed" ? (
+                      "!"
+                    ) : item.status === "inProgress" ? (
+                      <span className="size-1.5 rounded-full bg-muted-foreground/70" />
+                    ) : null}
+                  </span>
+                  <span className="min-w-0 flex-1 text-sm leading-5 line-clamp-2">
+                    {item.label}
+                  </span>
+                </div>
+              ))}
+            </div>
+
+            <Separator className="my-3 bg-border/60" />
+            <p className="px-1.5 pb-1 text-xs font-medium text-muted-foreground/80">
+              Branch details
+            </p>
+          </>
+        ) : null}
+
+        <button
+          type="button"
+          className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left transition-colors hover:bg-muted/45"
+          onClick={onOpenChanges}
+        >
+          <BoxIcon className="size-4 shrink-0 text-muted-foreground" />
+          <span className="min-w-0 flex-1 text-foreground/88">Changes</span>
+          {hasChanges ? (
+            <span className="shrink-0 font-mono text-xs">
+              <span className="text-success">+{gitStatus?.workingTree.insertions ?? 0}</span>
+              <span className="px-1 text-muted-foreground/50"> </span>
+              <span className="text-destructive">-{gitStatus?.workingTree.deletions ?? 0}</span>
+            </span>
+          ) : (
+            <span className="text-xs text-muted-foreground/60">clean</span>
+          )}
+        </button>
+
+        <div className="mt-1 flex items-center gap-2 rounded-md px-1.5 py-1.5">
+          <FiGitBranch className="size-4 shrink-0 text-muted-foreground" />
+          <span className="min-w-0 flex-1 text-foreground/88">Git actions</span>
+          <GitActionsControl gitCwd={gitCwd} activeThreadId={activeThreadId} />
+        </div>
+
+        <Separator className="my-2 bg-border/60" />
+
+        <div className="space-y-1">
+          <p className="px-1.5 py-1 text-xs font-medium text-muted-foreground/80">Artifacts</p>
+          {artifacts.length > 0 ? (
+            artifacts.map((artifact) => (
+              <button
+                type="button"
+                key={`${artifact.kind}:${artifact.path}`}
+                className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left transition-colors hover:bg-muted/45"
+                title={artifact.path}
+                onClick={() => onOpenFilePath(artifact.path, { cwd: gitCwd ?? undefined })}
+              >
+                {extensionOf(artifact.path) === "png" ||
+                extensionOf(artifact.path) === "jpg" ||
+                extensionOf(artifact.path) === "jpeg" ||
+                extensionOf(artifact.path) === "webp" ||
+                extensionOf(artifact.path) === "gif" ? (
+                  <ImageIcon className="size-4 shrink-0 text-muted-foreground" />
+                ) : (
+                  <FilesIcon className="size-4 shrink-0 text-muted-foreground" />
+                )}
+                <span className="min-w-0 flex-1 truncate text-foreground/88">{artifact.label}</span>
+              </button>
+            ))
+          ) : (
+            <p className="px-1.5 py-1.5 text-xs text-muted-foreground/55">No artifacts yet</p>
+          )}
+        </div>
+
+        <Separator className="my-2 bg-border/60" />
+
+        <div className="space-y-1">
+          <p className="px-1.5 py-1 text-xs font-medium text-muted-foreground/80">Sources</p>
+          {sources.length > 0 ? (
+            sources.map((source) => (
+              <div
+                key={source.id}
+                className="flex items-center gap-2 rounded-md px-1.5 py-1.5 text-foreground/72"
+              >
+                {source.icon === "web" ? (
+                  <GlobeIcon className="size-4 shrink-0 text-muted-foreground" />
+                ) : source.icon === "browser" ? (
+                  <MousePointer2Icon className="size-4 shrink-0 text-muted-foreground" />
+                ) : (
+                  <FilesIcon className="size-4 shrink-0 text-muted-foreground" />
+                )}
+                <span className="min-w-0 flex-1 truncate">{source.label}</span>
+              </div>
+            ))
+          ) : (
+            <p className="px-1.5 py-1.5 text-xs text-muted-foreground/55">No sources yet</p>
+          )}
+        </div>
+      </div>
+    </aside>
+  );
+
+  return (
+    <div
+      className={cn(
+        "group/thread-context absolute right-2 top-16 z-30 hidden lg:block",
+        pinned ? "pointer-events-auto" : "bottom-4 w-10",
+      )}
+    >
+      {!pinned ? <div className="absolute right-0 top-0 h-full w-8" aria-hidden="true" /> : null}
+      <div className={pinned ? "" : "absolute right-0 top-0"}>{panel}</div>
+    </div>
+  );
+});
+
 interface ChatHeaderProps {
   activeThreadId: ThreadId;
   activeThreadTitle: string;
@@ -5933,7 +6554,6 @@ interface ChatHeaderProps {
   terminalOpen: boolean;
   filesRailOpen: boolean;
   browserPaneOpen: boolean;
-  gitCwd: string | null;
   diffOpen: boolean;
   surfaceMode: "single" | "split";
   isFocusedPane: boolean;
@@ -5973,7 +6593,6 @@ const ChatHeader = memo(function ChatHeader({
   terminalOpen,
   filesRailOpen,
   browserPaneOpen,
-  gitCwd,
   diffOpen,
   surfaceMode,
   isFocusedPane,
@@ -5994,9 +6613,6 @@ const ChatHeader = memo(function ChatHeader({
   const needsDesktopTrafficLightInset = isElectron && !isMobile && state === "collapsed";
   const headerRef = useRef<HTMLDivElement>(null);
   const [compact, setCompact] = useState(false);
-  const { data: gitStatus = null } = useQuery(gitStatusQueryOptions(gitCwd));
-  const diffTotals = gitStatus?.workingTree ?? null;
-  const showDiffTotals = (diffTotals?.insertions ?? 0) > 0 || (diffTotals?.deletions ?? 0) > 0;
   const isDisposableThread = useIsDisposableThread(activeThreadId);
   const chatLayoutAction =
     surfaceMode === "single" && onSplitSurface
@@ -6010,47 +6626,53 @@ const ChatHeader = memo(function ChatHeader({
   const handoffWheelCooldownUntilRef = useRef(0);
   const handoffWheelLastEventAtRef = useRef(0);
   const handoffCanCycle = handoffTargetProviderCount > 1 && !handoffDisabled;
-  const cycleHandoffTargetProvider = useCallback((direction: 1 | -1) => {
-    if (!handoffCanCycle) {
-      return;
-    }
-    setHandoffFlipDirection(direction);
-    onCycleHandoffTargetProvider(direction);
-  }, [handoffCanCycle, onCycleHandoffTargetProvider]);
-  const onHandoffWheel = useCallback((event: ReactWheelEvent<HTMLButtonElement>) => {
-    if (!handoffCanCycle) {
-      return;
-    }
-    const now = Date.now();
-    if (now < handoffWheelCooldownUntilRef.current) {
-      return;
-    }
+  const cycleHandoffTargetProvider = useCallback(
+    (direction: 1 | -1) => {
+      if (!handoffCanCycle) {
+        return;
+      }
+      setHandoffFlipDirection(direction);
+      onCycleHandoffTargetProvider(direction);
+    },
+    [handoffCanCycle, onCycleHandoffTargetProvider],
+  );
+  const onHandoffWheel = useCallback(
+    (event: ReactWheelEvent<HTMLButtonElement>) => {
+      if (!handoffCanCycle) {
+        return;
+      }
+      const now = Date.now();
+      if (now < handoffWheelCooldownUntilRef.current) {
+        return;
+      }
 
-    if (now - handoffWheelLastEventAtRef.current > HANDOFF_WHEEL_RESET_GAP_MS) {
+      if (now - handoffWheelLastEventAtRef.current > HANDOFF_WHEEL_RESET_GAP_MS) {
+        handoffWheelAccumRef.current = 0;
+      }
+      handoffWheelLastEventAtRef.current = now;
+
+      if (Math.abs(event.deltaY) < 1) {
+        return;
+      }
+      if (
+        handoffWheelAccumRef.current !== 0 &&
+        Math.sign(handoffWheelAccumRef.current) !== Math.sign(event.deltaY)
+      ) {
+        handoffWheelAccumRef.current = 0;
+      }
+
+      handoffWheelAccumRef.current += event.deltaY;
+      if (Math.abs(handoffWheelAccumRef.current) < HANDOFF_WHEEL_SNAP_DELTA) {
+        return;
+      }
+
+      const direction: 1 | -1 = handoffWheelAccumRef.current > 0 ? 1 : -1;
       handoffWheelAccumRef.current = 0;
-    }
-    handoffWheelLastEventAtRef.current = now;
-
-    if (Math.abs(event.deltaY) < 1) {
-      return;
-    }
-    if (
-      handoffWheelAccumRef.current !== 0 &&
-      Math.sign(handoffWheelAccumRef.current) !== Math.sign(event.deltaY)
-    ) {
-      handoffWheelAccumRef.current = 0;
-    }
-
-    handoffWheelAccumRef.current += event.deltaY;
-    if (Math.abs(handoffWheelAccumRef.current) < HANDOFF_WHEEL_SNAP_DELTA) {
-      return;
-    }
-
-    const direction: 1 | -1 = handoffWheelAccumRef.current > 0 ? 1 : -1;
-    handoffWheelAccumRef.current = 0;
-    handoffWheelCooldownUntilRef.current = now + HANDOFF_WHEEL_COOLDOWN_MS;
-    cycleHandoffTargetProvider(direction);
-  }, [cycleHandoffTargetProvider, handoffCanCycle]);
+      handoffWheelCooldownUntilRef.current = now + HANDOFF_WHEEL_COOLDOWN_MS;
+      cycleHandoffTargetProvider(direction);
+    },
+    [cycleHandoffTargetProvider, handoffCanCycle],
+  );
   useEffect(() => {
     if (handoffCanCycle) {
       return;
@@ -6059,20 +6681,23 @@ const ChatHeader = memo(function ChatHeader({
     handoffWheelCooldownUntilRef.current = 0;
     handoffWheelLastEventAtRef.current = 0;
   }, [handoffCanCycle]);
-  const onHandoffKeyDown = useCallback((event: ReactKeyboardEvent<HTMLButtonElement>) => {
-    if (!handoffCanCycle) {
-      return;
-    }
-    if (event.key === "ArrowDown") {
-      event.preventDefault();
-      cycleHandoffTargetProvider(1);
-      return;
-    }
-    if (event.key === "ArrowUp") {
-      event.preventDefault();
-      cycleHandoffTargetProvider(-1);
-    }
-  }, [cycleHandoffTargetProvider, handoffCanCycle]);
+  const onHandoffKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      if (!handoffCanCycle) {
+        return;
+      }
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        cycleHandoffTargetProvider(1);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        cycleHandoffTargetProvider(-1);
+      }
+    },
+    [cycleHandoffTargetProvider, handoffCanCycle],
+  );
   useEffect(() => {
     if (handoffFlipDirection === 0) {
       return;
@@ -6119,7 +6744,8 @@ const ChatHeader = memo(function ChatHeader({
   useEffect(() => {
     const el = headerRef.current;
     if (!el) return;
-    const measure = () => setCompact(surfaceMode === "split" || el.clientWidth < HEADER_COMPACT_BREAKPOINT);
+    const measure = () =>
+      setCompact(surfaceMode === "split" || el.clientWidth < HEADER_COMPACT_BREAKPOINT);
     measure();
     const observer = new ResizeObserver(() => measure());
     observer.observe(el);
@@ -6200,7 +6826,10 @@ const ChatHeader = memo(function ChatHeader({
                   {compact ? null : <span className="truncate">Hand off to</span>}
                   <span
                     key={handoffActionTargetProvider ?? "codex"}
-                    className={cn("inline-flex items-center gap-1.5", handoffProviderAnimationClass)}
+                    className={cn(
+                      "inline-flex items-center gap-1.5",
+                      handoffProviderAnimationClass,
+                    )}
                   >
                     <span className="inline-flex size-3.5 shrink-0 items-center justify-center">
                       {renderProviderIcon(handoffActionTargetProvider, "size-3.5")}
@@ -6271,7 +6900,10 @@ const ChatHeader = memo(function ChatHeader({
               {activeProjectName ? (
                 <>
                   <MenuDivider />
-                  <MenuItem onClick={openInPreferredEditor} disabled={!openInCwd || !preferredEditor}>
+                  <MenuItem
+                    onClick={openInPreferredEditor}
+                    disabled={!openInCwd || !preferredEditor}
+                  >
                     Open in editor
                   </MenuItem>
                   <MenuItem onClick={onToggleFiles}>
@@ -6289,7 +6921,6 @@ const ChatHeader = memo(function ChatHeader({
             </MenuPopup>
           </Menu>
         ) : null}
-        {activeProjectName && <GitActionsControl gitCwd={gitCwd} activeThreadId={activeThreadId} />}
         {!compact ? (
           <Tooltip>
             <TooltipTrigger
@@ -6372,7 +7003,7 @@ const ChatHeader = memo(function ChatHeader({
           <TooltipTrigger
             render={
               <Toggle
-                className={cn("shrink-0", showDiffTotals ? "gap-1 px-1.5 text-[12px]" : "")}
+                className="shrink-0"
                 pressed={diffOpen}
                 onPressedChange={onToggleDiff}
                 aria-label="Toggle diff panel"
@@ -6380,23 +7011,7 @@ const ChatHeader = memo(function ChatHeader({
                 size="xs"
                 disabled={!isGitRepo}
               >
-                {showDiffTotals ? (
-                  <>
-                    <span className="font-mono text-[12px] font-light tracking-normal tabular-nums text-success">
-                      +{diffTotals?.insertions ?? 0}
-                    </span>
-                    <span className="font-mono text-[12px] font-light tracking-normal tabular-nums text-destructive">
-                      -{diffTotals?.deletions ?? 0}
-                    </span>
-                    <span
-                      aria-hidden
-                      className="ml-0.5 h-3.5 w-px shrink-0 bg-border/80"
-                    />
-                    <PanelLeftIcon className="size-3.5 text-muted-foreground" />
-                  </>
-                ) : (
-                  <PanelLeftIcon className="size-3.5 text-muted-foreground" />
-                )}
+                <PanelLeftIcon className="size-3.5 text-muted-foreground" />
               </Toggle>
             }
           />
@@ -6404,8 +7019,8 @@ const ChatHeader = memo(function ChatHeader({
             {!isGitRepo
               ? "Diff panel is unavailable because this project is not a git repository."
               : diffToggleShortcutLabel
-              ? `Toggle diff panel (${diffToggleShortcutLabel})`
-              : "Toggle diff panel"}
+                ? `Toggle diff panel (${diffToggleShortcutLabel})`
+                : "Toggle diff panel"}
           </TooltipPopup>
         </Tooltip>
       </div>
@@ -6714,29 +7329,28 @@ function isAvailableProviderOption(option: (typeof PROVIDER_OPTIONS)[number]): o
 
 const AVAILABLE_PROVIDER_OPTIONS = PROVIDER_OPTIONS.filter(isAvailableProviderOption);
 const UNAVAILABLE_PROVIDER_OPTIONS = PROVIDER_OPTIONS.filter((option) => !option.available);
-const COMING_SOON_PROVIDER_OPTIONS = [
-  { id: "gemini", label: "Gemini", icon: Gemini },
-] as const;
+const COMING_SOON_PROVIDER_OPTIONS = [{ id: "gemini", label: "Gemini", icon: Gemini }] as const;
 
-function getCustomModelOptionsByProvider(settings: {
-  customCodexModels: readonly string[];
-  customOpencodeModels: readonly string[];
-  customClaudeModels: readonly string[];
-}, providerStatuses: readonly ServerProviderStatus[], codexRuntimeModels: ReadonlyArray<{ slug: string; name: string }>, opencodeRuntimeModels: ReadonlyArray<{ slug: string; name: string }>): Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>> {
+function getCustomModelOptionsByProvider(
+  settings: {
+    customCodexModels: readonly string[];
+    customOpencodeModels: readonly string[];
+    customClaudeModels: readonly string[];
+  },
+  providerStatuses: readonly ServerProviderStatus[],
+  codexRuntimeModels: ReadonlyArray<{ slug: string; name: string }>,
+  opencodeRuntimeModels: ReadonlyArray<{ slug: string; name: string }>,
+): Record<ProviderKind, ReadonlyArray<{ slug: string; name: string }>> {
   const opencodeProvider = providerStatuses.find((provider) => provider.provider === "opencode");
   const opencodeOptions =
     opencodeRuntimeModels.length > 0
       ? opencodeRuntimeModels
       : opencodeProvider?.models && opencodeProvider.models.length > 0
-      ? opencodeProvider.models.map((model) => ({ slug: model.slug, name: model.name }))
-      : getAppModelOptions("opencode", settings.customOpencodeModels);
+        ? opencodeProvider.models.map((model) => ({ slug: model.slug, name: model.name }))
+        : getAppModelOptions("opencode", settings.customOpencodeModels);
   const codexOptions =
     codexRuntimeModels.length > 0
-      ? mergeRuntimeAndCustomModelOptions(
-          "codex",
-          codexRuntimeModels,
-          settings.customCodexModels,
-        )
+      ? mergeRuntimeAndCustomModelOptions("codex", codexRuntimeModels, settings.customCodexModels)
       : getAppModelOptions("codex", settings.customCodexModels);
   return {
     codex: codexOptions,
@@ -6850,7 +7464,9 @@ const ProviderModelPicker = memo(function ProviderModelPicker(props: {
             variant="ghost"
             className={cn(
               "min-w-0 justify-start whitespace-nowrap text-muted-foreground/70 hover:text-foreground/80",
-              props.compact ? "max-w-44 shrink-0 pl-2 pr-1.5 [&_svg]:mx-0" : "shrink-0 px-2 sm:px-3",
+              props.compact
+                ? "max-w-44 shrink-0 pl-2 pr-1.5 [&_svg]:mx-0"
+                : "shrink-0 px-2 sm:px-3",
             )}
             disabled={props.disabled}
           />
@@ -6858,7 +7474,8 @@ const ProviderModelPicker = memo(function ProviderModelPicker(props: {
       >
         <span className="flex min-w-0 w-full items-center gap-2">
           <ProviderIcon aria-hidden="true" className="size-4 shrink-0 text-muted-foreground/70" />
-          {props.provider === "codex" && shouldShowFastTierIcon(props.model, props.serviceTierSetting) ? (
+          {props.provider === "codex" &&
+          shouldShowFastTierIcon(props.model, props.serviceTierSetting) ? (
             <ZapIcon className="size-3.5 shrink-0 text-amber-500" />
           ) : null}
           <span className="min-w-0 truncate">{selectedModelLabel}</span>

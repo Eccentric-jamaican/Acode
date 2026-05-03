@@ -34,28 +34,56 @@ function createAbortableStream(signal?: AbortSignal): AsyncIterable<unknown> {
   };
 }
 
+function createEventStream(
+  events: ReadonlyArray<unknown>,
+  signal?: AbortSignal,
+): AsyncIterable<unknown> {
+  return {
+    [Symbol.asyncIterator](): AsyncIterator<unknown> {
+      let index = 0;
+      return {
+        next: async () => {
+          if (index < events.length) {
+            return { done: false, value: events[index++] };
+          }
+          return createAbortableStream(signal)[Symbol.asyncIterator]().next();
+        },
+      };
+    },
+  };
+}
+
 function createOpenCodeFixture(input?: {
   readonly commands?: ReadonlyArray<{ name: string; description?: string }>;
+  readonly events?: ReadonlyArray<unknown>;
   readonly requireMethodThisBinding?: boolean;
 }) {
   const commands = [...(input?.commands ?? [{ name: "review", description: "Run review checks" }])];
   const serverClose = vi.fn(() => undefined);
-  const commandList = vi.fn(async function (this: { readonly commands?: typeof commands }, _options?: unknown) {
+  const commandList = vi.fn(async function (
+    this: { readonly commands?: typeof commands },
+    _options?: unknown,
+  ) {
     return this.commands ?? commands;
   });
-  const sessionCreate = vi.fn(async function (this: { readonly sessionId?: string }, _options?: unknown) {
+  const sessionCreate = vi.fn(async function (
+    this: { readonly sessionId?: string },
+    _options?: unknown,
+  ) {
     return { id: this.sessionId ?? "session-1" };
   });
-  const sessionPromptAsync = vi.fn(async function (this: { readonly canPrompt?: boolean }, _options?: unknown) {
+  const sessionPromptAsync = vi.fn(async function (
+    this: { readonly canPrompt?: boolean },
+    _options?: unknown,
+  ) {
     if (input?.requireMethodThisBinding && this.canPrompt !== true) {
       throw new Error("session.promptAsync lost method binding");
     }
     return undefined;
   });
-  const sessionCommand = vi.fn(
-    async function (
-      this: { readonly canCommand?: boolean },
-      _options?: {
+  const sessionCommand = vi.fn(async function (
+    this: { readonly canCommand?: boolean },
+    _options?: {
       body?: {
         command?: string;
         arguments?: string;
@@ -63,27 +91,26 @@ function createOpenCodeFixture(input?: {
         model?: string;
       };
       path?: { id?: string };
-      },
-    ) {
-      if (input?.requireMethodThisBinding && this.canCommand !== true) {
-        throw new Error("session.command lost method binding");
-      }
-      return { info: { id: "msg-1" }, parts: [] };
     },
-  );
-  const eventSubscribe = vi.fn(
-    async function (
-      this: { readonly marker?: string },
-      options?: { signal?: AbortSignal },
-    ) {
-      if (input?.requireMethodThisBinding && this.marker !== "event-api") {
-        throw new Error("event.subscribe lost method binding");
-      }
-      return {
-        stream: createAbortableStream(options?.signal),
-      };
-    },
-  );
+  ) {
+    if (input?.requireMethodThisBinding && this.canCommand !== true) {
+      throw new Error("session.command lost method binding");
+    }
+    return { info: { id: "msg-1" }, parts: [] };
+  });
+  const eventSubscribe = vi.fn(async function (
+    this: { readonly marker?: string },
+    options?: { signal?: AbortSignal },
+  ) {
+    if (input?.requireMethodThisBinding && this.marker !== "event-api") {
+      throw new Error("event.subscribe lost method binding");
+    }
+    return {
+      stream: input?.events
+        ? createEventStream(input.events, options?.signal)
+        : createAbortableStream(options?.signal),
+    };
+  });
   const providerList = vi.fn(async function (this: { readonly marker?: string }) {
     if (input?.requireMethodThisBinding && this.marker !== "provider-api") {
       throw new Error("provider.list lost method binding");
@@ -184,10 +211,7 @@ async function runWithFixture<A, E>(
 describe("OpencodeAdapter native commands", () => {
   it("discovers commands from SDK with cache and forceReload behavior", async () => {
     const fixture = createOpenCodeFixture({
-      commands: [
-        { name: "review", description: "Run review checks" },
-        { name: "init" },
-      ],
+      commands: [{ name: "review", description: "Run review checks" }, { name: "init" }],
     });
 
     const result = await runWithFixture(
@@ -340,9 +364,7 @@ describe("OpencodeAdapter native commands", () => {
     expect(result._tag).toBe("Failure");
     if (result._tag === "Failure") {
       expect(result.failure._tag).toBe("ProviderAdapterValidationError");
-      expect((result.failure as { issue?: string }).issue).toContain(
-        "do not support attachments",
-      );
+      expect((result.failure as { issue?: string }).issue).toContain("do not support attachments");
     }
     expect(fixture.sessionPromptAsync).not.toHaveBeenCalled();
     expect(fixture.sessionCommand).not.toHaveBeenCalled();
@@ -393,12 +415,10 @@ describe("OpencodeAdapter native commands", () => {
       fixture,
       Effect.gen(function* () {
         const adapter = yield* OpencodeAdapter;
-        const collector = yield* Stream.runForEach(
-          adapter.streamEvents,
-          (event) =>
-            Effect.sync(() => {
-              events.push(event);
-            }),
+        const collector = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            events.push(event);
+          }),
         ).pipe(Effect.forkChild);
 
         try {
@@ -420,9 +440,7 @@ describe("OpencodeAdapter native commands", () => {
             cwd: process.cwd(),
           });
 
-          expect(commands.commands).toEqual([
-            { name: "review", description: "Run review checks" },
-          ]);
+          expect(commands.commands).toEqual([{ name: "review", description: "Run review checks" }]);
 
           if (!adapter.listModels) {
             throw new Error("OpenCode adapter did not expose listModels.");
@@ -450,5 +468,91 @@ describe("OpencodeAdapter native commands", () => {
     expect(fixture.sessionCommand).toHaveBeenCalledTimes(1);
     expect(fixture.eventSubscribe).toHaveBeenCalledTimes(1);
     expect(events.some((event) => event.type === "runtime.warning")).toBe(false);
+  });
+
+  it("surfaces OpenCode Question tool parts as answerable user input", async () => {
+    const fixture = createOpenCodeFixture({
+      events: [
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: "session-1",
+            part: {
+              id: "part-question-1",
+              messageID: "message-1",
+              role: "assistant",
+              type: "tool",
+              tool: "Question",
+              callID: "question-request-1",
+              state: {
+                status: "running",
+                input: {
+                  questions: [
+                    {
+                      header: "Scope",
+                      question: "Which documents should be included?",
+                      options: [
+                        "All documents",
+                        { label: "Core documents", description: "Only the primary policies" },
+                      ],
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+      ],
+    });
+    const events: ProviderRuntimeEvent[] = [];
+
+    await runWithFixture(
+      fixture,
+      Effect.gen(function* () {
+        const adapter = yield* OpencodeAdapter;
+        const collector = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            events.push(event);
+          }),
+        ).pipe(Effect.forkChild);
+
+        try {
+          yield* adapter.startSession({
+            threadId: asThreadId("thread-question-tool"),
+            provider: "opencode",
+            cwd: process.cwd(),
+            model: "openai/gpt-4.1",
+            runtimeMode: "full-access",
+          });
+          yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 25)));
+          yield* adapter.stopAll();
+        } finally {
+          yield* Fiber.interrupt(collector);
+        }
+      }),
+    );
+
+    const userInput = events.find((event) => event.type === "user-input.requested");
+    expect(userInput?.requestId).toBe("question-request-1");
+    expect(userInput?.payload).toEqual({
+      questions: [
+        {
+          id: "question-0-scope",
+          header: "Scope",
+          question: "Which documents should be included?",
+          options: [
+            { label: "All documents", description: "All documents" },
+            { label: "Core documents", description: "Only the primary policies" },
+          ],
+        },
+      ],
+    });
+    expect(
+      events.some(
+        (event) =>
+          (event.type === "item.started" || event.type === "item.updated") &&
+          event.requestId === "question-request-1",
+      ),
+    ).toBe(false);
   });
 });

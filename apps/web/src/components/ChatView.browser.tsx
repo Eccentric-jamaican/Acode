@@ -586,6 +586,224 @@ function createPlanFollowUpRegressionSnapshot(): OrchestrationReadModel {
   };
 }
 
+function createCodexThreadContextProgressSnapshot(): OrchestrationReadModel {
+  const latestTurnId = "turn-context-codex-plan" as TurnId;
+  const snapshot = createChatViewSnapshot({
+    messages: [
+      createUserMessage({
+        id: "msg-user-context-codex-plan" as MessageId,
+        text: "Create a plan",
+        offsetSeconds: 0,
+      }),
+      createAssistantMessage({
+        id: "msg-assistant-context-codex-plan" as MessageId,
+        text: "Plan ready",
+        offsetSeconds: 7,
+        turnId: latestTurnId,
+      }),
+    ],
+  });
+  const thread = snapshot.threads[0];
+  if (!thread) {
+    throw new Error("Expected Codex progress fixture thread.");
+  }
+  return {
+    ...snapshot,
+    threads: [
+      {
+        ...thread,
+        latestTurn: {
+          turnId: latestTurnId,
+          state: "completed",
+          interactionMode: "plan",
+          requestedAt: isoAt(1),
+          startedAt: isoAt(2),
+          completedAt: isoAt(8),
+          assistantMessageId: "msg-assistant-context-codex-plan" as MessageId,
+        },
+        proposedPlans: [
+          {
+            id: "plan-context-codex-1" as OrchestrationProposedPlanId,
+            turnId: latestTurnId,
+            planMarkdown: [
+              "# Test Plan",
+              "",
+              "## 4 Steps",
+              "",
+              "1. Confirm the progress header appears.",
+              "   This wrapped line should not break the numbered list collection.",
+              "2. Verify the Codex step labels are shown.",
+              "3. Confirm later scenario bullets are ignored.",
+              "4. Finish with a clean rail state.",
+              "",
+              "## Test Cases",
+              "",
+              "- This scenario bullet should stay out of the rail.",
+            ].join("\n"),
+            createdAt: isoAt(3),
+            updatedAt: isoAt(6),
+          },
+        ],
+        session: {
+          threadId: THREAD_ID,
+          status: "ready",
+          providerName: "codex",
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: NOW_ISO,
+        },
+      },
+    ],
+  };
+}
+
+function createOpenCodeThreadContextProgressSnapshot(): OrchestrationReadModel {
+  const latestTurnId = "turn-context-opencode-tool" as TurnId;
+  return {
+    ...createChatViewSnapshot({
+      messages: [
+        createUserMessage({
+          id: "msg-user-context-opencode-tool" as MessageId,
+          text: "Use your todo tool",
+          offsetSeconds: 0,
+        }),
+      ],
+    }),
+    threads: [
+      {
+        ...createChatViewSnapshot({ messages: [] }).threads[0]!,
+        title: "OpenCode progress thread",
+        model: "opencode/openai/gpt-4.1",
+        latestTurn: {
+          turnId: latestTurnId,
+          state: "running",
+          interactionMode: "default",
+          requestedAt: isoAt(1),
+          startedAt: isoAt(2),
+          completedAt: null,
+          assistantMessageId: null,
+        },
+        messages: [
+          createUserMessage({
+            id: "msg-user-context-opencode-tool" as MessageId,
+            text: "Use your todo tool",
+            offsetSeconds: 0,
+          }),
+        ],
+        activities: [
+          {
+            id: EventId.makeUnsafe("activity-opencode-read-file"),
+            tone: "info",
+            kind: "tool.started",
+            summary: "Read started",
+            payload: {
+              itemType: "file_change",
+              status: "inProgress",
+              data: { toolName: "Read" },
+            },
+            turnId: latestTurnId,
+            createdAt: isoAt(3),
+          },
+          {
+            id: EventId.makeUnsafe("activity-opencode-todo"),
+            tone: "info",
+            kind: "tool.updated",
+            summary: "TodoWrite",
+            payload: {
+              itemType: "dynamic_tool_call",
+              status: "inProgress",
+              data: { toolName: "TodoWrite" },
+            },
+            turnId: latestTurnId,
+            createdAt: isoAt(4),
+          },
+        ],
+        proposedPlans: [],
+        session: {
+          threadId: THREAD_ID,
+          status: "running",
+          providerName: "opencode",
+          runtimeMode: "full-access",
+          activeTurnId: latestTurnId,
+          lastError: null,
+          updatedAt: NOW_ISO,
+        },
+      },
+    ],
+  };
+}
+
+function createStaleThreadContextProgressSnapshot(): OrchestrationReadModel {
+  const oldTurnId = "turn-context-stale-old" as TurnId;
+  const newTurnId = "turn-context-stale-new" as TurnId;
+  return {
+    ...createChatViewSnapshot({
+      messages: [
+        createUserMessage({
+          id: "msg-user-context-stale-old" as MessageId,
+          text: "Old prompt",
+          offsetSeconds: 0,
+        }),
+        createAssistantMessage({
+          id: "msg-assistant-context-stale-old" as MessageId,
+          text: "Old answer",
+          offsetSeconds: 4,
+          turnId: oldTurnId,
+        }),
+        createUserMessage({
+          id: "msg-user-context-stale-new" as MessageId,
+          text: "New prompt",
+          offsetSeconds: 10,
+        }),
+      ],
+    }),
+    threads: [
+      {
+        ...createChatViewSnapshot({ messages: [] }).threads[0]!,
+        title: "Stale progress thread",
+        latestTurn: {
+          turnId: newTurnId,
+          state: "running",
+          interactionMode: "default",
+          requestedAt: isoAt(11),
+          startedAt: isoAt(12),
+          completedAt: null,
+          assistantMessageId: null,
+        },
+        messages: [
+          createUserMessage({
+            id: "msg-user-context-stale-old" as MessageId,
+            text: "Old prompt",
+            offsetSeconds: 0,
+          }),
+          createAssistantMessage({
+            id: "msg-assistant-context-stale-old" as MessageId,
+            text: "Old answer",
+            offsetSeconds: 4,
+            turnId: oldTurnId,
+          }),
+          createUserMessage({
+            id: "msg-user-context-stale-new" as MessageId,
+            text: "New prompt",
+            offsetSeconds: 10,
+          }),
+        ],
+        activities: [],
+        proposedPlans: [
+          {
+            id: "plan-context-stale-old" as OrchestrationProposedPlanId,
+            turnId: oldTurnId,
+            planMarkdown: "# Old plan\n\n1. Old progress should not remain.",
+            createdAt: isoAt(2),
+            updatedAt: isoAt(3),
+          },
+        ],
+      },
+    ],
+  };
+}
+
 function createCheckpointRevertSnapshot(): OrchestrationReadModel {
   const firstTurnId = "turn-checkpoint-first" as TurnId;
   const secondTurnId = "turn-checkpoint-second" as TurnId;
@@ -937,9 +1155,9 @@ async function setViewport(viewport: ViewportSpec): Promise<void> {
 async function waitForProductionStyles(): Promise<void> {
   await vi.waitFor(
     () => {
-      expect(getComputedStyle(document.documentElement).getPropertyValue("--background").trim()).not.toBe(
-        "",
-      );
+      expect(
+        getComputedStyle(document.documentElement).getPropertyValue("--background").trim(),
+      ).not.toBe("");
       expect(getComputedStyle(document.body).marginTop).toBe("0px");
     },
     {
@@ -992,20 +1210,22 @@ async function waitForMessagesScrollContainer(): Promise<HTMLDivElement> {
 }
 
 function visibleSidebarToggleCount(label: "Collapse Sidebar" | "Expand Sidebar"): number {
-  return [...document.querySelectorAll<HTMLElement>(`[aria-label='${label}']`)].filter((element) => {
-    const rect = element.getBoundingClientRect();
-    const style = window.getComputedStyle(element);
-    return (
-      style.display !== "none" &&
-      style.visibility !== "hidden" &&
-      rect.width > 0 &&
-      rect.height > 0 &&
-      rect.bottom > 0 &&
-      rect.right > 0 &&
-      rect.top < window.innerHeight &&
-      rect.left < window.innerWidth
-    );
-  }).length;
+  return [...document.querySelectorAll<HTMLElement>(`[aria-label='${label}']`)].filter(
+    (element) => {
+      const rect = element.getBoundingClientRect();
+      const style = window.getComputedStyle(element);
+      return (
+        style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        rect.width > 0 &&
+        rect.height > 0 &&
+        rect.bottom > 0 &&
+        rect.right > 0 &&
+        rect.top < window.innerHeight &&
+        rect.left < window.innerWidth
+      );
+    },
+  ).length;
 }
 
 async function collapseDesktopSidebar(): Promise<void> {
@@ -1074,7 +1294,9 @@ function desktopCaptionButtonLaneMetrics(targetTestId: string): {
     ? Math.max(...actionElements.map((element) => element.getBoundingClientRect().right))
     : target!.getBoundingClientRect().right;
   const laneWidth = Number.parseFloat(
-    window.getComputedStyle(document.documentElement).getPropertyValue("--desktop-caption-button-lane-width"),
+    window
+      .getComputedStyle(document.documentElement)
+      .getPropertyValue("--desktop-caption-button-lane-width"),
   );
 
   return {
@@ -1085,7 +1307,9 @@ function desktopCaptionButtonLaneMetrics(targetTestId: string): {
 
 function chatHeaderTrailingInsetPx(): number {
   const chatSurface = document.querySelector<HTMLElement>("[data-testid='chat-view-root']");
-  const trailingControl = document.querySelector<HTMLElement>("button[aria-label='Toggle diff panel']");
+  const trailingControl = document.querySelector<HTMLElement>(
+    "button[aria-label='Toggle diff panel']",
+  );
   if (!chatSurface || !trailingControl) {
     return Number.POSITIVE_INFINITY;
   }
@@ -1107,7 +1331,9 @@ function selectorBackgroundColor(selector: string): string {
 }
 
 function sidebarSurfaceWidth(): number {
-  const element = document.querySelector<HTMLElement>("[data-testid='desktop-titlebar-band-sidebar-surface']");
+  const element = document.querySelector<HTMLElement>(
+    "[data-testid='desktop-titlebar-band-sidebar-surface']",
+  );
   expect(element).not.toBeNull();
   return Math.round(element!.getBoundingClientRect().width);
 }
@@ -1122,6 +1348,14 @@ function elementWidthBySelector(selector: string): number {
   const element = document.querySelector<HTMLElement>(selector);
   expect(element).not.toBeNull();
   return Math.round(element!.getBoundingClientRect().width);
+}
+
+async function waitForThreadContextPanelText(): Promise<string> {
+  const panel = await waitForElement(
+    () => document.querySelector<HTMLElement>("aside[aria-label='Branch details']"),
+    "Unable to find the thread context panel.",
+  );
+  return panel.textContent ?? "";
 }
 
 const DEFAULT_DESKTOP_BROWSER_PANE_BOUNDS: BrowserPaneBounds = {
@@ -1175,9 +1409,9 @@ function createDesktopBrowserBridge(
   overrides: Partial<DesktopBridge["browser"]> = {},
 ): DesktopBridge["browser"] {
   let paneBounds = { ...DEFAULT_DESKTOP_BROWSER_PANE_BOUNDS };
-  let tabs = [createDesktopBrowserSnapshot(projectId, paneBounds).tabs?.[0]].filter(Boolean) as NonNullable<
-    BrowserSessionSnapshot["tabs"]
-  >;
+  let tabs = [createDesktopBrowserSnapshot(projectId, paneBounds).tabs?.[0]].filter(
+    Boolean,
+  ) as NonNullable<BrowserSessionSnapshot["tabs"]>;
   let activeTabId = tabs[0]?.tabId ?? null;
   const buildSnapshot = (): BrowserSessionSnapshot => {
     const activeTab = tabs.find((tab) => tab.tabId === activeTabId) ?? tabs[0] ?? null;
@@ -1342,7 +1576,9 @@ async function waitForSelectionActionButton(
   );
 }
 
-async function waitForInteractionModeButton(expectedLabel: "Chat" | "Plan"): Promise<HTMLButtonElement> {
+async function waitForInteractionModeButton(
+  expectedLabel: "Chat" | "Plan",
+): Promise<HTMLButtonElement> {
   return waitForElement(
     () =>
       Array.from(document.querySelectorAll("button")).find(
@@ -1532,13 +1768,13 @@ describe("ChatView timeline estimator parity (full app)", () => {
     wsRequests.length = 0;
     window.desktopBridge = {
       getWsUrl: () => `ws://${window.location.host}`,
-        getWindowChromeMetrics: () => ({
-          platform: "win32",
-          titlebarHeightPx: 22,
-          leadingInsetPx: 0,
-          trailingInsetPx: 138,
-          captionButtonLaneWidthPx: 104,
-        }),
+      getWindowChromeMetrics: () => ({
+        platform: "win32",
+        titlebarHeightPx: 22,
+        leadingInsetPx: 0,
+        trailingInsetPx: 138,
+        captionButtonLaneWidthPx: 104,
+      }),
       openExternal: async () => true,
       pickFolder: async () => null,
       confirm: async () => true,
@@ -1576,14 +1812,20 @@ describe("ChatView timeline estimator parity (full app)", () => {
     try {
       const sidebarInset = document.querySelector<HTMLElement>("[data-slot='sidebar-inset']");
       const shell = document.querySelector<HTMLElement>("[data-testid='chat-thread-shell']");
-      const sidebarContainer = document.querySelector<HTMLElement>("[data-slot='sidebar-container']");
+      const sidebarContainer = document.querySelector<HTMLElement>(
+        "[data-slot='sidebar-container']",
+      );
       const header = document.querySelector<HTMLElement>("header");
       const headerTitle = document.querySelector<HTMLElement>("[data-testid='chat-header-title']");
-      const headerActions = document.querySelector<HTMLElement>("[data-testid='chat-header-actions']");
+      const headerActions = document.querySelector<HTMLElement>(
+        "[data-testid='chat-header-actions']",
+      );
       const gitActionOptions = document.querySelector<HTMLElement>(
         "button[aria-label='Git action options']",
       );
-      const diffToggle = document.querySelector<HTMLElement>("button[aria-label='Toggle diff panel']");
+      const diffToggle = document.querySelector<HTMLElement>(
+        "button[aria-label='Toggle diff panel']",
+      );
 
       expect(sidebarInset).not.toBeNull();
       expect(shell).not.toBeNull();
@@ -1611,9 +1853,9 @@ describe("ChatView timeline estimator parity (full app)", () => {
         desktopTitlebarBandClearance("chat-header-actions").targetTop -
           desktopTitlebarBandClearance("chat-header-actions").bandBottom,
       ).toBeGreaterThanOrEqual(0);
-      expect(window.innerWidth - desktopCaptionButtonLaneMetrics("chat-header-actions").laneWidth).toBeGreaterThanOrEqual(
-        desktopCaptionButtonLaneMetrics("chat-header-actions").targetRight,
-      );
+      expect(
+        window.innerWidth - desktopCaptionButtonLaneMetrics("chat-header-actions").laneWidth,
+      ).toBeGreaterThanOrEqual(desktopCaptionButtonLaneMetrics("chat-header-actions").targetRight);
 
       await collapseDesktopSidebar();
 
@@ -1642,9 +1884,9 @@ describe("ChatView timeline estimator parity (full app)", () => {
         desktopTitlebarBandClearance("chat-header-actions").targetTop -
           desktopTitlebarBandClearance("chat-header-actions").bandBottom,
       ).toBeGreaterThanOrEqual(0);
-      expect(window.innerWidth - desktopCaptionButtonLaneMetrics("chat-header-actions").laneWidth).toBeGreaterThanOrEqual(
-        desktopCaptionButtonLaneMetrics("chat-header-actions").targetRight,
-      );
+      expect(
+        window.innerWidth - desktopCaptionButtonLaneMetrics("chat-header-actions").laneWidth,
+      ).toBeGreaterThanOrEqual(desktopCaptionButtonLaneMetrics("chat-header-actions").targetRight);
       expect(isElementFullyVisible(gitActionOptions!)).toBe(true);
       expect(isElementFullyVisible(diffToggle!)).toBe(true);
       expect(window.getComputedStyle(sidebarContainer!).borderRightWidth).toBe("0px");
@@ -1706,7 +1948,8 @@ describe("ChatView timeline estimator parity (full app)", () => {
       const addActionButton = await waitForElement(
         () =>
           Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find(
-            (button) => button.title === "Add action" || button.getAttribute("aria-label") === "Add action",
+            (button) =>
+              button.title === "Add action" || button.getAttribute("aria-label") === "Add action",
           ) ?? null,
         "Unable to find the Add action button.",
       );
@@ -1786,14 +2029,16 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await expect
         .poll(
           () =>
-            document.querySelector<HTMLElement>("[data-testid='integrated-browser-header-actions']") ??
-            null,
+            document.querySelector<HTMLElement>(
+              "[data-testid='integrated-browser-header-actions']",
+            ) ?? null,
         )
         .toBeNull();
       await expect
         .poll(
           () =>
-            document.querySelector<HTMLElement>("[data-testid='diff-panel-header-actions']") ?? null,
+            document.querySelector<HTMLElement>("[data-testid='diff-panel-header-actions']") ??
+            null,
         )
         .not.toBeNull();
       expect(desktopTitlebarBandMetrics().bandHeight).toBe(22);
@@ -1804,14 +2049,16 @@ describe("ChatView timeline estimator parity (full app)", () => {
         desktopTitlebarBandClearance("chat-header-actions").targetTop -
           desktopTitlebarBandClearance("chat-header-actions").bandBottom,
       ).toBeGreaterThanOrEqual(0);
-      expect(window.innerWidth - desktopCaptionButtonLaneMetrics("chat-header-actions").laneWidth).toBeGreaterThanOrEqual(
-        desktopCaptionButtonLaneMetrics("chat-header-actions").targetRight,
-      );
+      expect(
+        window.innerWidth - desktopCaptionButtonLaneMetrics("chat-header-actions").laneWidth,
+      ).toBeGreaterThanOrEqual(desktopCaptionButtonLaneMetrics("chat-header-actions").targetRight);
       expect(
         desktopTitlebarBandClearance("diff-panel-header-actions").targetTop -
           desktopTitlebarBandClearance("diff-panel-header-actions").bandBottom,
       ).toBeGreaterThanOrEqual(0);
-      expect(window.innerWidth - desktopCaptionButtonLaneMetrics("diff-panel-header-actions").laneWidth).toBeGreaterThanOrEqual(
+      expect(
+        window.innerWidth - desktopCaptionButtonLaneMetrics("diff-panel-header-actions").laneWidth,
+      ).toBeGreaterThanOrEqual(
         desktopCaptionButtonLaneMetrics("diff-panel-header-actions").targetRight,
       );
       expect(chatHeaderTrailingInsetPx()).toBeLessThanOrEqual(24);
@@ -1826,14 +2073,16 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await expect
         .poll(
           () =>
-            document.querySelector<HTMLElement>("[data-testid='integrated-browser-header-actions']") ??
-            null,
+            document.querySelector<HTMLElement>(
+              "[data-testid='integrated-browser-header-actions']",
+            ) ?? null,
         )
         .not.toBeNull();
       await expect
         .poll(
           () =>
-            document.querySelector<HTMLElement>("[data-testid='diff-panel-header-actions']") ?? null,
+            document.querySelector<HTMLElement>("[data-testid='diff-panel-header-actions']") ??
+            null,
         )
         .toBeNull();
       expect(elementHeightByTestId("integrated-browser-top-header")).toBeGreaterThanOrEqual(40);
@@ -1842,8 +2091,11 @@ describe("ChatView timeline estimator parity (full app)", () => {
           desktopTitlebarBandClearance("integrated-browser-header-actions").bandBottom,
       ).toBeGreaterThanOrEqual(0);
       expect(
-        window.innerWidth - desktopCaptionButtonLaneMetrics("integrated-browser-header-actions").laneWidth,
-      ).toBeGreaterThanOrEqual(desktopCaptionButtonLaneMetrics("integrated-browser-header-actions").targetRight);
+        window.innerWidth -
+          desktopCaptionButtonLaneMetrics("integrated-browser-header-actions").laneWidth,
+      ).toBeGreaterThanOrEqual(
+        desktopCaptionButtonLaneMetrics("integrated-browser-header-actions").targetRight,
+      );
       expect(chatHeaderTrailingInsetPx()).toBeLessThanOrEqual(24);
       expect(document.documentElement.scrollWidth).toBeLessThanOrEqual(window.innerWidth + 1);
     } finally {
@@ -1926,10 +2178,12 @@ describe("ChatView timeline estimator parity (full app)", () => {
       threads: [
         ...snapshot.threads,
         {
-      ...baseThread,
-      id: secondThreadId,
-      title: "Browser secondary thread",
-      ...(baseThread.session ? { session: { ...baseThread.session, threadId: secondThreadId } } : {}),
+          ...baseThread,
+          id: secondThreadId,
+          title: "Browser secondary thread",
+          ...(baseThread.session
+            ? { session: { ...baseThread.session, threadId: secondThreadId } }
+            : {}),
         },
       ],
     };
@@ -1999,19 +2253,27 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await expect.element(page.getByLabelText("Inspect element")).toBeVisible();
       await expect.element(page.getByLabelText("Kill browser")).toBeVisible();
       await expect.element(page.getByLabelText("Collapse browser")).toBeVisible();
-      await expect.poll(() => elementHeightByTestId("integrated-browser-top-header")).toBeGreaterThanOrEqual(40);
-      await expect.poll(() => elementWidthBySelector("input[aria-label='Browser URL']")).toBeGreaterThanOrEqual(150);
-      await expect.poll(() => {
-        const metrics = desktopCaptionButtonLaneMetrics("integrated-browser-header-actions");
-        return window.innerWidth - metrics.targetRight;
-      }).toBeLessThanOrEqual(16);
-      await expect.poll(() => {
-        const header = document.querySelector<HTMLElement>(
-          "[data-testid='integrated-browser-top-header']",
-        );
-        expect(header).not.toBeNull();
-        return header!.scrollWidth - header!.clientWidth;
-      }).toBeLessThanOrEqual(1);
+      await expect
+        .poll(() => elementHeightByTestId("integrated-browser-top-header"))
+        .toBeGreaterThanOrEqual(40);
+      await expect
+        .poll(() => elementWidthBySelector("input[aria-label='Browser URL']"))
+        .toBeGreaterThanOrEqual(150);
+      await expect
+        .poll(() => {
+          const metrics = desktopCaptionButtonLaneMetrics("integrated-browser-header-actions");
+          return window.innerWidth - metrics.targetRight;
+        })
+        .toBeLessThanOrEqual(16);
+      await expect
+        .poll(() => {
+          const header = document.querySelector<HTMLElement>(
+            "[data-testid='integrated-browser-top-header']",
+          );
+          expect(header).not.toBeNull();
+          return header!.scrollWidth - header!.clientWidth;
+        })
+        .toBeLessThanOrEqual(1);
     } finally {
       await mounted.cleanup();
     }
@@ -2072,12 +2334,20 @@ describe("ChatView timeline estimator parity (full app)", () => {
       resolveFirstOpen();
 
       await expect.poll(() => openCalls.length).toBeGreaterThanOrEqual(2);
-      await expect.poll(() => {
-        return Math.abs((openCalls.at(-1)?.width ?? 0) - Math.round(pane!.getBoundingClientRect().width));
-      }).toBeLessThanOrEqual(1);
-      await expect.poll(() => {
-        return Math.abs((openCalls.at(-1)?.x ?? -1) - Math.round(pane!.getBoundingClientRect().left));
-      }).toBeLessThanOrEqual(1);
+      await expect
+        .poll(() => {
+          return Math.abs(
+            (openCalls.at(-1)?.width ?? 0) - Math.round(pane!.getBoundingClientRect().width),
+          );
+        })
+        .toBeLessThanOrEqual(1);
+      await expect
+        .poll(() => {
+          return Math.abs(
+            (openCalls.at(-1)?.x ?? -1) - Math.round(pane!.getBoundingClientRect().left),
+          );
+        })
+        .toBeLessThanOrEqual(1);
     } finally {
       await mounted.cleanup();
     }
@@ -2166,7 +2436,9 @@ describe("ChatView timeline estimator parity (full app)", () => {
     });
 
     try {
-      const measurements: Array<UserRowMeasurement & { viewport: ViewportSpec; estimatedHeightPx: number }> = [];
+      const measurements: Array<
+        UserRowMeasurement & { viewport: ViewportSpec; estimatedHeightPx: number }
+      > = [];
 
       for (const viewport of TEXT_VIEWPORT_MATRIX) {
         await mounted.setViewport(viewport);
@@ -2183,7 +2455,10 @@ describe("ChatView timeline estimator parity (full app)", () => {
         measurements.push({ ...measurement, viewport, estimatedHeightPx });
       }
 
-      expect(new Set(measurements.map((measurement) => Math.round(measurement.timelineWidthMeasuredPx))).size).toBeGreaterThanOrEqual(3);
+      expect(
+        new Set(measurements.map((measurement) => Math.round(measurement.timelineWidthMeasuredPx)))
+          .size,
+      ).toBeGreaterThanOrEqual(3);
 
       const byMeasuredWidth = measurements.toSorted(
         (left, right) => left.timelineWidthMeasuredPx - right.timelineWidthMeasuredPx,
@@ -2225,7 +2500,8 @@ describe("ChatView timeline estimator parity (full app)", () => {
       { timelineWidthPx: mobileMeasurement.timelineWidthMeasuredPx },
     );
 
-    const measuredDeltaPx = mobileMeasurement.measuredRowHeightPx - desktopMeasurement.measuredRowHeightPx;
+    const measuredDeltaPx =
+      mobileMeasurement.measuredRowHeightPx - desktopMeasurement.measuredRowHeightPx;
     const estimatedDeltaPx = estimatedMobilePx - estimatedDesktopPx;
     expect(measuredDeltaPx).toBeGreaterThan(0);
     expect(estimatedDeltaPx).toBeGreaterThan(0);
@@ -2396,15 +2672,13 @@ describe("ChatView timeline estimator parity (full app)", () => {
 
       await vi.waitFor(
         () => {
-          const revertRequest = wsRequests.findLast(
-            (request) => {
-              const command = (request as { command?: { type?: string } }).command;
-              return (
-                request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
-                command?.type === "thread.checkpoint.revert"
-              );
-            },
-          ) as
+          const revertRequest = wsRequests.findLast((request) => {
+            const command = (request as { command?: { type?: string } }).command;
+            return (
+              request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+              command?.type === "thread.checkpoint.revert"
+            );
+          }) as
             | {
                 command?: {
                   type?: string;
@@ -2480,8 +2754,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
 
       await vi.waitFor(
         () => {
-          const prompt =
-            useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.prompt ?? "";
+          const prompt = useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.prompt ?? "";
           expect(prompt).toBe(
             "> A daemon is a background process that runs without direct user interaction.\n\n",
           );
@@ -2600,9 +2873,9 @@ describe("ChatView timeline estimator parity (full app)", () => {
               button.textContent?.includes("Plan heading"),
             ),
           ).toBe(true);
-          expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.pinnedSelections).toHaveLength(
-            2,
-          );
+          expect(
+            useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.pinnedSelections,
+          ).toHaveLength(2);
         },
         { timeout: 8_000, interval: 16 },
       );
@@ -2611,8 +2884,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await waitForLayout();
 
       const sendButton = await waitForElement(
-        () =>
-          document.querySelector<HTMLButtonElement>('button[aria-label="Send message"]'),
+        () => document.querySelector<HTMLButtonElement>('button[aria-label="Send message"]'),
         "Unable to find send button.",
       );
       sendButton.click();
@@ -2621,18 +2893,16 @@ describe("ChatView timeline estimator parity (full app)", () => {
         () => {
           const turnStartRequest = wsRequests.findLast(
             (request) => request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand,
-          ) as
-            | { command?: { type?: string; message?: { text?: string } } }
-            | undefined;
+          ) as { command?: { type?: string; message?: { text?: string } } } | undefined;
           expect(turnStartRequest?.command?.type).toBe("thread.turn.start");
           expect(turnStartRequest?.command?.message?.text).toBe("Can you clarify these points?");
         },
         { timeout: 8_000, interval: 16 },
       );
 
-      expect(useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.pinnedSelections ?? []).toHaveLength(
-        2,
-      );
+      expect(
+        useComposerDraftStore.getState().draftsByThreadId[THREAD_ID]?.pinnedSelections ?? [],
+      ).toHaveLength(2);
       expect(
         Array.from(document.querySelectorAll("button")).some((button) =>
           button.textContent?.includes("A daemon is a background process"),
@@ -2684,7 +2954,9 @@ describe("ChatView timeline estimator parity (full app)", () => {
 
       await vi.waitFor(
         () => {
-          const openRequest = wsRequests.find((request) => request._tag === WS_METHODS.shellOpenInEditor);
+          const openRequest = wsRequests.find(
+            (request) => request._tag === WS_METHODS.shellOpenInEditor,
+          );
           expect(openRequest).toMatchObject({
             _tag: WS_METHODS.shellOpenInEditor,
             cwd: "/repo/project",
@@ -2724,10 +2996,13 @@ describe("ChatView timeline estimator parity (full app)", () => {
     try {
       await expect
         .poll(
-          () => document.querySelector<HTMLElement>("[data-testid='chat-new-thread-landing']") ?? null,
+          () =>
+            document.querySelector<HTMLElement>("[data-testid='chat-new-thread-landing']") ?? null,
         )
         .not.toBeNull();
-      await expect.element(page.getByTestId("chat-new-thread-project-picker-trigger")).toBeVisible();
+      await expect
+        .element(page.getByTestId("chat-new-thread-project-picker-trigger"))
+        .toBeVisible();
       await expect
         .poll(
           () =>
@@ -2738,8 +3013,9 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await expect
         .poll(
           () =>
-            document.querySelector<HTMLElement>("[data-testid='chat-new-thread-project-picker-trigger']")
-              ?.textContent ?? "",
+            document.querySelector<HTMLElement>(
+              "[data-testid='chat-new-thread-project-picker-trigger']",
+            )?.textContent ?? "",
         )
         .toContain("Project");
     } finally {
@@ -2785,22 +3061,24 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await expect
         .poll(
           () =>
-            document.querySelector<HTMLElement>("[data-testid='chat-new-thread-suggestions']") ?? null,
+            document.querySelector<HTMLElement>("[data-testid='chat-new-thread-suggestions']") ??
+            null,
         )
         .not.toBeNull();
       await expect
         .poll(
           () =>
-            document.querySelector<HTMLElement>("[data-testid='chat-new-thread-suggestion-review-1']")
-              ?.textContent ?? "",
+            document.querySelector<HTMLElement>(
+              "[data-testid='chat-new-thread-suggestion-review-1']",
+            )?.textContent ?? "",
         )
         .toContain("Fix the failing auth cleanup path");
       await expect
         .poll(
           () =>
-            wsRequests.find(
-              (request) => request._tag === WS_METHODS.serverSuggestNewThreadTasks,
-            ) as Record<string, unknown> | undefined,
+            wsRequests.find((request) => request._tag === WS_METHODS.serverSuggestNewThreadTasks) as
+              | Record<string, unknown>
+              | undefined,
         )
         .toMatchObject({
           _tag: WS_METHODS.serverSuggestNewThreadTasks,
@@ -2868,8 +3146,9 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await expect
         .poll(
           () =>
-            document.querySelector<HTMLElement>("[data-testid='chat-new-thread-suggestions-loading']")
-              ?.textContent ?? "",
+            document.querySelector<HTMLElement>(
+              "[data-testid='chat-new-thread-suggestions-loading']",
+            )?.textContent ?? "",
         )
         .toContain("Reviewing current changes");
 
@@ -2880,8 +3159,9 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await expect
         .poll(
           () =>
-            document.querySelector<HTMLElement>("[data-testid='chat-new-thread-suggestion-review-1']")
-              ?.textContent ?? "",
+            document.querySelector<HTMLElement>(
+              "[data-testid='chat-new-thread-suggestion-review-1']",
+            )?.textContent ?? "",
         )
         .toContain("Fix the failing auth cleanup path");
     } finally {
@@ -2979,7 +3259,10 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await page.getByTestId(`chat-new-thread-project-option-${projectGamma}`).click();
 
       await expect
-        .poll(() => useComposerDraftStore.getState().projectDraftThreadIdByProjectId[projectGamma] ?? null)
+        .poll(
+          () =>
+            useComposerDraftStore.getState().projectDraftThreadIdByProjectId[projectGamma] ?? null,
+        )
         .not.toBeNull();
 
       const gammaDraftThreadId =
@@ -3099,9 +3382,12 @@ describe("ChatView timeline estimator parity (full app)", () => {
 
       await vi.waitFor(
         () => {
-          expect(document.body.textContent).toContain("Historical plan card");
-          expect(document.body.textContent).not.toContain("Active plan explanation");
-          expect(document.body.textContent).not.toContain("Active implementation step");
+          const bodyClone = document.body.cloneNode(true) as HTMLElement;
+          bodyClone.querySelector("aside[aria-label='Branch details']")?.remove();
+          const nonRailText = bodyClone.textContent ?? "";
+          expect(nonRailText).toContain("Historical plan card");
+          expect(nonRailText).not.toContain("Active plan explanation");
+          expect(nonRailText).not.toContain("Active implementation step");
         },
         { timeout: 8_000, interval: 16 },
       );
@@ -3124,6 +3410,72 @@ describe("ChatView timeline estimator parity (full app)", () => {
           expect(document.body.textContent).toContain("Active plan explanation");
           expect(document.body.textContent).toContain("Active implementation step");
           expect(document.body.textContent).toContain("Historical plan card");
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("shows Codex proposed plan steps in the thread context rail", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createCodexThreadContextProgressSnapshot(),
+    });
+
+    try {
+      await vi.waitFor(
+        async () => {
+          const panelText = await waitForThreadContextPanelText();
+          expect(panelText).toContain("Progress");
+          expect(panelText).toContain("Confirm the progress header appears.");
+          expect(panelText).toContain("Verify the Codex step labels are shown.");
+          expect(panelText).toContain("Confirm later scenario bullets are ignored.");
+          expect(panelText).toContain("Finish with a clean rail state.");
+          expect(panelText).not.toContain("This scenario bullet should stay out of the rail.");
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("shows OpenCode task-like tool lifecycle progress without generic tool noise", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createOpenCodeThreadContextProgressSnapshot(),
+    });
+
+    try {
+      await vi.waitFor(
+        async () => {
+          const panelText = await waitForThreadContextPanelText();
+          expect(panelText).toContain("Progress");
+          expect(panelText).toContain("TodoWrite");
+          expect(panelText).not.toContain("Read started");
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("does not carry old progress across a newer user message", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createStaleThreadContextProgressSnapshot(),
+    });
+
+    try {
+      await vi.waitFor(
+        async () => {
+          const panelText = await waitForThreadContextPanelText();
+          expect(panelText).toContain("Branch details");
+          expect(panelText).not.toContain("Progress");
+          expect(panelText).not.toContain("Old progress should not remain.");
         },
         { timeout: 8_000, interval: 16 },
       );
@@ -3246,8 +3598,8 @@ describe("ChatView timeline estimator parity (full app)", () => {
       );
       const branchSelector = await waitForElement(
         () =>
-          Array.from(document.querySelectorAll("button")).find(
-            (button) => button.textContent?.includes("main"),
+          Array.from(document.querySelectorAll("button")).find((button) =>
+            button.textContent?.includes("main"),
           ) as HTMLButtonElement | null,
         "Unable to find the branch selector.",
       );
@@ -3298,7 +3650,9 @@ describe("ChatView timeline estimator parity (full app)", () => {
 
       await expect
         .poll(
-          () => document.querySelector<HTMLElement>("[data-testid='chat-header-title']")?.textContent ?? "",
+          () =>
+            document.querySelector<HTMLElement>("[data-testid='chat-header-title']")?.textContent ??
+            "",
         )
         .toContain("Locke [explorer]");
     } finally {

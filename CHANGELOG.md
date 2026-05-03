@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.43] - 2026-05-03
+
+### Added
+- Added local skill prompt materialization for Claude and OpenCode turns so selected T3 skill mentions can be expanded into provider prompts.
+- Added a T3 imagegen MCP server wrapper that lets compatible providers call the local Codex image generation fallback.
+- Added server coverage for skill prompt materialization and expanded OpenCode adapter behavior tests.
+
+### Changed
+- Improved composer slash command handling and selected command cleanup for provider skill flows.
+- Updated Claude and OpenCode adapter wiring for provider-local skill discovery and image generation support.
+
+### Fixed
+- Hardened PDF worker compatibility for environments missing newer math helpers.
+- Refined review/timeline rendering behavior around generated artifacts and provider-driven prompt materialization.
+
 ## [0.2.42] - 2026-05-02
 
 ### Added

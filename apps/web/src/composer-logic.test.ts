@@ -56,6 +56,18 @@ describe("detectComposerTrigger", () => {
       rangeEnd: text.length,
     });
   });
+
+  it("detects bracketed skill trigger query", () => {
+    const text = "Use $[image";
+    const trigger = detectComposerTrigger(text, text.length);
+
+    expect(trigger).toEqual({
+      kind: "skill",
+      query: "image",
+      rangeStart: "Use ".length,
+      rangeEnd: text.length,
+    });
+  });
 });
 
 describe("replaceTextRange", () => {

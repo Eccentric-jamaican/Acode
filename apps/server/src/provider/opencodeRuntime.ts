@@ -1,5 +1,6 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import * as Net from "node:net";
+import * as OS from "node:os";
 import * as Path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -31,6 +32,27 @@ const DEFAULT_OPENCODE_BINARY_PATH = "opencode";
 
 function resolveBrowserUseClientPath(): string {
   return fileURLToPath(new URL("../browserUseClient.mjs", import.meta.url));
+}
+
+function resolveImagegenMcpServerPath(): string {
+  return fileURLToPath(new URL("../imagegenMcpServer.mjs", import.meta.url));
+}
+
+function buildOpenCodeInlineConfig(workspaceCwd: string | undefined): Record<string, unknown> {
+  return {
+    mcp: {
+      t3_imagegen: {
+        type: "local",
+        command: [process.execPath, resolveImagegenMcpServerPath()],
+        enabled: true,
+        timeout: 120_000,
+        environment: {
+          CODEX_HOME: process.env.CODEX_HOME ?? Path.join(OS.homedir(), ".codex"),
+          T3_IMAGEGEN_WORKSPACE: workspaceCwd ?? process.cwd(),
+        },
+      },
+    },
+  };
 }
 
 const DEFAULT_OPENCODE_MODEL_CAPABILITIES: ModelCapabilities = {
@@ -319,6 +341,7 @@ export async function startOpenCodeServerProcess(input: {
   readonly port?: number;
   readonly hostname?: string;
   readonly timeoutMs?: number;
+  readonly workspaceCwd?: string;
 }): Promise<OpenCodeServerConnection> {
   const binaryPath = normalizeOpenCodeBinaryCommand(input.binaryPath);
   const hostname = input.hostname ?? DEFAULT_HOSTNAME;
@@ -330,7 +353,7 @@ export async function startOpenCodeServerProcess(input: {
     args: ["serve", `--hostname=${hostname}`, `--port=${port}`],
     env: {
       ...process.env,
-      OPENCODE_CONFIG_CONTENT: JSON.stringify({}),
+      OPENCODE_CONFIG_CONTENT: JSON.stringify(buildOpenCodeInlineConfig(input.workspaceCwd)),
       T3CODE_BROWSER_USE_CLIENT_PATH: resolveBrowserUseClientPath(),
     },
   });
@@ -453,6 +476,7 @@ export async function connectToOpenCodeServer(input: {
   readonly port?: number;
   readonly hostname?: string;
   readonly timeoutMs?: number;
+  readonly workspaceCwd?: string;
 }): Promise<OpenCodeServerConnection> {
   const serverUrl = input.serverUrl?.trim();
   if (serverUrl) {

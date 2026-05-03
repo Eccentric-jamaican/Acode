@@ -161,9 +161,10 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
   const tokenStart = tokenStartForCursor(text, cursor);
   const token = text.slice(tokenStart, cursor);
   if (token.startsWith("$")) {
+    const query = token.startsWith("$[") ? token.slice(2).replace(/\]$/, "") : token.slice(1);
     return {
       kind: "skill",
-      query: token.slice(1),
+      query,
       rangeStart: tokenStart,
       rangeEnd: cursor,
     };

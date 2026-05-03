@@ -93,6 +93,7 @@ describe("buildBrowserUseComposerPrompt", () => {
     expect(prompt).toContain("T3 Browser Use");
     expect(prompt).toContain("Do not use OpenAI Browser Use");
     expect(prompt).toContain("Do not use OpenAI Browser Use, Chrome MCP, `t3_browser` MCP");
+    expect(prompt).toContain("pathToFileURL");
     expect(prompt).toContain("projectId: \"PROJECT_ID\"");
     expect(prompt).toContain("Use projectId `project-1`");
     expect(prompt).toContain("Task: open localhost:3000");

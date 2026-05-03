@@ -46,9 +46,13 @@ import {
 } from "../opencodeRuntime.ts";
 import { OpencodeMessageRoleGate } from "./OpencodeMessageRoleGate.ts";
 import { OpencodeAdapter, type OpencodeAdapterShape } from "../Services/OpencodeAdapter.ts";
-import { buildOpencodePromptAsyncBody, opencodeAgentForInteractionMode } from "./OpencodeTurnMapping.ts";
+import {
+  buildOpencodePromptAsyncBody,
+  opencodeAgentForInteractionMode,
+} from "./OpencodeTurnMapping.ts";
 import { normalizeInvocationDiffFiles } from "./InvocationDiffNormalization.ts";
 import { discoverSkillsForCwd } from "./SkillDiscovery.ts";
+import { materializeSkillMentionsForProvider } from "./SkillPromptMaterialization.ts";
 
 const PROVIDER = "opencode" as const;
 // Match the slower end of observed OpenCode cold-start behavior on Windows so
@@ -77,6 +81,7 @@ type RuntimeFactory = (input: {
   readonly hostname?: string;
   readonly port?: number;
   readonly timeoutMs?: number;
+  readonly workspaceCwd?: string;
 }) => Promise<RuntimeFactoryResult>;
 
 type EventSubscriptionResult = {
@@ -118,6 +123,13 @@ interface OpencodeMessage {
   readonly parts?: ReadonlyArray<unknown>;
 }
 
+interface NormalizedOpenCodeQuestion {
+  readonly id: string;
+  readonly header: string;
+  readonly question: string;
+  readonly options: Array<{ label: string; description: string }>;
+}
+
 interface ParsedSlashInvocation {
   readonly name: string;
   readonly arguments: string;
@@ -143,6 +155,11 @@ function asString(value: unknown): string | undefined {
 
 function asArray(value: unknown): ReadonlyArray<unknown> | undefined {
   return Array.isArray(value) ? value : undefined;
+}
+
+function isQuestionToolName(toolName: string): boolean {
+  const normalized = toolName.toLowerCase().replace(/[^a-z]/g, "");
+  return normalized === "question" || normalized === "askuserquestion";
 }
 
 function toMessage(cause: unknown, fallback: string): string {
@@ -186,7 +203,11 @@ function requestTypeFromPermission(value: string | undefined): CanonicalRequestT
   if (normalized.includes("edit") || normalized.includes("write") || normalized.includes("patch")) {
     return "file_change_approval";
   }
-  if (normalized.includes("command") || normalized.includes("shell") || normalized.includes("exec")) {
+  if (
+    normalized.includes("command") ||
+    normalized.includes("shell") ||
+    normalized.includes("exec")
+  ) {
     return "command_execution_approval";
   }
   return "unknown";
@@ -205,7 +226,9 @@ function streamKindFromPartType(
   }
 }
 
-function canonicalItemTypeFromToolName(value: string | undefined):
+function canonicalItemTypeFromToolName(
+  value: string | undefined,
+):
   | "command_execution"
   | "file_change"
   | "mcp_tool_call"
@@ -365,10 +388,11 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const serverConfig = yield* Effect.service(ServerConfig);
-    const serverSettings =
-      Option.getOrUndefined(yield* Effect.serviceOption(ServerSettingsService)) ?? {
-        getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
-      };
+    const serverSettings = Option.getOrUndefined(
+      yield* Effect.serviceOption(ServerSettingsService),
+    ) ?? {
+      getSettings: Effect.succeed(DEFAULT_SERVER_SETTINGS),
+    };
     const services = yield* Effect.services<never>();
     const queue = yield* Queue.unbounded<ProviderRuntimeEvent>();
     const runtimeRef = yield* Ref.make<RuntimeHandle | null>(null);
@@ -407,7 +431,9 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
     const emit = (event: ProviderRuntimeEvent) => Queue.offer(queue, event).pipe(Effect.asVoid);
     const runWithServices = Effect.runPromiseWith(services);
     const emitAsync = (event: ProviderRuntimeEvent) =>
-      emit(event).pipe(runWithServices).catch(() => undefined);
+      emit(event)
+        .pipe(runWithServices)
+        .catch(() => undefined);
     const resolveMessageRole = async (input: {
       readonly threadId: ThreadId;
       readonly sessionId: string;
@@ -436,10 +462,20 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
     };
 
     const processError = (threadId: ThreadId, detail: string, cause?: unknown) =>
-      new ProviderAdapterProcessError({ provider: PROVIDER, threadId, detail, ...(cause !== undefined ? { cause } : {}) });
+      new ProviderAdapterProcessError({
+        provider: PROVIDER,
+        threadId,
+        detail,
+        ...(cause !== undefined ? { cause } : {}),
+      });
 
     const requestError = (threadId: ThreadId, method: string, detail: string, cause?: unknown) =>
-      new ProviderAdapterRequestError({ provider: PROVIDER, method, detail, ...(cause !== undefined ? { cause } : {}) });
+      new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method,
+        detail,
+        ...(cause !== undefined ? { cause } : {}),
+      });
 
     const releaseDirectoryStreamIfUnused = (directory: string) => {
       const stillUsed = Array.from(sessions.values()).some((session) => session.cwd === directory);
@@ -461,7 +497,9 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         runtime.close();
       });
 
-    const ensureRuntime = (threadId: ThreadId): Effect.Effect<RuntimeHandle, ProviderAdapterProcessError> =>
+    const ensureRuntime = (
+      threadId: ThreadId,
+    ): Effect.Effect<RuntimeHandle, ProviderAdapterProcessError> =>
       Effect.gen(function* () {
         const existing = yield* Ref.get(runtimeRef);
         if (existing) return existing;
@@ -473,9 +511,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           ),
         );
         const serverPassword =
-          settings.serverPassword.trim().length > 0
-            ? settings.serverPassword.trim()
-            : undefined;
+          settings.serverPassword.trim().length > 0 ? settings.serverPassword.trim() : undefined;
         const runtimeStartupStartedAt = Date.now();
 
         const runtimeFromSdk = yield* Effect.tryPromise({
@@ -487,6 +523,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
                 ...(options?.host ? { hostname: options.host } : {}),
                 ...(options?.port ? { port: options.port } : {}),
                 timeoutMs: STARTUP_TIMEOUT_MS,
+                workspaceCwd: serverConfig.cwd,
               });
             }
             const server = await connectToOpenCodeServer({
@@ -495,6 +532,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
               ...(options?.host ? { hostname: options.host } : {}),
               ...(options?.port ? { port: options.port } : {}),
               timeoutMs: STARTUP_TIMEOUT_MS,
+              workspaceCwd: serverConfig.cwd,
             });
             logger.info("OpenCode runtime connected", {
               threadId,
@@ -561,7 +599,10 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
 
                 switch (input.methodName) {
                   case "command.list":
-                    return (await asFunction(command, "list")({
+                    return (await asFunction(
+                      command,
+                      "list",
+                    )({
                       ...(input.directory ? { directory: input.directory } : {}),
                     })) as T;
                   case "provider.list":
@@ -570,32 +611,47 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
                     }
                     return (await asFunction(provider, "list")()) as T;
                   case "session.create":
-                    return (await asFunction(session, "create")({
+                    return (await asFunction(
+                      session,
+                      "create",
+                    )({
                       body: bodyRecord,
                     })) as T;
                   case "session.get": {
                     const sessionID = decodePathSegment(input.path, 1);
-                    return (await asFunction(session, "retrieve")({
+                    return (await asFunction(
+                      session,
+                      "retrieve",
+                    )({
                       path: { sessionID },
                     })) as T;
                   }
                   case "session.command": {
                     const id = decodePathSegment(input.path, 1);
-                    return (await asFunction(session, "command")({
+                    return (await asFunction(
+                      session,
+                      "command",
+                    )({
                       path: { id, sessionID: id },
                       body: bodyRecord,
                     })) as T;
                   }
                   case "session.prompt_async": {
                     const id = decodePathSegment(input.path, 1);
-                    return (await asFunction(session, "promptAsync")({
+                    return (await asFunction(
+                      session,
+                      "promptAsync",
+                    )({
                       path: { id, sessionID: id },
                       body: bodyRecord,
                     })) as T;
                   }
                   case "session.abort": {
                     const id = decodePathSegment(input.path, 1);
-                    return (await asFunction(session, "abort")({
+                    return (await asFunction(
+                      session,
+                      "abort",
+                    )({
                       path: { id, sessionID: id },
                     })) as T;
                   }
@@ -615,9 +671,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
                 method: input.httpMethod,
                 headers: {
                   Accept: "application/json",
-                  ...(input.httpMethod === "POST"
-                    ? { "Content-Type": "application/json" }
-                    : {}),
+                  ...(input.httpMethod === "POST" ? { "Content-Type": "application/json" } : {}),
                   ...(runtime.serverPassword
                     ? {
                         Authorization: buildOpenCodeBasicAuthorizationHeader(
@@ -626,9 +680,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
                       }
                     : {}),
                 },
-                ...(input.httpMethod === "POST"
-                  ? { body: JSON.stringify(bodyRecord ?? {}) }
-                  : {}),
+                ...(input.httpMethod === "POST" ? { body: JSON.stringify(bodyRecord ?? {}) } : {}),
               });
               if (!response.ok) {
                 throw new Error(`HTTP ${response.status}: ${await response.text()}`);
@@ -641,9 +693,9 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
                 return undefined as T;
               }
               const parsed = JSON.parse(text) as { data?: unknown };
-              return (parsed && typeof parsed === "object" && "data" in parsed
-                ? parsed.data
-                : parsed) as T;
+              return (
+                parsed && typeof parsed === "object" && "data" in parsed ? parsed.data : parsed
+              ) as T;
             },
             catch: (cause) =>
               new OpencodeRequestFailure({
@@ -654,13 +706,15 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
 
         const runtime = yield* ensureRuntime(input.threadId);
         const result = yield* executeRequest(runtime).pipe(
-          Effect.catchIf((error) => isConnectionRefused(error.cause), () =>
-            Effect.gen(function* () {
-              yield* clearRuntimeIfMatches(runtime);
-              yield* closeRuntime(runtime);
-              const restarted = yield* ensureRuntime(input.threadId);
-              return yield* executeRequest(restarted);
-            }),
+          Effect.catchIf(
+            (error) => isConnectionRefused(error.cause),
+            () =>
+              Effect.gen(function* () {
+                yield* clearRuntimeIfMatches(runtime);
+                yield* closeRuntime(runtime);
+                const restarted = yield* ensureRuntime(input.threadId);
+                return yield* executeRequest(restarted);
+              }),
           ),
           Effect.mapError((error) =>
             requestError(
@@ -674,23 +728,42 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         return result;
       });
 
-    const toQuestionPayload = (rawQuestion: unknown) => {
+    const generatedQuestionId = (index: number, question: Record<string, unknown>) => {
+      const header = (asString(question.header) ?? asString(question.title) ?? "")
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9_-]+/g, "-");
+      return header.length > 0 ? `question-${index}-${header}` : `question-${index}`;
+    };
+
+    const toQuestionPayload = (
+      rawQuestion: unknown,
+    ): ReadonlyArray<NormalizedOpenCodeQuestion> | undefined => {
       const record = asObject(rawQuestion);
       if (!record) return undefined;
       const list = asArray(record.questions);
       const questions = (list ?? [record])
-        .map((entry) => {
+        .map((entry, index) => {
           const question = asObject(entry);
           if (!question) return undefined;
-          const id = asString(question.id)?.trim();
+          const id = asString(question.id)?.trim() || generatedQuestionId(index, question);
           const header = asString(question.header)?.trim() ?? asString(question.title)?.trim();
-          const questionText = asString(question.question)?.trim() ?? asString(question.prompt)?.trim();
+          const questionText =
+            asString(question.question)?.trim() ?? asString(question.prompt)?.trim();
           const options = (asArray(question.options) ?? [])
             .map((optionValue) => {
+              if (typeof optionValue === "string") {
+                const label = optionValue.trim();
+                return label.length > 0 ? { label, description: label } : undefined;
+              }
               const option = asObject(optionValue);
               if (!option) return undefined;
               const label = asString(option.label)?.trim();
-              const description = asString(option.description)?.trim();
+              const description =
+                asString(option.description)?.trim() ??
+                asString(option.detail)?.trim() ??
+                asString(option.value)?.trim() ??
+                label;
               if (!label || !description) return undefined;
               return { label, description };
             })
@@ -702,17 +775,33 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           }
           return { id, header, question: questionText, options };
         })
-        .filter(
-          (
-            question,
-          ): question is {
-            id: string;
-            header: string;
-            question: string;
-            options: Array<{ label: string; description: string }>;
-          } => question !== undefined,
-        );
+        .filter((question): question is NormalizedOpenCodeQuestion => question !== undefined);
       return questions.length > 0 ? questions : undefined;
+    };
+
+    const emitQuestionRequested = async (input: {
+      readonly threadId: ThreadId;
+      readonly turnId: TurnId | undefined;
+      readonly requestId: string;
+      readonly questions: ReadonlyArray<NormalizedOpenCodeQuestion>;
+      readonly method: string;
+      readonly rawPayload: unknown;
+    }) => {
+      questionIdsByRequest.set(
+        input.requestId,
+        input.questions.map((question) => question.id),
+      );
+      await emitAsync(
+        eventBase({
+          threadId: input.threadId,
+          type: "user-input.requested",
+          payload: { questions: input.questions },
+          method: input.method,
+          rawPayload: input.rawPayload,
+          turnId: input.turnId,
+          requestId: input.requestId,
+        }),
+      );
     };
 
     const handleSseEvent = async (event: OpencodeEvent): Promise<void> => {
@@ -862,6 +951,21 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           const input = asObject(state?.input) ?? {};
           const metadata = asObject(state?.metadata) ?? asObject(part.metadata) ?? {};
           const output = asString(state?.output);
+          if (isQuestionToolName(toolName)) {
+            const questions = toQuestionPayload(input);
+            if (questions && (status === "pending" || status === "running")) {
+              await emitQuestionRequested({
+                threadId,
+                method: event.type,
+                rawPayload: event,
+                turnId,
+                requestId: itemId,
+                questions,
+              });
+              toolPartStatusById.set(partId, { sessionId, messageId, status });
+              return;
+            }
+          }
           const data: Record<string, unknown> = {
             toolName,
             input,
@@ -1005,7 +1109,8 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
               text: `${previous.text}${delta}`,
             });
           } else {
-            streamKind = asString(properties.field)?.toLowerCase() === "text" ? "assistant_text" : "unknown";
+            streamKind =
+              asString(properties.field)?.toLowerCase() === "text" ? "assistant_text" : "unknown";
             partMetadataById.set(partId, { sessionId, messageId, streamKind, text: delta });
           }
         }
@@ -1043,7 +1148,10 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         }
         if (event.type === "message.completed" || typeof completedAt === "number") {
           const hasStreamedAssistantText = Array.from(partMetadataById.values()).some(
-            (entry) => entry.messageId === messageId && entry.streamKind === "assistant_text" && entry.text.length > 0,
+            (entry) =>
+              entry.messageId === messageId &&
+              entry.streamKind === "assistant_text" &&
+              entry.text.length > 0,
           );
           if (!hasStreamedAssistantText) {
             const fullMessage = await requestJson<unknown>({
@@ -1234,21 +1342,14 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           if (!questions) {
             return;
           }
-          questionIdsByRequest.set(
+          await emitQuestionRequested({
+            threadId,
+            method: event.type,
+            rawPayload: event,
+            turnId,
             requestId,
-            questions.map((question) => question.id),
-          );
-          await emitAsync(
-            eventBase({
-              threadId,
-              type: "user-input.requested",
-              payload: { questions },
-              method: event.type,
-              rawPayload: event,
-              turnId,
-              requestId,
-            }),
-          );
+            questions,
+          });
           return;
         }
 
@@ -1256,21 +1357,14 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         if (status === "pending" || status === "open" || status === "requested") {
           const questions = toQuestionPayload(questionRecord);
           if (!questions) return;
-          questionIdsByRequest.set(
+          await emitQuestionRequested({
+            threadId,
+            method: event.type,
+            rawPayload: event,
+            turnId,
             requestId,
-            questions.map((question) => question.id),
-          );
-          await emitAsync(
-            eventBase({
-              threadId,
-              type: "user-input.requested",
-              payload: { questions },
-              method: event.type,
-              rawPayload: event,
-              turnId,
-              requestId,
-            }),
-          );
+            questions,
+          });
           return;
         }
         if (
@@ -1416,8 +1510,12 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           } catch (cause) {
             if (controller.signal.aborted) break;
             if (runtime && isConnectionRefused(cause)) {
-              await clearRuntimeIfMatches(runtime).pipe(runWithServices).catch(() => undefined);
-              await closeRuntime(runtime).pipe(runWithServices).catch(() => undefined);
+              await clearRuntimeIfMatches(runtime)
+                .pipe(runWithServices)
+                .catch(() => undefined);
+              await closeRuntime(runtime)
+                .pipe(runWithServices)
+                .catch(() => undefined);
             }
             await emitAsync(
               eventBase({
@@ -1441,9 +1539,17 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
       void runLoop();
     };
 
-    const resolveModel = (threadId: ThreadId, directory: string, requested: string | undefined, fallback: string | undefined, operation: string) =>
+    const resolveModel = (
+      threadId: ThreadId,
+      directory: string,
+      requested: string | undefined,
+      fallback: string | undefined,
+      operation: string,
+    ) =>
       Effect.gen(function* () {
-        const normalized = normalizeModelSlug(requested ?? fallback ?? OPENCODE_DEFAULT_MODEL_SLUG, "opencode") ?? getDefaultModel("opencode");
+        const normalized =
+          normalizeModelSlug(requested ?? fallback ?? OPENCODE_DEFAULT_MODEL_SLUG, "opencode") ??
+          getDefaultModel("opencode");
         const parsed = parseOpencodeModelSlug(normalized);
         if (parsed) {
           return { slug: normalized, providerID: parsed.providerID, modelID: parsed.modelID };
@@ -1455,12 +1561,26 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
             issue: `Invalid OpenCode model slug '${normalized}'. Expected '<providerID>/<modelID>' or '${OPENCODE_DEFAULT_MODEL_SLUG}'.`,
           });
         }
-        const providerList = yield* requestJson<unknown>({ threadId, methodName: "provider.list", httpMethod: "GET", path: "/provider", directory, body: undefined });
-        const defaults = asObject(asObject(providerList)?.default) ?? asObject(asObject(providerList)?.defaults);
-        const providerID = defaults ? Object.keys(defaults).find((key) => typeof defaults[key] === "string") : undefined;
+        const providerList = yield* requestJson<unknown>({
+          threadId,
+          methodName: "provider.list",
+          httpMethod: "GET",
+          path: "/provider",
+          directory,
+          body: undefined,
+        });
+        const defaults =
+          asObject(asObject(providerList)?.default) ?? asObject(asObject(providerList)?.defaults);
+        const providerID = defaults
+          ? Object.keys(defaults).find((key) => typeof defaults[key] === "string")
+          : undefined;
         const modelID = providerID ? asString(defaults?.[providerID]) : undefined;
         if (!providerID || !modelID) {
-          return yield* requestError(threadId, "provider.list", "OpenCode default model resolution returned no usable provider/model pair.");
+          return yield* requestError(
+            threadId,
+            "provider.list",
+            "OpenCode default model resolution returned no usable provider/model pair.",
+          );
         }
         return { slug: `${providerID}/${modelID}`, providerID, modelID };
       });
@@ -1514,10 +1634,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
             directory: input.cwd,
             body: undefined,
           })
-            .pipe(
-              Effect.map(mapOpencodeCommands),
-              runWithServices,
-            )
+            .pipe(Effect.map(mapOpencodeCommands), runWithServices)
             .then((result) => {
               commandCacheByCwd.set(input.cwd, result);
               return result;
@@ -1552,7 +1669,13 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
 
         const resumeCursor = readResumeCursor(input.resumeCursor);
         const cwd = input.cwd ?? resumeCursor?.directory ?? process.cwd();
-        const resolvedModel = yield* resolveModel(input.threadId, cwd, input.model, undefined, "startSession");
+        const resolvedModel = yield* resolveModel(
+          input.threadId,
+          cwd,
+          input.model,
+          undefined,
+          "startSession",
+        );
 
         let sessionInfo: OpencodeSessionInfo | undefined;
         if (resumeCursor?.sessionId) {
@@ -1567,10 +1690,20 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           sessionInfo = Option.getOrUndefined(resumedSessionInfo);
         }
         if (!sessionInfo?.id) {
-          sessionInfo = yield* requestJson<OpencodeSessionInfo>({ threadId: input.threadId, methodName: "session.create", httpMethod: "POST", path: "/session", directory: cwd, body: {} });
+          sessionInfo = yield* requestJson<OpencodeSessionInfo>({
+            threadId: input.threadId,
+            methodName: "session.create",
+            httpMethod: "POST",
+            path: "/session",
+            directory: cwd,
+            body: {},
+          });
         }
         if (!sessionInfo?.id) {
-          return yield* processError(input.threadId, "OpenCode session initialization returned no session id.");
+          return yield* processError(
+            input.threadId,
+            "OpenCode session initialization returned no session id.",
+          );
         }
 
         const session: RuntimeSession = {
@@ -1580,8 +1713,14 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           runtimeMode: input.runtimeMode,
           model: resolvedModel.slug,
           status: "ready",
-          createdAt: typeof sessionInfo.time?.created === "number" ? new Date(sessionInfo.time.created).toISOString() : nowIso(),
-          updatedAt: typeof sessionInfo.time?.updated === "number" ? new Date(sessionInfo.time.updated).toISOString() : nowIso(),
+          createdAt:
+            typeof sessionInfo.time?.created === "number"
+              ? new Date(sessionInfo.time.created).toISOString()
+              : nowIso(),
+          updatedAt:
+            typeof sessionInfo.time?.updated === "number"
+              ? new Date(sessionInfo.time.updated).toISOString()
+              : nowIso(),
           activeTurnId: null,
         };
         sessions.set(input.threadId, session);
@@ -1633,19 +1772,32 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
     const sendTurn: OpencodeAdapterShape["sendTurn"] = (input) =>
       Effect.gen(function* () {
         const session = sessions.get(input.threadId);
-        if (!session) return yield* new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId: input.threadId });
+        if (!session)
+          return yield* new ProviderAdapterSessionNotFoundError({
+            provider: PROVIDER,
+            threadId: input.threadId,
+          });
 
-        const resolvedModel = yield* resolveModel(input.threadId, session.cwd, input.model, session.model, "sendTurn");
+        const resolvedModel = yield* resolveModel(
+          input.threadId,
+          session.cwd,
+          input.model,
+          session.model,
+          "sendTurn",
+        );
         session.model = resolvedModel.slug;
         const openCodeOptions = normalizeOpenCodeModelOptions(
           resolvedModel.slug,
           input.modelOptions?.opencode as OpenCodeModelOptions | undefined,
         );
-        const text = input.input?.trim() ?? "";
+        const text = materializeSkillMentionsForProvider({
+          cwd: session.cwd,
+          prompt: input.input?.trim() ?? "",
+          providerName: "OpenCode",
+        });
         const slashInvocation = parseLeadingSlashInvocation(text);
         const selectedAgent =
-          openCodeOptions?.agent ??
-          opencodeAgentForInteractionMode(input.interactionMode);
+          openCodeOptions?.agent ?? opencodeAgentForInteractionMode(input.interactionMode);
         const selectedVariant = openCodeOptions?.variant;
 
         if (slashInvocation !== null) {
@@ -1669,7 +1821,9 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
             cwd: session.cwd,
             forceReload: false,
           });
-          const commandExists = commandCatalog.commands.some((command) => command.name === slashInvocation.name);
+          const commandExists = commandCatalog.commands.some(
+            (command) => command.name === slashInvocation.name,
+          );
           if (!commandExists) {
             return yield* new ProviderAdapterValidationError({
               provider: PROVIDER,
@@ -1689,21 +1843,23 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
             httpMethod: "POST",
             path: `/session/${encodeURIComponent(session.sessionId)}/command`,
             directory: session.cwd,
-              body: {
-                command: slashInvocation.name,
-                arguments: slashInvocation.arguments,
-                model: resolvedModel.slug,
-                ...(selectedAgent !== undefined ? { agent: selectedAgent } : {}),
-                ...(selectedVariant !== undefined ? { variant: selectedVariant } : {}),
-              },
-            });
+            body: {
+              command: slashInvocation.name,
+              arguments: slashInvocation.arguments,
+              model: resolvedModel.slug,
+              ...(selectedAgent !== undefined ? { agent: selectedAgent } : {}),
+              ...(selectedVariant !== undefined ? { variant: selectedVariant } : {}),
+            },
+          });
 
           const rawPayload = {
             sessionId: session.sessionId,
             model: resolvedModel.slug,
             command: slashInvocation.name,
             arguments: slashInvocation.arguments,
-            ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+            ...(input.interactionMode !== undefined
+              ? { interactionMode: input.interactionMode }
+              : {}),
             ...(selectedAgent !== undefined ? { agent: selectedAgent } : {}),
             ...(selectedVariant !== undefined ? { variant: selectedVariant } : {}),
           };
@@ -1735,15 +1891,40 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           };
         }
 
-        const imageParts = yield* Effect.forEach(input.attachments ?? [], (attachment) =>
-          Effect.gen(function* () {
-            const attachmentPath = resolveAttachmentPath({ stateDir: serverConfig.stateDir, attachment });
-            if (!attachmentPath) {
-              return yield* new ProviderAdapterValidationError({ provider: PROVIDER, operation: "sendTurn", issue: `Invalid attachment id '${attachment.id}'.` });
-            }
-            const bytes = yield* fs.readFile(attachmentPath).pipe(Effect.mapError((cause) => requestError(input.threadId, "session.prompt_async", toMessage(cause, "Failed to read attachment file."), cause)));
-            return { type: "file", filename: attachment.name, mime: attachment.mimeType, url: `data:${attachment.mimeType};base64,${Buffer.from(bytes).toString("base64")}` };
-          }),
+        const imageParts = yield* Effect.forEach(
+          input.attachments ?? [],
+          (attachment) =>
+            Effect.gen(function* () {
+              const attachmentPath = resolveAttachmentPath({
+                stateDir: serverConfig.stateDir,
+                attachment,
+              });
+              if (!attachmentPath) {
+                return yield* new ProviderAdapterValidationError({
+                  provider: PROVIDER,
+                  operation: "sendTurn",
+                  issue: `Invalid attachment id '${attachment.id}'.`,
+                });
+              }
+              const bytes = yield* fs
+                .readFile(attachmentPath)
+                .pipe(
+                  Effect.mapError((cause) =>
+                    requestError(
+                      input.threadId,
+                      "session.prompt_async",
+                      toMessage(cause, "Failed to read attachment file."),
+                      cause,
+                    ),
+                  ),
+                );
+              return {
+                type: "file",
+                filename: attachment.name,
+                mime: attachment.mimeType,
+                url: `data:${attachment.mimeType};base64,${Buffer.from(bytes).toString("base64")}`,
+              };
+            }),
           { concurrency: 1 },
         );
 
@@ -1751,7 +1932,11 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         if (text) parts.push({ type: "text", text });
         parts.push(...imageParts);
         if (parts.length === 0) {
-          return yield* new ProviderAdapterValidationError({ provider: PROVIDER, operation: "sendTurn", issue: "Either input text or at least one attachment is required." });
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "sendTurn",
+            issue: "Either input text or at least one attachment is required.",
+          });
         }
 
         const turnId = TurnId.makeUnsafe(randomUUID());
@@ -1762,7 +1947,9 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           providerID: resolvedModel.providerID,
           modelID: resolvedModel.modelID,
           parts,
-          ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+          ...(input.interactionMode !== undefined
+            ? { interactionMode: input.interactionMode }
+            : {}),
         });
         const promptBodyWithOptions = {
           ...promptBody,
@@ -1782,7 +1969,9 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         const rawPayload = {
           sessionId: session.sessionId,
           model: resolvedModel.slug,
-          ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+          ...(input.interactionMode !== undefined
+            ? { interactionMode: input.interactionMode }
+            : {}),
           ...(selectedAgent !== undefined ? { agent: selectedAgent } : {}),
           ...(selectedVariant !== undefined ? { variant: selectedVariant } : {}),
         };
@@ -1807,15 +1996,27 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           }),
         );
 
-        return { threadId: input.threadId, turnId, resumeCursor: { sessionId: session.sessionId, directory: session.cwd } };
+        return {
+          threadId: input.threadId,
+          turnId,
+          resumeCursor: { sessionId: session.sessionId, directory: session.cwd },
+        };
       });
 
     const interruptTurn: OpencodeAdapterShape["interruptTurn"] = (threadId) =>
       Effect.gen(function* () {
         const session = sessions.get(threadId);
-        if (!session) return yield* new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId });
+        if (!session)
+          return yield* new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId });
         const activeTurnId = session.activeTurnId;
-        yield* requestJson<void>({ threadId, methodName: "session.abort", httpMethod: "POST", path: `/session/${encodeURIComponent(session.sessionId)}/abort`, directory: session.cwd, body: {} });
+        yield* requestJson<void>({
+          threadId,
+          methodName: "session.abort",
+          httpMethod: "POST",
+          path: `/session/${encodeURIComponent(session.sessionId)}/abort`,
+          directory: session.cwd,
+          body: {},
+        });
         session.activeTurnId = null;
         session.status = "ready";
         session.updatedAt = nowIso();
@@ -1842,11 +2043,17 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         );
       });
 
-    const respondToRequest: OpencodeAdapterShape["respondToRequest"] = (threadId, requestId, decision) =>
+    const respondToRequest: OpencodeAdapterShape["respondToRequest"] = (
+      threadId,
+      requestId,
+      decision,
+    ) =>
       Effect.gen(function* () {
         const session = sessions.get(threadId);
-        if (!session) return yield* new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId });
-        const reply = decision === "accept" ? "once" : decision === "acceptForSession" ? "always" : "reject";
+        if (!session)
+          return yield* new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId });
+        const reply =
+          decision === "accept" ? "once" : decision === "acceptForSession" ? "always" : "reject";
         yield* requestJson<void>({
           threadId,
           methodName: "permission.reply",
@@ -1873,19 +2080,32 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         permissionTypeByRequest.delete(requestId);
       });
 
-    const respondToUserInput: OpencodeAdapterShape["respondToUserInput"] = (threadId, requestId, answers) =>
+    const respondToUserInput: OpencodeAdapterShape["respondToUserInput"] = (
+      threadId,
+      requestId,
+      answers,
+    ) =>
       Effect.gen(function* () {
         const session = sessions.get(threadId);
-        if (!session) return yield* new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId });
+        if (!session)
+          return yield* new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId });
         const orderedQuestionIds = questionIdsByRequest.get(requestId) ?? [];
         const orderedAnswers = orderedQuestionIds.map((questionId) => {
           const value = answers[questionId];
           if (typeof value === "string") return [value];
-          if (Array.isArray(value)) return value.filter((entry): entry is string => typeof entry === "string");
+          if (Array.isArray(value))
+            return value.filter((entry): entry is string => typeof entry === "string");
           const nested = asArray(asObject(value)?.answers);
           return (nested ?? []).filter((entry): entry is string => typeof entry === "string");
         });
-        yield* requestJson<void>({ threadId, methodName: "question.reply", httpMethod: "POST", path: `/question/${encodeURIComponent(requestId)}/reply`, directory: session.cwd, body: { answers: orderedAnswers } });
+        yield* requestJson<void>({
+          threadId,
+          methodName: "question.reply",
+          httpMethod: "POST",
+          path: `/question/${encodeURIComponent(requestId)}/reply`,
+          directory: session.cwd,
+          body: { answers: orderedAnswers },
+        });
         yield* emit(
           eventBase({
             threadId,
@@ -1903,8 +2123,16 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
     const readThread: OpencodeAdapterShape["readThread"] = (threadId) =>
       Effect.gen(function* () {
         const session = sessions.get(threadId);
-        if (!session) return yield* new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId });
-        const messages = yield* requestJson<ReadonlyArray<OpencodeMessage>>({ threadId, methodName: "session.messages", httpMethod: "GET", path: `/session/${encodeURIComponent(session.sessionId)}/message`, directory: session.cwd, body: undefined });
+        if (!session)
+          return yield* new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId });
+        const messages = yield* requestJson<ReadonlyArray<OpencodeMessage>>({
+          threadId,
+          methodName: "session.messages",
+          httpMethod: "GET",
+          path: `/session/${encodeURIComponent(session.sessionId)}/message`,
+          directory: session.cwd,
+          body: undefined,
+        });
         const turns: Array<{ id: TurnId; items: Array<unknown> }> = [];
         let current: { id: TurnId; items: Array<unknown> } | null = null;
         for (const message of messages) {
@@ -1927,17 +2155,47 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
     const rollbackThread: OpencodeAdapterShape["rollbackThread"] = (threadId, numTurns) =>
       Effect.gen(function* () {
         if (!Number.isInteger(numTurns) || numTurns < 1) {
-          return yield* new ProviderAdapterValidationError({ provider: PROVIDER, operation: "rollbackThread", issue: "numTurns must be an integer >= 1." });
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "rollbackThread",
+            issue: "numTurns must be an integer >= 1.",
+          });
         }
         const session = sessions.get(threadId);
-        if (!session) return yield* new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId });
-        const messages = yield* requestJson<ReadonlyArray<OpencodeMessage>>({ threadId, methodName: "session.messages", httpMethod: "GET", path: `/session/${encodeURIComponent(session.sessionId)}/message`, directory: session.cwd, body: undefined });
-        const userMessageIds = messages.filter((message): message is OpencodeMessage & { info: { id: string; role: "user" } } => message.info?.role === "user" && typeof message.info.id === "string" && message.info.id.length > 0).map((message) => message.info.id);
+        if (!session)
+          return yield* new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId });
+        const messages = yield* requestJson<ReadonlyArray<OpencodeMessage>>({
+          threadId,
+          methodName: "session.messages",
+          httpMethod: "GET",
+          path: `/session/${encodeURIComponent(session.sessionId)}/message`,
+          directory: session.cwd,
+          body: undefined,
+        });
+        const userMessageIds = messages
+          .filter(
+            (message): message is OpencodeMessage & { info: { id: string; role: "user" } } =>
+              message.info?.role === "user" &&
+              typeof message.info.id === "string" &&
+              message.info.id.length > 0,
+          )
+          .map((message) => message.info.id);
         if (numTurns > userMessageIds.length) {
-          return yield* new ProviderAdapterValidationError({ provider: PROVIDER, operation: "rollbackThread", issue: `Cannot rollback ${numTurns} turn(s); thread has ${userMessageIds.length} user turn(s).` });
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "rollbackThread",
+            issue: `Cannot rollback ${numTurns} turn(s); thread has ${userMessageIds.length} user turn(s).`,
+          });
         }
         const target = userMessageIds[userMessageIds.length - numTurns]!;
-        yield* requestJson<void>({ threadId, methodName: "session.revert", httpMethod: "POST", path: `/session/${encodeURIComponent(session.sessionId)}/revert`, directory: session.cwd, body: { messageID: target } });
+        yield* requestJson<void>({
+          threadId,
+          methodName: "session.revert",
+          httpMethod: "POST",
+          path: `/session/${encodeURIComponent(session.sessionId)}/revert`,
+          directory: session.cwd,
+          body: { messageID: target },
+        });
         return yield* readThread(threadId);
       });
 
@@ -1958,7 +2216,10 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           }
         }
         messageRoleGate.clearSession(session.sessionId);
-        for (const [messageId, messageSessionId] of completedAssistantMessageSessionById.entries()) {
+        for (const [
+          messageId,
+          messageSessionId,
+        ] of completedAssistantMessageSessionById.entries()) {
           if (messageSessionId === session.sessionId) {
             completedAssistantMessageSessionById.delete(messageId);
           }
@@ -1967,20 +2228,23 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
       });
 
     const listSessions: OpencodeAdapterShape["listSessions"] = () =>
-      Effect.sync(() => Array.from(sessions.values(), (session) => ({
-        provider: PROVIDER,
-        status: session.status,
-        runtimeMode: session.runtimeMode,
-        cwd: session.cwd,
-        model: session.model,
-        threadId: session.threadId,
-        resumeCursor: { sessionId: session.sessionId, directory: session.cwd },
-        ...(session.activeTurnId ? { activeTurnId: session.activeTurnId } : {}),
-        createdAt: session.createdAt,
-        updatedAt: session.updatedAt,
-      })));
+      Effect.sync(() =>
+        Array.from(sessions.values(), (session) => ({
+          provider: PROVIDER,
+          status: session.status,
+          runtimeMode: session.runtimeMode,
+          cwd: session.cwd,
+          model: session.model,
+          threadId: session.threadId,
+          resumeCursor: { sessionId: session.sessionId, directory: session.cwd },
+          ...(session.activeTurnId ? { activeTurnId: session.activeTurnId } : {}),
+          createdAt: session.createdAt,
+          updatedAt: session.updatedAt,
+        })),
+      );
 
-    const hasSession: OpencodeAdapterShape["hasSession"] = (threadId) => Effect.sync(() => sessions.has(threadId));
+    const hasSession: OpencodeAdapterShape["hasSession"] = (threadId) =>
+      Effect.sync(() => sessions.has(threadId));
 
     const composerCapabilities: ProviderComposerCapabilities = {
       provider: PROVIDER,
@@ -1992,8 +2256,9 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
       supportsRuntimeModelList: true,
     };
 
-    const getComposerCapabilities: NonNullable<OpencodeAdapterShape["getComposerCapabilities"]> = () =>
-      Effect.succeed(composerCapabilities);
+    const getComposerCapabilities: NonNullable<
+      OpencodeAdapterShape["getComposerCapabilities"]
+    > = () => Effect.succeed(composerCapabilities);
 
     const listSkills: NonNullable<OpencodeAdapterShape["listSkills"]> = (
       input: ProviderListSkillsInput,
@@ -2011,7 +2276,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         const discoveryThreadId =
           input.threadId !== undefined
             ? ThreadId.makeUnsafe(input.threadId)
-            : [...sessions.values()][0]?.threadId ?? ThreadId.makeUnsafe("discovery");
+            : ([...sessions.values()][0]?.threadId ?? ThreadId.makeUnsafe("discovery"));
         if (input.forceReload !== undefined) {
           return yield* discoverCommandsForCwd({
             threadId: discoveryThreadId,
@@ -2071,8 +2336,9 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
             });
           })
           .toSorted((left, right) => left.name.localeCompare(right.name))
-          .filter((model, index, collection) =>
-            collection.findIndex((candidate) => candidate.slug === model.slug) === index,
+          .filter(
+            (model, index, collection) =>
+              collection.findIndex((candidate) => candidate.slug === model.slug) === index,
           );
 
         return {

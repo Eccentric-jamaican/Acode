@@ -52,10 +52,7 @@ import {
   type WorkLogEntry,
 } from "../../session-logic";
 import { AUTO_SCROLL_BOTTOM_THRESHOLD_PX } from "../../chat-scroll";
-import {
-  type TurnDiffFileChange,
-  type TurnDiffSummary,
-} from "../../types";
+import { type TurnDiffFileChange, type TurnDiffSummary } from "../../types";
 import {
   buildTurnDiffTree,
   summarizeTurnDiffStats,
@@ -71,10 +68,7 @@ import {
   reconstructRangeFromOffsets,
   serializeRangeWithinContainer,
 } from "../../chatPinnedSelections";
-import {
-  buildProposedPlanMarkdownFilename,
-  proposedPlanTitle,
-} from "../../proposedPlan";
+import { buildProposedPlanMarkdownFilename, proposedPlanTitle } from "../../proposedPlan";
 import { type PinnedSelectionDraft } from "../../composerDraftStore";
 import { readNativeApi } from "~/nativeApi";
 import { cn } from "~/lib/utils";
@@ -101,10 +95,7 @@ import {
 } from "../ui/dialog";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { toastManager } from "../ui/toast";
-import {
-  buildExpandedImagePreview,
-  type ExpandedImagePreview,
-} from "./ExpandedImagePreview";
+import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { normalizeCompactToolLabel } from "./MessagesTimeline.logic";
 
 const MAX_VISIBLE_WORK_LOG_ENTRIES = 6;
@@ -130,16 +121,24 @@ const CHAT_SELECTION_IGNORE_SELECTOR =
 const EMPTY_INVOCATION_DIFF_FILES: ReadonlyArray<InvocationDiffFile> = [];
 const LEADING_PROVIDER_MENTION_PATTERN = /^([$/])([^\s]+)(?=\s|$)/;
 
-type AssistantArtifactKind = "document" | "markdown" | "slides" | "spreadsheet" | "pdf";
+type AssistantArtifactKind = "document" | "image" | "markdown" | "slides" | "spreadsheet" | "pdf";
 
 const ASSISTANT_ARTIFACT_EXTENSIONS: ReadonlyMap<string, AssistantArtifactKind> = new Map([
+  ["avif", "image"],
+  ["bmp", "image"],
   ["docx", "document"],
+  ["gif", "image"],
+  ["heic", "image"],
+  ["jpeg", "image"],
+  ["jpg", "image"],
   ["markdown", "markdown"],
   ["md", "markdown"],
   ["mdown", "markdown"],
   ["mdx", "markdown"],
   ["mkd", "markdown"],
+  ["png", "image"],
   ["pptx", "slides"],
+  ["webp", "image"],
   ["xls", "spreadsheet"],
   ["xlsx", "spreadsheet"],
   ["pdf", "pdf"],
@@ -173,9 +172,7 @@ export interface MessagesTimelineProps {
   homeDirectory: string | undefined;
   pinnedSelections: readonly PinnedSelectionDraft[];
   onAskAboutSelectedText: (selectedText: string) => void;
-  onPinSelectedText: (
-    selection: Omit<PinnedSelectionDraft, "id" | "createdAt">,
-  ) => void;
+  onPinSelectedText: (selection: Omit<PinnedSelectionDraft, "id" | "createdAt">) => void;
   onRemovePinnedSelection: (pinnedSelectionId: string) => void;
   pendingPinnedSelectionJumpId: string | null;
   onPinnedSelectionJumpHandled: (pinnedSelectionId: string) => void;
@@ -193,7 +190,7 @@ function formatSubagentModelLabel(model: string | undefined): string | null {
   if (!model) {
     return null;
   }
-  return model.includes("/") ? model.split("/").at(-1) ?? model : model;
+  return model.includes("/") ? (model.split("/").at(-1) ?? model) : model;
 }
 
 function subagentStatusClasses(
@@ -254,7 +251,12 @@ interface AssistantSelectionActionState {
 }
 
 type UserMessageTextSegment =
-  | { type: "shortcut"; key: string; command: "browser" | "review" | "subagents" | "inspect"; args: string }
+  | {
+      type: "shortcut";
+      key: string;
+      command: "browser" | "review" | "subagents" | "inspect";
+      args: string;
+    }
   | { type: "mention"; key: string; descriptor: UserMessageMentionDescriptor }
   | { type: "text"; key: string; text: string };
 
@@ -305,12 +307,11 @@ function splitUserMessageProviderMentions(
       remaining = trimmedRemaining;
       continue;
     }
-    const descriptor =
-      descriptorsByName.get(rawName.toLowerCase()) ?? {
-        mentionName: rawName,
-        label: rawName,
-        type: "plugin" as const,
-      };
+    const descriptor = descriptorsByName.get(rawName.toLowerCase()) ?? {
+      mentionName: rawName,
+      label: rawName,
+      type: "plugin" as const,
+    };
     segments.push({
       type: "mention",
       key: `mention:${offset}:${rawName}`,
@@ -406,10 +407,7 @@ const UserMessageText = memo(function UserMessageText(props: {
         segment.type === "shortcut" ? (
           <UserMessageShortcutChip key={segment.key} command={segment.command} />
         ) : segment.type === "mention" ? (
-          <UserMessageMentionChip
-            key={segment.key}
-            descriptor={segment.descriptor}
-          />
+          <UserMessageMentionChip key={segment.key} descriptor={segment.descriptor} />
         ) : (
           <ChatMarkdown
             key={segment.key}
@@ -454,9 +452,7 @@ function getSelectionRegionElement(node: Node | null): HTMLElement | null {
   );
 }
 
-function getSelectionSourceKind(
-  element: HTMLElement,
-): PinnedSelectionDraft["sourceKind"] | null {
+function getSelectionSourceKind(element: HTMLElement): PinnedSelectionDraft["sourceKind"] | null {
   const sourceKind = element.getAttribute(CHAT_SELECTION_SOURCE_KIND_ATTRIBUTE);
   return sourceKind === "assistant-message" || sourceKind === "proposed-plan" ? sourceKind : null;
 }
@@ -789,6 +785,8 @@ function artifactKindLabel(kind: AssistantArtifactKind): string {
   switch (kind) {
     case "document":
       return "Document";
+    case "image":
+      return "Image";
     case "markdown":
       return "Markdown";
     case "slides":
@@ -800,9 +798,7 @@ function artifactKindLabel(kind: AssistantArtifactKind): string {
   }
 }
 
-function collectAssistantArtifacts(
-  files: ReadonlyArray<TurnDiffFileChange>,
-): AssistantArtifact[] {
+function collectAssistantArtifacts(files: ReadonlyArray<TurnDiffFileChange>): AssistantArtifact[] {
   const seenPaths = new Set<string>();
   const artifacts: AssistantArtifact[] = [];
   for (const file of files) {
@@ -836,7 +832,7 @@ function collectMentionedAssistantArtifacts(input: {
   const artifacts: AssistantArtifact[] = [];
   const seenPaths = new Set(input.existingPaths);
   const artifactPattern =
-    /(?:^|[\s`"'(])((?:[A-Za-z]:\/)?(?:[\w .@()[\]-]+\/)*[\w .@()[\]-]+\.(?:markdown|mdown|mdx?|mkd|docx|pptx|xlsx|xls|pdf))(?=$|[\s`"',).])/gi;
+    /(?:^|[\s`"'(])((?:[A-Za-z]:\/)?(?:[\w .@()[\]-]+\/)*[\w .@()[\]-]+\.(?:avif|bmp|gif|heic|jpe?g|png|webp|markdown|mdown|mdx?|mkd|docx|pptx|xlsx|xls|pdf))(?=$|[\s`"',).])/gi;
 
   for (const match of normalizedText.matchAll(artifactPattern)) {
     const rawPath = match[1]?.trim();
@@ -1217,7 +1213,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   const heading = toolWorkEntryHeading(workEntry);
   const detailPreview =
     !workEntry.command && workEntry.detail
-      ? workEntry.detail.split(/\r?\n/, 1)[0]?.trim() ?? null
+      ? (workEntry.detail.split(/\r?\n/, 1)[0]?.trim() ?? null)
       : null;
   const displayText = detailPreview ? `${heading} - ${detailPreview}` : heading;
   const hasChangedFiles = (workEntry.changedFiles?.length ?? 0) > 0;
@@ -1239,9 +1235,9 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   const [activeInvocationDiffPath, setActiveInvocationDiffPath] = useState<string | null>(
     primaryInvocationPath,
   );
-  const [parsedByPath, setParsedByPath] = useState<Record<string, RenderableInvocationDiffFile | null>>(
-    {},
-  );
+  const [parsedByPath, setParsedByPath] = useState<
+    Record<string, RenderableInvocationDiffFile | null>
+  >({});
 
   useEffect(() => {
     if (!canExpandInvocationDiff) {
@@ -1305,7 +1301,7 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
     const subagentSummary =
       workEntry.subagentAction?.summaryText ??
       ((workEntry.subagents?.length ?? 0) === 1
-        ? workEntry.subagents?.[0]?.nickname ?? workEntry.subagents?.[0]?.title ?? "Subagent"
+        ? (workEntry.subagents?.[0]?.nickname ?? workEntry.subagents?.[0]?.title ?? "Subagent")
         : `${workEntry.subagents?.length ?? 0} subagents`);
     const subagentMeta = [
       formatSubagentModelLabel(workEntry.subagentAction?.model),
@@ -1322,15 +1318,26 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
     return (
       <div className="space-y-1.5 rounded-md border border-border/35 bg-background/35 px-2 py-1.5">
         <div className="flex min-w-0 items-start gap-2">
-          <span className={cn("mt-0.5 flex size-4.5 shrink-0 items-center justify-center", iconConfig.className)}>
+          <span
+            className={cn(
+              "mt-0.5 flex size-4.5 shrink-0 items-center justify-center",
+              iconConfig.className,
+            )}
+          >
             <EntryIcon className="size-3" />
           </span>
           <div className="min-w-0 flex-1">
-            <p className="truncate text-[11px] font-medium leading-4.5 text-foreground/85" title={subagentSummary}>
+            <p
+              className="truncate text-[11px] font-medium leading-4.5 text-foreground/85"
+              title={subagentSummary}
+            >
               {subagentSummary}
             </p>
             {subagentMeta ? (
-              <p className="truncate text-[10px] leading-4 text-muted-foreground/70" title={subagentMeta}>
+              <p
+                className="truncate text-[10px] leading-4 text-muted-foreground/70"
+                title={subagentMeta}
+              >
                 {subagentMeta}
               </p>
             ) : null}
@@ -1380,12 +1387,18 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                       ) : null}
                     </div>
                     {secondaryLabel ? (
-                      <div className="truncate pt-0.5 text-[10px] leading-4 text-muted-foreground/56" title={secondaryLabel}>
+                      <div
+                        className="truncate pt-0.5 text-[10px] leading-4 text-muted-foreground/56"
+                        title={secondaryLabel}
+                      >
                         {secondaryLabel}
                       </div>
                     ) : null}
                     {subagent.latestUpdate ? (
-                      <div className="flex items-baseline gap-1.5 pt-1 text-[9px] text-muted-foreground/42" title={subagent.latestUpdate}>
+                      <div
+                        className="flex items-baseline gap-1.5 pt-1 text-[9px] text-muted-foreground/42"
+                        title={subagent.latestUpdate}
+                      >
                         <span className="shrink-0 uppercase tracking-[0.14em] text-muted-foreground/30">
                           Latest
                         </span>
@@ -1443,12 +1456,20 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   return (
     <div className="rounded-md border border-border/35 bg-background/35 px-2 py-1.5">
       <div className="flex min-w-0 items-start gap-2">
-        <span className={cn("mt-0.5 flex size-4.5 shrink-0 items-center justify-center", iconConfig.className)}>
+        <span
+          className={cn(
+            "mt-0.5 flex size-4.5 shrink-0 items-center justify-center",
+            iconConfig.className,
+          )}
+        >
           <EntryIcon className="size-3" />
         </span>
         <div className="min-w-0 flex-1 space-y-0.5">
           <div className="flex min-w-0 items-center gap-1.5">
-            <p className="min-w-0 truncate text-[11px] font-medium leading-4.5 text-foreground/85" title={displayText}>
+            <p
+              className="min-w-0 truncate text-[11px] font-medium leading-4.5 text-foreground/85"
+              title={displayText}
+            >
               {heading}
             </p>
             {kindLabel && (
@@ -1466,32 +1487,49 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                 type="button"
                 className="inline-flex shrink-0 items-center gap-1 rounded border border-border/50 px-1 py-0.5 text-[9px] leading-none text-muted-foreground/80 transition-colors duration-150 hover:text-foreground/85"
                 onClick={onToggleInvocationDiff}
-                aria-label={isInvocationDiffExpanded ? "Collapse invocation diff" : "Expand invocation diff"}
+                aria-label={
+                  isInvocationDiffExpanded ? "Collapse invocation diff" : "Expand invocation diff"
+                }
               >
                 <ChevronRightIcon
-                  className={cn("size-2.5 transition-transform duration-150", isInvocationDiffExpanded ? "rotate-90" : "")}
+                  className={cn(
+                    "size-2.5 transition-transform duration-150",
+                    isInvocationDiffExpanded ? "rotate-90" : "",
+                  )}
                 />
                 <span>{isInvocationDiffExpanded ? "Hide diff" : "Show diff"}</span>
               </button>
             )}
           </div>
           {workEntry.command ? (
-            <p className="truncate font-mono text-[10px] leading-4 text-muted-foreground/80" title={workEntry.command}>
+            <p
+              className="truncate font-mono text-[10px] leading-4 text-muted-foreground/80"
+              title={workEntry.command}
+            >
               {workEntry.command}
             </p>
           ) : null}
           {!workEntry.command && detailPreview && detailPreview !== heading && (
-            <p className={cn("truncate text-[10px] leading-4", workToneClass(workEntry.tone))} title={workEntry.detail}>
+            <p
+              className={cn("truncate text-[10px] leading-4", workToneClass(workEntry.tone))}
+              title={workEntry.detail}
+            >
               {detailPreview}
             </p>
           )}
           {primaryInvocationPath && (
-            <span className="block truncate font-mono text-[10px] leading-4 text-muted-foreground/75" title={primaryInvocationPath}>
+            <span
+              className="block truncate font-mono text-[10px] leading-4 text-muted-foreground/75"
+              title={primaryInvocationPath}
+            >
               {primaryInvocationPath}
             </span>
           )}
           {changedFilesLabel && (
-            <span className="block truncate font-mono text-[10px] leading-4 text-muted-foreground/75" title={changedFilesLabel}>
+            <span
+              className="block truncate font-mono text-[10px] leading-4 text-muted-foreground/75"
+              title={changedFilesLabel}
+            >
               {changedFilesLabel}
             </span>
           )}
@@ -1529,7 +1567,9 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
                   />
                 </div>
               ) : (
-                <p className="text-[10px] text-muted-foreground/70">No invocation diff available for this file.</p>
+                <p className="text-[10px] text-muted-foreground/70">
+                  No invocation diff available for this file.
+                </p>
               )}
             </div>
           )}
@@ -2047,10 +2087,14 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
 
     const rowIndex = rows.findIndex((row) => {
       if (row.kind === "message" && row.message.role === "assistant") {
-        return selection.sourceKind === "assistant-message" && row.message.id === selection.sourceId;
+        return (
+          selection.sourceKind === "assistant-message" && row.message.id === selection.sourceId
+        );
       }
       if (row.kind === "proposed-plan") {
-        return selection.sourceKind === "proposed-plan" && row.proposedPlan.id === selection.sourceId;
+        return (
+          selection.sourceKind === "proposed-plan" && row.proposedPlan.id === selection.sourceId
+        );
       }
       return false;
     });

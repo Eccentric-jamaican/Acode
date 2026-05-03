@@ -6,6 +6,10 @@
  *
  * @module ClaudeAdapterLive
  */
+import * as OS from "node:os";
+import * as Path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import {
   type CanUseTool,
   query,
@@ -82,6 +86,8 @@ import {
 import { ClaudeAdapter, type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { normalizeInvocationDiffFiles } from "./InvocationDiffNormalization.ts";
+import { discoverSkillsForCwd } from "./SkillDiscovery.ts";
+import { materializeSkillMentionsForProvider } from "./SkillPromptMaterialization.ts";
 
 const PROVIDER = "claudeAgent" as const;
 type ClaudeTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
@@ -550,9 +556,7 @@ function titleForTool(itemType: CanonicalItemType): string {
   }
 }
 
-function withInvocationDiffData(
-  input: Record<string, unknown>,
-): Record<string, unknown> {
+function withInvocationDiffData(input: Record<string, unknown>): Record<string, unknown> {
   const diffFiles = normalizeInvocationDiffFiles(input);
   if (diffFiles.length === 0) {
     return input;
@@ -576,6 +580,24 @@ const CLAUDE_SETTING_SOURCES = [
   "project",
   "local",
 ] as const satisfies ReadonlyArray<SettingSource>;
+
+function resolveImagegenMcpServerPath(): string {
+  return fileURLToPath(new URL("../../imagegenMcpServer.mjs", import.meta.url));
+}
+
+function buildT3ImagegenMcpServer(
+  cwd: string | undefined,
+): NonNullable<ClaudeQueryOptions["mcpServers"]>[string] {
+  return {
+    type: "stdio",
+    command: process.execPath,
+    args: [resolveImagegenMcpServerPath()],
+    env: {
+      CODEX_HOME: process.env.CODEX_HOME ?? Path.join(OS.homedir(), ".codex"),
+      T3_IMAGEGEN_WORKSPACE: cwd ?? process.cwd(),
+    },
+  };
+}
 
 function buildPromptText(input: ProviderSendTurnInput): string {
   const modelConfig = resolveClaudeModelConfig(input);
@@ -2873,6 +2895,9 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           ...(modelConfig.model ? { model: modelConfig.model } : {}),
           pathToClaudeCodeExecutable: providerOptions?.binaryPath ?? "claude",
           settingSources: [...CLAUDE_SETTING_SOURCES],
+          mcpServers: {
+            t3_imagegen: buildT3ImagegenMcpServer(input.cwd),
+          },
           ...(effectiveEffort ? { effort: effectiveEffort } : {}),
           ...(permissionMode ? { permissionMode } : {}),
           ...(permissionMode === "bypassPermissions"
@@ -3077,7 +3102,15 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           providerRefs: {},
         });
 
-        const message = yield* buildUserMessageEffect(input, {
+        const messageInput: ProviderSendTurnInput = {
+          ...input,
+          input: materializeSkillMentionsForProvider({
+            cwd: context.session.cwd ?? serverConfig.cwd,
+            prompt: input.input?.trim() ?? "",
+            providerName: "Claude",
+          }),
+        };
+        const message = yield* buildUserMessageEffect(messageInput, {
           fileSystem,
           stateDir: serverConfig.stateDir,
         });
@@ -3258,11 +3291,11 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
       });
 
     const listSkills: NonNullable<ClaudeAdapterShape["listSkills"]> = (
-      _input: ProviderListSkillsInput,
+      input: ProviderListSkillsInput,
     ) =>
       Effect.succeed({
-        skills: [],
-        source: "unsupported",
+        skills: discoverSkillsForCwd(input.cwd),
+        source: "local-scan",
         cached: false,
       } satisfies ProviderListSkillsResult);
 
@@ -3289,23 +3322,24 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
 
     const composerCapabilities: ProviderComposerCapabilities = {
       provider: PROVIDER,
-      supportsSkillMentions: false,
-      supportsSkillDiscovery: false,
+      supportsSkillMentions: true,
+      supportsSkillDiscovery: true,
       supportsNativeSlashCommandDiscovery: true,
       supportsPluginMentions: false,
       supportsPluginDiscovery: false,
       supportsRuntimeModelList: false,
     };
 
-    const getComposerCapabilities: NonNullable<ClaudeAdapterShape["getComposerCapabilities"]> = () =>
-      Effect.succeed(composerCapabilities);
+    const getComposerCapabilities: NonNullable<
+      ClaudeAdapterShape["getComposerCapabilities"]
+    > = () => Effect.succeed(composerCapabilities);
 
     return {
       provider: PROVIDER,
       capabilities: {
         sessionModelSwitch: "in-session",
-        supportsSkillMentions: false,
-        supportsSkillDiscovery: false,
+        supportsSkillMentions: true,
+        supportsSkillDiscovery: true,
         supportsNativeSlashCommandDiscovery: true,
         supportsPluginMentions: false,
         supportsPluginDiscovery: false,
