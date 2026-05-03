@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.42] - 2026-05-02
+
+### Added
+- Added first-class Markdown artifact cards for assistant-created or edited `.md`, `.mdx`, `.markdown`, `.mdown`, and `.mkd` files.
+
+### Changed
+- Reduced long-thread memory pressure by mounting fewer inactive tail rows and lowering timeline virtualizer overscan once conversations grow large.
+- Reduced chat markdown highlighter memory use and skipped expensive syntax highlighting for streaming or very large code blocks.
+
+### Fixed
+- Hardened long-thread timeline rendering with row layout containment to reduce jumbled or overlapping text on lower-memory machines.
+
 ## [0.2.41] - 2026-05-02
 
 ### Added

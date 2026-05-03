@@ -39,8 +39,9 @@ interface ChatMarkdownProps {
 }
 
 const CODE_FENCE_LANGUAGE_REGEX = /(?:^|\s)language-([^\s]+)/;
-const MAX_HIGHLIGHT_CACHE_ENTRIES = 500;
-const MAX_HIGHLIGHT_CACHE_MEMORY_BYTES = 50 * 1024 * 1024;
+const MAX_HIGHLIGHT_CACHE_ENTRIES = 250;
+const MAX_HIGHLIGHT_CACHE_MEMORY_BYTES = 20 * 1024 * 1024;
+const MAX_HIGHLIGHTED_CODE_CHARS = 40_000;
 const highlightedCodeCache = new LRUCache<string>(
   MAX_HIGHLIGHT_CACHE_ENTRIES,
   MAX_HIGHLIGHT_CACHE_MEMORY_BYTES,
@@ -266,6 +267,16 @@ function ChatMarkdown({
         const codeBlock = extractCodeBlock(children);
         if (!codeBlock) {
           return <pre {...props}>{children}</pre>;
+        }
+
+        if (isStreaming || codeBlock.code.length > MAX_HIGHLIGHTED_CODE_CHARS) {
+          return (
+            <MarkdownCodeBlock code={codeBlock.code}>
+              <pre {...props}>
+                <code className={codeBlock.className}>{codeBlock.code}</code>
+              </pre>
+            </MarkdownCodeBlock>
+          );
         }
 
         return (

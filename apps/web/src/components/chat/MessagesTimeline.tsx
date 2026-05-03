@@ -109,6 +109,10 @@ import { normalizeCompactToolLabel } from "./MessagesTimeline.logic";
 
 const MAX_VISIBLE_WORK_LOG_ENTRIES = 6;
 const ALWAYS_UNVIRTUALIZED_TAIL_ROWS = 8;
+const LARGE_THREAD_ROW_COUNT = 180;
+const HUGE_THREAD_ROW_COUNT = 420;
+const LARGE_THREAD_UNVIRTUALIZED_TAIL_ROWS = 5;
+const HUGE_THREAD_UNVIRTUALIZED_TAIL_ROWS = 3;
 const CHAT_SELECTION_REGION_ATTRIBUTE = "data-chat-selection-region";
 const CHAT_SELECTION_REGION_VALUE = "assistant-output";
 const CHAT_SELECTION_SOURCE_KIND_ATTRIBUTE = "data-chat-selection-source-kind";
@@ -126,12 +130,15 @@ const CHAT_SELECTION_IGNORE_SELECTOR =
 const EMPTY_INVOCATION_DIFF_FILES: ReadonlyArray<InvocationDiffFile> = [];
 const LEADING_PROVIDER_MENTION_PATTERN = /^([$/])([^\s]+)(?=\s|$)/;
 
-type AssistantArtifactKind = "document" | "slides" | "spreadsheet" | "pdf";
+type AssistantArtifactKind = "document" | "markdown" | "slides" | "spreadsheet" | "pdf";
 
 const ASSISTANT_ARTIFACT_EXTENSIONS: ReadonlyMap<string, AssistantArtifactKind> = new Map([
-  ["md", "document"],
-  ["mdx", "document"],
   ["docx", "document"],
+  ["markdown", "markdown"],
+  ["md", "markdown"],
+  ["mdown", "markdown"],
+  ["mdx", "markdown"],
+  ["mkd", "markdown"],
   ["pptx", "slides"],
   ["xls", "spreadsheet"],
   ["xlsx", "spreadsheet"],
@@ -782,6 +789,8 @@ function artifactKindLabel(kind: AssistantArtifactKind): string {
   switch (kind) {
     case "document":
       return "Document";
+    case "markdown":
+      return "Markdown";
     case "slides":
       return "Slides";
     case "spreadsheet":
@@ -827,7 +836,7 @@ function collectMentionedAssistantArtifacts(input: {
   const artifacts: AssistantArtifact[] = [];
   const seenPaths = new Set(input.existingPaths);
   const artifactPattern =
-    /(?:^|[\s`"'(])((?:[A-Za-z]:\/)?(?:[\w .@()[\]-]+\/)*[\w .@()[\]-]+\.(?:mdx?|docx|pptx|xlsx|xls|pdf))(?=$|[\s`"',).])/gi;
+    /(?:^|[\s`"'(])((?:[A-Za-z]:\/)?(?:[\w .@()[\]-]+\/)*[\w .@()[\]-]+\.(?:markdown|mdown|mdx?|mkd|docx|pptx|xlsx|xls|pdf))(?=$|[\s`"',).])/gi;
 
   for (const match of normalizedText.matchAll(artifactPattern)) {
     const rawPath = match[1]?.trim();
@@ -1919,8 +1928,20 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
     schedulePinnedSelectionMarkersUpdate();
   }, [pinnedSelections, schedulePinnedSelectionMarkersUpdate]);
 
+  const tailRowsToKeepMounted = useMemo(() => {
+    if (rows.length >= HUGE_THREAD_ROW_COUNT) return HUGE_THREAD_UNVIRTUALIZED_TAIL_ROWS;
+    if (rows.length >= LARGE_THREAD_ROW_COUNT) return LARGE_THREAD_UNVIRTUALIZED_TAIL_ROWS;
+    return ALWAYS_UNVIRTUALIZED_TAIL_ROWS;
+  }, [rows.length]);
+
+  const virtualizerOverscan = useMemo(() => {
+    if (rows.length >= HUGE_THREAD_ROW_COUNT) return 2;
+    if (rows.length >= LARGE_THREAD_ROW_COUNT) return 4;
+    return 6;
+  }, [rows.length]);
+
   const firstUnvirtualizedRowIndex = useMemo(() => {
-    const firstTailRowIndex = Math.max(rows.length - ALWAYS_UNVIRTUALIZED_TAIL_ROWS, 0);
+    const firstTailRowIndex = Math.max(rows.length - tailRowsToKeepMounted, 0);
     if (!activeTurnInProgress) return firstTailRowIndex;
 
     const turnStartedAtMs =
@@ -1955,7 +1976,7 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
     }
 
     return Math.min(firstCurrentTurnRowIndex, firstTailRowIndex);
-  }, [activeTurnInProgress, activeTurnStartedAt, rows]);
+  }, [activeTurnInProgress, activeTurnStartedAt, rows, tailRowsToKeepMounted]);
 
   const virtualizedRowCount = clamp(firstUnvirtualizedRowIndex, {
     minimum: 0,
@@ -1976,7 +1997,7 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
     },
     measureElement: measureVirtualElement,
     useAnimationFrameWithResizeObserver: true,
-    overscan: 8,
+    overscan: virtualizerOverscan,
   });
 
   useEffect(() => {
@@ -2556,7 +2577,10 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
                 data-index={virtualRow.index}
                 ref={rowVirtualizer.measureElement}
                 className="absolute left-0 top-0 w-full"
-                style={{ transform: `translateY(${virtualRow.start}px)` }}
+                style={{
+                  contain: "layout paint style",
+                  transform: `translateY(${virtualRow.start}px)`,
+                }}
               >
                 {renderRowContent(row)}
               </div>
@@ -2566,7 +2590,9 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
       )}
 
       {nonVirtualizedRows.map((row) => (
-        <div key={`non-virtual-row:${row.id}`}>{renderRowContent(row)}</div>
+        <div key={`non-virtual-row:${row.id}`} style={{ contain: "layout paint style" }}>
+          {renderRowContent(row)}
+        </div>
       ))}
       {selectionActionOverlay}
       {pinnedSelectionMarkersOverlay}
