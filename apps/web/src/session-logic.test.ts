@@ -628,6 +628,64 @@ describe("deriveWorkLogEntries", () => {
     expect(entry?.invocationDiffStat).toBeUndefined();
   });
 
+  it("surfaces generated image artifacts from image tool payloads", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "image-tool",
+        kind: "tool.completed",
+        summary: "Image view",
+        payload: {
+          itemType: "image_view",
+          title: "Image view",
+          data: {
+            generatedImagePath: "C:\\Users\\Addis\\.codex\\generated_images\\thread-1\\ig_123.png",
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities, undefined);
+    expect(entry?.generatedImages).toEqual([
+      {
+        cwd: "C:/Users/Addis/.codex/generated_images/thread-1",
+        label: "Generated image",
+        path: "ig_123.png",
+      },
+    ]);
+  });
+
+  it("surfaces native Codex image generation results as previewable artifacts", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "native-image-tool",
+        kind: "tool.completed",
+        summary: "Image view",
+        payload: {
+          itemType: "image_view",
+          title: "Image view",
+          data: {
+            item: {
+              type: "imageGeneration",
+              id: "ig_456",
+              result: "iVBORw0KGgoAAAANSUhEUgAAAAE=",
+            },
+            threadId: "codex-thread-1",
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities, undefined);
+    expect(entry?.generatedImages).toEqual([
+      {
+        label: "Generated image",
+        path: "ig_456.png",
+        previewUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAE=",
+        providerThreadId: "codex-thread-1",
+      },
+    ]);
+  });
+
   it("orders work log by activity sequence when present", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

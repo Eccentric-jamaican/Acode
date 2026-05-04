@@ -3,7 +3,7 @@ import {
   type DiffsHighlighter,
   type SupportedLanguages,
 } from "@pierre/diffs";
-import { CheckIcon, CopyIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, FileIcon } from "lucide-react";
 import {
   Children,
   Suspense,
@@ -29,6 +29,7 @@ import { resolveMarkdownFileLinkTarget, resolveMarkdownFileViewerPath } from "..
 import { readNativeApi } from "../nativeApi";
 import { preferredTerminalEditor } from "../terminal-links";
 import { cn } from "../lib/utils";
+import { getVscodeIconUrlForEntry } from "../vscode-icons";
 
 interface ChatMarkdownProps {
   text: string;
@@ -42,6 +43,7 @@ const CODE_FENCE_LANGUAGE_REGEX = /(?:^|\s)language-([^\s]+)/;
 const MAX_HIGHLIGHT_CACHE_ENTRIES = 250;
 const MAX_HIGHLIGHT_CACHE_MEMORY_BYTES = 20 * 1024 * 1024;
 const MAX_HIGHLIGHTED_CODE_CHARS = 40_000;
+const EDITOR_POSITION_SUFFIX_PATTERN = /:\d+(?::\d+)?$/;
 const highlightedCodeCache = new LRUCache<string>(
   MAX_HIGHLIGHT_CACHE_ENTRIES,
   MAX_HIGHLIGHT_CACHE_MEMORY_BYTES,
@@ -98,6 +100,10 @@ function createHighlightCacheKey(code: string, language: string, themeName: Diff
 
 function estimateHighlightedSize(html: string, code: string): number {
   return Math.max(html.length * 2, code.length * 3);
+}
+
+function fileIconPathValue(pathValue: string): string {
+  return pathValue.replace(EDITOR_POSITION_SUFFIX_PATTERN, "").replaceAll("\\", "/");
 }
 
 function getHighlighterPromise(language: string): Promise<ResolvedHighlighter> {
@@ -177,6 +183,33 @@ function MarkdownCodeBlock({ code, children }: { code: string; children: ReactNo
   );
 }
 
+const MarkdownFileLinkIcon = memo(function MarkdownFileLinkIcon(props: {
+  targetPath: string;
+  theme: "light" | "dark";
+}) {
+  const pathValue = fileIconPathValue(props.targetPath);
+  const [failedIconUrl, setFailedIconUrl] = useState<string | null>(null);
+  const iconUrl = useMemo(
+    () => getVscodeIconUrlForEntry(pathValue, "file", props.theme),
+    [pathValue, props.theme],
+  );
+
+  if (failedIconUrl === iconUrl) {
+    return <FileIcon aria-hidden="true" className="chat-markdown-file-link-icon" />;
+  }
+
+  return (
+    <img
+      src={iconUrl}
+      alt=""
+      aria-hidden="true"
+      className="chat-markdown-file-link-icon"
+      loading="lazy"
+      onError={() => setFailedIconUrl(iconUrl)}
+    />
+  );
+});
+
 interface SuspenseShikiCodeBlockProps {
   className: string | undefined;
   code: string;
@@ -246,6 +279,7 @@ function ChatMarkdown({
           <a
             {...props}
             href={href}
+            className={cn("chat-markdown-file-link", props.className)}
             onClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
@@ -260,7 +294,10 @@ function ChatMarkdown({
                 console.warn("Native API not found. Unable to open file in editor.");
               }
             }}
-          />
+          >
+            <MarkdownFileLinkIcon targetPath={targetPath} theme={resolvedTheme} />
+            {props.children}
+          </a>
         );
       },
       pre({ node: _node, children, ...props }) {
@@ -293,7 +330,7 @@ function ChatMarkdown({
         );
       },
     }),
-    [cwd, diffThemeName, isStreaming, onOpenFilePath],
+    [cwd, diffThemeName, isStreaming, onOpenFilePath, resolvedTheme],
   );
 
   return (

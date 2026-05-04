@@ -18,12 +18,17 @@ export interface FilePanelThreadState {
   plainViewMarkdownFiles: string[];
   noWrapCodeFiles: string[];
   cwdByFilePath: Record<string, string>;
+  displayNameByFilePath: Record<string, string>;
   commentsByFilePath: Record<string, FilePanelComment[]>;
 }
 
 interface FilePanelStore {
   byThreadId: Record<string, FilePanelThreadState | undefined>;
-  openFile: (threadId: ThreadId, path: string, options?: { cwd?: string | undefined }) => void;
+  openFile: (
+    threadId: ThreadId,
+    path: string,
+    options?: { cwd?: string | undefined; displayName?: string | undefined },
+  ) => void;
   closeFile: (threadId: ThreadId, path: string) => void;
   selectReview: (threadId: ThreadId) => void;
   toggleDirectory: (threadId: ThreadId, path: string) => void;
@@ -49,6 +54,7 @@ const DEFAULT_FILE_PANEL_THREAD_STATE: FilePanelThreadState = {
   plainViewMarkdownFiles: [],
   noWrapCodeFiles: [],
   cwdByFilePath: {},
+  displayNameByFilePath: {},
   commentsByFilePath: {},
 };
 
@@ -60,6 +66,7 @@ function createDefaultThreadState(): FilePanelThreadState {
     plainViewMarkdownFiles: [],
     noWrapCodeFiles: [],
     cwdByFilePath: {},
+    displayNameByFilePath: {},
     commentsByFilePath: {},
   };
 }
@@ -83,12 +90,14 @@ function normalizeFilePanelThreadState(
     plainViewMarkdownFiles: Array.isArray(threadState.plainViewMarkdownFiles)
       ? threadState.plainViewMarkdownFiles
       : [],
-    noWrapCodeFiles: Array.isArray(threadState.noWrapCodeFiles)
-      ? threadState.noWrapCodeFiles
-      : [],
+    noWrapCodeFiles: Array.isArray(threadState.noWrapCodeFiles) ? threadState.noWrapCodeFiles : [],
     cwdByFilePath:
       threadState.cwdByFilePath && typeof threadState.cwdByFilePath === "object"
         ? threadState.cwdByFilePath
+        : {},
+    displayNameByFilePath:
+      threadState.displayNameByFilePath && typeof threadState.displayNameByFilePath === "object"
+        ? threadState.displayNameByFilePath
         : {},
     commentsByFilePath:
       threadState.commentsByFilePath && typeof threadState.commentsByFilePath === "object"
@@ -131,14 +140,19 @@ export const useFilePanelStore = create<FilePanelStore>()(
         set((state) => ({
           byThreadId: nextThreadState(state.byThreadId, threadId, (threadState) => {
             const requestedCwd = options?.cwd?.trim();
+            const requestedDisplayName = options?.displayName?.trim();
             const cwdByFilePath = requestedCwd
               ? { ...threadState.cwdByFilePath, [path]: requestedCwd }
               : threadState.cwdByFilePath;
+            const displayNameByFilePath = requestedDisplayName
+              ? { ...threadState.displayNameByFilePath, [path]: requestedDisplayName }
+              : threadState.displayNameByFilePath;
             if (
               threadState.activeTab.kind === "file" &&
               threadState.activeTab.path === path &&
               threadState.openFiles.includes(path) &&
-              cwdByFilePath === threadState.cwdByFilePath
+              cwdByFilePath === threadState.cwdByFilePath &&
+              displayNameByFilePath === threadState.displayNameByFilePath
             ) {
               return threadState;
             }
@@ -149,6 +163,7 @@ export const useFilePanelStore = create<FilePanelStore>()(
               ...threadState,
               openFiles,
               cwdByFilePath,
+              displayNameByFilePath,
               activeTab: { kind: "file", path },
             };
           }),
@@ -161,6 +176,8 @@ export const useFilePanelStore = create<FilePanelStore>()(
             }
             const openFiles = threadState.openFiles.filter((entry) => entry !== path);
             const { [path]: _removedCwd, ...cwdByFilePath } = threadState.cwdByFilePath;
+            const { [path]: _removedDisplayName, ...displayNameByFilePath } =
+              threadState.displayNameByFilePath;
             const activeTab =
               threadState.activeTab.kind === "file" && threadState.activeTab.path === path
                 ? openFiles[0]
@@ -171,6 +188,7 @@ export const useFilePanelStore = create<FilePanelStore>()(
               ...threadState,
               openFiles,
               cwdByFilePath,
+              displayNameByFilePath,
               activeTab,
             };
           }),
@@ -304,9 +322,12 @@ export const useFilePanelStore = create<FilePanelStore>()(
       storage: createJSONStorage(() => localStorage),
       merge: (persistedState, currentState) => {
         const normalizedByThreadId = Object.fromEntries(
-          Object.entries((persistedState as Partial<FilePanelStore> | undefined)?.byThreadId ?? {}).map(
-            ([threadId, threadState]) => [threadId, normalizeFilePanelThreadState(threadState)],
-          ),
+          Object.entries(
+            (persistedState as Partial<FilePanelStore> | undefined)?.byThreadId ?? {},
+          ).map(([threadId, threadState]) => [
+            threadId,
+            normalizeFilePanelThreadState(threadState),
+          ]),
         ) as Record<string, FilePanelThreadState | undefined>;
 
         return {

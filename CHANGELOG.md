@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.44] - 2026-05-03
+
+### Added
+- Added a minimal Codex-style branch details rail with progress, artifacts, sources, and inline git actions.
+- Added first-class generated image artifact handling so Codex image output can render inline and remain visible across later turns.
+- Added provider-neutral progress collection for task/todo/plan-style events from supported agent providers.
+
+### Changed
+- Updated Codex defaults to GPT-5.5 with medium reasoning.
+- Refined generated image previews with quieter Codex-like styling, aspect-ratio-aware sizing, and human-readable artifact labels.
+- Moved branch change counts into the branch details rail and kept the rail hidden while the review/sidebar panel is open.
+- Improved Markdown file links with file-type icons for easier scanning.
+
+### Fixed
+- Fixed generated image history being overwritten when a later image was produced in the same thread.
+- Fixed generated image artifacts opening with raw generated ids instead of friendly names where a better label is available.
+- Fixed stale release tests for the updated Codex model and reasoning defaults.
+
 ## [0.2.43] - 2026-05-03
 
 ### Added

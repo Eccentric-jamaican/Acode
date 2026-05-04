@@ -40,7 +40,11 @@ import * as XLSX from "xlsx";
 
 import { parseDiffRouteSearch } from "../diffRouteSearch";
 import { isElectronRuntime } from "../env";
-import { useFilePanelStore, getFilePanelThreadState, type FilePanelComment } from "../filePanelStore";
+import {
+  useFilePanelStore,
+  getFilePanelThreadState,
+  type FilePanelComment,
+} from "../filePanelStore";
 import { useTheme } from "../hooks/useTheme";
 import { buildPatchCacheKey, resolveDiffThemeName } from "../lib/diffRendering";
 import {
@@ -50,7 +54,10 @@ import {
   gitStatusQueryOptions,
 } from "../lib/gitReactQuery";
 import { checkpointDiffQueryOptions } from "../lib/providerReactQuery";
-import { projectFileMetadataQueryOptions, projectReadFileQueryOptions } from "../lib/projectReactQuery";
+import {
+  projectFileMetadataQueryOptions,
+  projectReadFileQueryOptions,
+} from "../lib/projectReactQuery";
 import { normalizeSyntaxLanguage } from "../lib/syntaxLanguage";
 import { cn } from "../lib/utils";
 import { readNativeApi } from "../nativeApi";
@@ -69,10 +76,7 @@ interface DiffPanelProps {
 export { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
 
 type PdfJsMapCompatibilityPrototype = Map<unknown, unknown> & {
-  getOrInsertComputed?: (
-    key: unknown,
-    callback: (key: unknown) => unknown,
-  ) => unknown;
+  getOrInsertComputed?: (key: unknown, callback: (key: unknown) => unknown) => unknown;
 };
 
 function pdfJsMapGetOrInsertComputed(
@@ -125,7 +129,9 @@ function isMarkdownFile(filePath: string): boolean {
   return extension === "md" || extension === "mdx" || extension === "markdown";
 }
 
-function officeDocumentKind(filePath: string): "spreadsheet" | "document" | "slides" | "pdf" | null {
+function officeDocumentKind(
+  filePath: string,
+): "spreadsheet" | "document" | "slides" | "pdf" | null {
   const extension = filePath.split(".").pop()?.toLowerCase() ?? "";
   if (extension === "xls" || extension === "xlsx") return "spreadsheet";
   if (extension === "docx") return "document";
@@ -152,7 +158,9 @@ function previewMediaKind(filePath: string): "image" | null {
   return null;
 }
 
-function previewFileKind(filePath: string): "spreadsheet" | "document" | "slides" | "pdf" | "image" | null {
+function previewFileKind(
+  filePath: string,
+): "spreadsheet" | "document" | "slides" | "pdf" | "image" | null {
   return officeDocumentKind(filePath) ?? previewMediaKind(filePath);
 }
 
@@ -177,7 +185,9 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     activeProjectId ? store.projects.find((project) => project.id === activeProjectId) : undefined,
   );
   const activeCwd = activeThread?.worktreePath ?? activeProject?.cwd ?? null;
-  const filePanelState = useFilePanelStore((store) => getFilePanelThreadState(store, activeThreadId));
+  const filePanelState = useFilePanelStore((store) =>
+    getFilePanelThreadState(store, activeThreadId),
+  );
   const openFile = useFilePanelStore((store) => store.openFile);
   const closeFile = useFilePanelStore((store) => store.closeFile);
   const selectReview = useFilePanelStore((store) => store.selectReview);
@@ -194,9 +204,12 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     openFile(activeThreadId, diffSearch.diffFilePath);
   }, [activeThreadId, diffSearch.diffFilePath, openFile]);
 
-  const activeFilePath = filePanelState.activeTab.kind === "file" ? filePanelState.activeTab.path : null;
+  const activeFilePath =
+    filePanelState.activeTab.kind === "file" ? filePanelState.activeTab.path : null;
   const activeFileCwd =
-    activeFilePath !== null ? (filePanelState.cwdByFilePath[activeFilePath] ?? activeCwd) : activeCwd;
+    activeFilePath !== null
+      ? (filePanelState.cwdByFilePath[activeFilePath] ?? activeCwd)
+      : activeCwd;
   const markdownRichViewEnabled = Boolean(
     activeFilePath && !filePanelState.plainViewMarkdownFiles.includes(activeFilePath),
   );
@@ -235,6 +248,10 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
     return activeFilePath.split("/").filter((segment) => segment.length > 0);
   }, [activeFilePath]);
   const activeFileName = breadcrumbs.at(-1) ?? null;
+  const activeFileDisplayName =
+    activeFilePath !== null
+      ? (filePanelState.displayNameByFilePath[activeFilePath] ?? activeFileName)
+      : activeFileName;
   const showFileSubheader = activeFilePath !== null && activeFileDocumentKind === null;
   useEffect(() => {
     if (activeFileDocumentKind === null || activeFileCwd === null || activeFilePath === null) {
@@ -288,7 +305,9 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
 
   const headerRowClassName = cn(
     "desktop-top-edge-actions-safe flex min-w-0 items-end gap-2 border-b border-border/45 bg-muted/18 px-3",
-    usesDesktopAppChrome && mode !== "sheet" ? "h-[var(--app-desktop-content-header-height)]" : "h-11",
+    usesDesktopAppChrome && mode !== "sheet"
+      ? "h-[var(--app-desktop-content-header-height)]"
+      : "h-11",
   );
 
   return (
@@ -303,7 +322,9 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
       <div className="shrink-0 border-b border-border/60 bg-background">
         <div
           className={headerRowClassName}
-          data-testid={usesDesktopAppChrome && mode !== "sheet" ? "diff-panel-top-header" : undefined}
+          data-testid={
+            usesDesktopAppChrome && mode !== "sheet" ? "diff-panel-top-header" : undefined
+          }
         >
           <div className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden">
             <div className="flex min-w-max items-end gap-0">
@@ -321,6 +342,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
                 <ViewerFileTab
                   key={filePath}
                   filePath={filePath}
+                  displayName={filePanelState.displayNameByFilePath[filePath]}
                   active={activeFilePath === filePath}
                   onSelect={() => {
                     if (activeThreadId) {
@@ -340,19 +362,21 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
         {filePanelState.activeTab.kind === "file" && showFileSubheader ? (
           <div className="desktop-top-edge-actions-safe flex h-11 items-center justify-between gap-3 px-4 text-[12px] text-muted-foreground/72">
             {activeFilePath ? (
-            <div className="min-w-0" data-testid="viewer-breadcrumbs">
-              <div className="truncate text-[13px] font-medium text-foreground/88">
-                {activeFileName}
+              <div className="min-w-0" data-testid="viewer-breadcrumbs">
+                <div className="truncate text-[13px] font-medium text-foreground/88">
+                  {activeFileDisplayName}
+                </div>
+                <div className="mt-0.5 flex min-w-0 items-center overflow-hidden whitespace-nowrap text-[11px]">
+                  {breadcrumbs.slice(0, -1).map((segment, index) => (
+                    <span key={breadcrumbs.slice(0, index + 1).join("/")} className="contents">
+                      {index > 0 ? (
+                        <ChevronRightIcon className="mx-0.5 size-3 shrink-0 opacity-45" />
+                      ) : null}
+                      <span className="truncate">{segment}</span>
+                    </span>
+                  ))}
+                </div>
               </div>
-              <div className="mt-0.5 flex min-w-0 items-center overflow-hidden whitespace-nowrap text-[11px]">
-                {breadcrumbs.slice(0, -1).map((segment, index) => (
-                  <span key={breadcrumbs.slice(0, index + 1).join("/")} className="contents">
-                    {index > 0 ? <ChevronRightIcon className="mx-0.5 size-3 shrink-0 opacity-45" /> : null}
-                    <span className="truncate">{segment}</span>
-                  </span>
-                ))}
-              </div>
-            </div>
             ) : (
               <span className="truncate text-[13px] font-medium text-foreground/84">File</span>
             )}
@@ -447,8 +471,8 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
               previewFileKind(activeFilePath) !== null
                 ? "Preview is available, but the running server returned the old binary-file response. Restart the T3 server and reopen this file."
                 : "message" in activeFileQuery.data
-                ? activeFileQuery.data.message
-                : "File unavailable."
+                  ? activeFileQuery.data.message
+                  : "File unavailable."
             }
           />
         ) : activeFilePath !== null && activeFileQuery.data?.status === "text" ? (
@@ -511,11 +535,12 @@ function ViewerTabButton(props: { active: boolean; onClick: () => void; children
 
 function ViewerFileTab(props: {
   filePath: string;
+  displayName?: string | undefined;
   active: boolean;
   onSelect: () => void;
   onClose: () => void;
 }) {
-  const label = props.filePath.split("/").at(-1) ?? props.filePath;
+  const label = props.displayName ?? props.filePath.split("/").at(-1) ?? props.filePath;
   return (
     <div
       className={cn(
@@ -701,7 +726,8 @@ function ReviewSurface(props: {
     gitReviewActionMutationOptions({ cwd: props.cwd, queryClient }),
   );
   const themeName = resolveDiffThemeName(props.theme);
-  const patch = scope === "last-turn" ? (lastTurnDiffQuery.data?.diff ?? "") : (diffQuery.data?.patch ?? "");
+  const patch =
+    scope === "last-turn" ? (lastTurnDiffQuery.data?.diff ?? "") : (diffQuery.data?.patch ?? "");
   const hasPatch = patch.trim().length > 0;
   const reviewFiles = useMemo(() => parseReviewPatchFiles(patch), [patch]);
   const reviewStats = useMemo(() => summarizeReviewFiles(reviewFiles), [reviewFiles]);
@@ -771,10 +797,7 @@ function ReviewSurface(props: {
             <ReviewScopeButton active={scope === "branch"} onClick={() => setScope("branch")}>
               Branch
             </ReviewScopeButton>
-            <ReviewScopeButton
-              active={scope === "last-turn"}
-              onClick={() => setScope("last-turn")}
-            >
+            <ReviewScopeButton active={scope === "last-turn"} onClick={() => setScope("last-turn")}>
               Last turn
             </ReviewScopeButton>
           </div>
@@ -783,12 +806,7 @@ function ReviewSurface(props: {
           <Menu>
             <MenuTrigger
               render={
-                <Button
-                  type="button"
-                  size="icon-xs"
-                  variant="ghost"
-                  aria-label="Review options"
-                />
+                <Button type="button" size="icon-xs" variant="ghost" aria-label="Review options" />
               }
             >
               <EllipsisIcon className="size-3.5" />
@@ -807,9 +825,7 @@ function ReviewSurface(props: {
                 {collapsed ? "Expand all diffs" : "Collapse all diffs"}
               </MenuItem>
               <MenuItem
-                onClick={() =>
-                  setDiffStyle((value) => (value === "unified" ? "split" : "unified"))
-                }
+                onClick={() => setDiffStyle((value) => (value === "unified" ? "split" : "unified"))}
               >
                 <SplitSquareHorizontalIcon className="size-3.5 text-muted-foreground" />
                 {diffStyle === "unified" ? "Use split diff" : "Use unified diff"}
@@ -981,13 +997,12 @@ function parseReviewPatchFiles(patch: string): FileDiffMetadata[] {
   if (trimmed.length === 0) {
     return [];
   }
-  const parsedFiles = parsePatchFiles(trimmed, "review").flatMap((parsedPatch) => parsedPatch.files);
+  const parsedFiles = parsePatchFiles(trimmed, "review").flatMap(
+    (parsedPatch) => parsedPatch.files,
+  );
   const binaryFiles = parseBinaryReviewPatchFiles(trimmed);
   const parsedNames = new Set(parsedFiles.map((file) => file.name));
-  return [
-    ...parsedFiles,
-    ...binaryFiles.filter((file) => !parsedNames.has(file.name)),
-  ];
+  return [...parsedFiles, ...binaryFiles.filter((file) => !parsedNames.has(file.name))];
 }
 
 function parseBinaryReviewPatchFiles(patch: string): FileDiffMetadata[] {
@@ -998,10 +1013,7 @@ function parseBinaryReviewPatchFiles(patch: string): FileDiffMetadata[] {
     const previousName = match[1] ?? "";
     const name = match[2] ?? previousName;
     const nextHeaderIndex = patch.indexOf("\ndiff --git ", diffHeaderPattern.lastIndex);
-    const section = patch.slice(
-      match.index,
-      nextHeaderIndex >= 0 ? nextHeaderIndex : patch.length,
-    );
+    const section = patch.slice(match.index, nextHeaderIndex >= 0 ? nextHeaderIndex : patch.length);
     if (!/Binary files .* differ|GIT binary patch/.test(section)) {
       continue;
     }
@@ -1336,11 +1348,7 @@ function PanelEmptyState(props: { message: string }) {
   );
 }
 
-function MarkdownFileViewer(props: {
-  filePath: string;
-  contents: string;
-  cwd: string | null;
-}) {
+function MarkdownFileViewer(props: { filePath: string; contents: string; cwd: string | null }) {
   return (
     <div className="h-full overflow-auto bg-background">
       <div className="px-6 py-6">
@@ -1504,7 +1512,11 @@ function OfficeDocumentViewer(props: {
   }
 
   if (kind === "document") {
-    return docx ? <WordPreview document={docx} /> : <PanelEmptyState message="Loading document..." />;
+    return docx ? (
+      <WordPreview document={docx} />
+    ) : (
+      <PanelEmptyState message="Loading document..." />
+    );
   }
 
   return pptx ? (
@@ -1524,7 +1536,9 @@ function SpreadsheetPreview(props: { workbook: XLSX.WorkBook | null }) {
   const rows = useMemo(() => {
     if (!props.workbook || !activeSheetName) return [];
     const sheet = props.workbook.Sheets[activeSheetName];
-    return sheet ? XLSX.utils.sheet_to_json<Array<string | number | boolean | null>>(sheet, { header: 1 }) : [];
+    return sheet
+      ? XLSX.utils.sheet_to_json<Array<string | number | boolean | null>>(sheet, { header: 1 })
+      : [];
   }, [activeSheetName, props.workbook]);
 
   if (!props.workbook || !activeSheetName) {
@@ -1684,8 +1698,7 @@ function PdfPage(props: { document: PDFDocumentProxy; pageNumber: number }) {
         context.fillStyle = "#ffffff";
         context.fillRect(0, 0, canvas.width, canvas.height);
         context.restore();
-        const transform =
-          outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0];
+        const transform = outputScale === 1 ? undefined : [outputScale, 0, 0, outputScale, 0, 0];
         const renderTask = page.render({
           annotationMode: AnnotationMode.ENABLE_STORAGE,
           background: "rgb(255, 255, 255)",
@@ -1728,18 +1741,16 @@ function PdfPage(props: { document: PDFDocumentProxy; pageNumber: number }) {
       />
       {renderState !== "rendered" ? (
         <div className="absolute inset-0 flex items-center justify-center rounded-md bg-white text-xs text-muted-foreground/70">
-          {renderState === "error" ? (errorMessage ?? "Unable to render this page.") : "Loading page..."}
+          {renderState === "error"
+            ? (errorMessage ?? "Unable to render this page.")
+            : "Loading page..."}
         </div>
       ) : null}
     </div>
   );
 }
 
-function ImagePreview(props: {
-  contentsBase64: string;
-  filePath: string;
-  mimeType: string;
-}) {
+function ImagePreview(props: { contentsBase64: string; filePath: string; mimeType: string }) {
   const imageUrl = useMemo(
     () => `data:${props.mimeType};base64,${props.contentsBase64}`,
     [props.contentsBase64, props.mimeType],
@@ -2089,7 +2100,9 @@ function LineCommentCard(props: {
           </>
         ) : (
           <>
-            <p className="whitespace-pre-wrap break-words text-foreground/84">{props.comment.text}</p>
+            <p className="whitespace-pre-wrap break-words text-foreground/84">
+              {props.comment.text}
+            </p>
             <div className="mt-2 flex items-center justify-end gap-2">
               <Button type="button" size="xs" variant="ghost" onClick={() => setEditing(true)}>
                 Edit

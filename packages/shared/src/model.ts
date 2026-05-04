@@ -296,7 +296,7 @@ export function getDefaultReasoningEffort(provider: ProviderKind): CodexReasonin
 export function getDefaultReasoningEffort(
   provider: ProviderKind = "codex",
 ): CodexReasoningEffort | null {
-  return provider === "codex" ? "high" : null;
+  return provider === "codex" ? "medium" : null;
 }
 
 export function getReasoningEffortOptions(

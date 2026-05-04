@@ -104,6 +104,7 @@ import {
   type ProviderPickerKind,
   PROVIDER_OPTIONS,
   deriveWorkLogEntries,
+  extractGeneratedImageArtifacts,
   hasToolActivityForTurn,
   isLatestTurnSettled,
   formatElapsed,
@@ -342,6 +343,7 @@ interface ThreadContextArtifact {
   path: string;
   label: string;
   kind: "generated" | "workspace";
+  cwd?: string;
 }
 
 interface ThreadContextSource {
@@ -635,7 +637,10 @@ function collectThreadContextProgress(thread: Thread): ThreadContextProgressItem
   return collectProposedPlanMarkdownProgress(thread, boundary);
 }
 
-function collectThreadContextArtifacts(input: { thread: Thread }): ThreadContextArtifact[] {
+function collectThreadContextArtifacts(input: {
+  thread: Thread;
+  homeDirectory: string | undefined;
+}): ThreadContextArtifact[] {
   const seen = new Set<string>();
   const artifacts: ThreadContextArtifact[] = [];
   const pushArtifact = (pathValue: string, kind: ThreadContextArtifact["kind"]) => {
@@ -649,6 +654,31 @@ function collectThreadContextArtifacts(input: { thread: Thread }): ThreadContext
       path: normalizedPath,
       label: basenameOfPath(normalizedPath),
       kind,
+    });
+  };
+  let generatedImageCount = 0;
+  const pushGeneratedImageArtifact = (artifact: {
+    path: string;
+    label: string;
+    cwd?: string | undefined;
+  }) => {
+    const normalizedPath = normalizeThreadContextPath(artifact.path);
+    const normalizedCwd = artifact.cwd ? normalizeThreadContextPath(artifact.cwd) : undefined;
+    const dedupeKey = `${normalizedCwd ?? ""}\u0000${normalizedPath}`.toLowerCase();
+    if (!isThreadContextArtifactPath(normalizedPath) || seen.has(dedupeKey)) {
+      return;
+    }
+    seen.add(dedupeKey);
+    generatedImageCount += 1;
+    const label =
+      artifact.label === "Generated image"
+        ? `Generated image ${generatedImageCount}`
+        : artifact.label;
+    artifacts.push({
+      path: normalizedPath,
+      label,
+      kind: "generated",
+      ...(normalizedCwd ? { cwd: normalizedCwd } : {}),
     });
   };
 
@@ -665,6 +695,26 @@ function collectThreadContextArtifacts(input: { thread: Thread }): ThreadContext
       if (pathValue) {
         pushArtifact(pathValue, "workspace");
       }
+    }
+  }
+  for (const activity of input.thread.activities) {
+    const payload =
+      activity.payload && typeof activity.payload === "object"
+        ? (activity.payload as Record<string, unknown>)
+        : null;
+    for (const artifact of extractGeneratedImageArtifacts(payload)) {
+      pushGeneratedImageArtifact({
+        ...artifact,
+        ...(artifact.cwd
+          ? { cwd: artifact.cwd }
+          : artifact.providerThreadId && input.homeDirectory
+            ? {
+                cwd: `${input.homeDirectory.replaceAll("\\", "/")}/.codex/generated_images/${
+                  artifact.providerThreadId
+                }`,
+              }
+            : {}),
+      });
     }
   }
 
@@ -1694,10 +1744,17 @@ export default function ChatView({
   const nowIso = new Date(nowTick).toISOString();
   const allThreads = useStore((store) => store.threads);
   const threadActivities = activeThread?.activities ?? EMPTY_ACTIVITIES;
-  const rawWorkLogEntries = useMemo(
-    () => deriveWorkLogEntries(threadActivities, activeLatestTurn?.turnId ?? undefined),
-    [activeLatestTurn?.turnId, threadActivities],
-  );
+  const rawWorkLogEntries = useMemo(() => {
+    const latestTurnEntries = deriveWorkLogEntries(
+      threadActivities,
+      activeLatestTurn?.turnId ?? undefined,
+    );
+    const latestTurnEntryIds = new Set(latestTurnEntries.map((entry) => entry.id));
+    const historicalGeneratedImageEntries = deriveWorkLogEntries(threadActivities, undefined)
+      .filter((entry) => (entry.generatedImages?.length ?? 0) > 0)
+      .filter((entry) => !latestTurnEntryIds.has(entry.id));
+    return [...historicalGeneratedImageEntries, ...latestTurnEntries];
+  }, [activeLatestTurn?.turnId, threadActivities]);
   const workLogEntries = useMemo(
     () =>
       enrichSubagentWorkEntries({
@@ -2318,7 +2375,7 @@ export default function ChatView({
     }
   }, [onToggleFilesPanel]);
   const onOpenFilePath = useCallback(
-    (path: string, options?: { cwd?: string | undefined }) => {
+    (path: string, options?: { cwd?: string | undefined; displayName?: string | undefined }) => {
       if (!activeThreadId) {
         return;
       }
@@ -5401,6 +5458,7 @@ export default function ChatView({
         <ThreadContextPanel
           thread={activeThread}
           gitCwd={gitCwd}
+          homeDirectory={homeDirectory ?? undefined}
           activeThreadId={activeThread.id}
           onOpenFilePath={onOpenFilePath}
           onOpenChanges={onToggleDiff}
@@ -6332,14 +6390,19 @@ export default function ChatView({
 interface ThreadContextPanelProps {
   thread: Thread;
   gitCwd: string | null;
+  homeDirectory: string | undefined;
   activeThreadId: ThreadId;
-  onOpenFilePath: (path: string, options?: { cwd?: string | undefined }) => void;
+  onOpenFilePath: (
+    path: string,
+    options?: { cwd?: string | undefined; displayName?: string | undefined },
+  ) => void;
   onOpenChanges: () => void;
 }
 
 const ThreadContextPanel = memo(function ThreadContextPanel({
   thread,
   gitCwd,
+  homeDirectory,
   activeThreadId,
   onOpenFilePath,
   onOpenChanges,
@@ -6352,7 +6415,10 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
   });
   const { data: gitStatus = null } = useQuery(gitStatusQueryOptions(gitCwd));
   const progressItems = useMemo(() => collectThreadContextProgress(thread), [thread]);
-  const artifacts = useMemo(() => collectThreadContextArtifacts({ thread }), [thread]);
+  const artifacts = useMemo(
+    () => collectThreadContextArtifacts({ thread, homeDirectory }),
+    [homeDirectory, thread],
+  );
   const sources = useMemo(() => collectThreadContextSources(thread), [thread]);
   const hasChanges =
     (gitStatus?.workingTree.insertions ?? 0) > 0 || (gitStatus?.workingTree.deletions ?? 0) > 0;
@@ -6368,7 +6434,7 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
   const panel = (
     <aside
       className={cn(
-        "w-[19rem] overflow-hidden rounded-lg border border-border/70 bg-background/88 text-sm text-foreground shadow-none backdrop-blur supports-[backdrop-filter]:bg-background/76",
+        "w-64 overflow-hidden rounded-lg border border-border/70 bg-background/88 text-sm text-foreground shadow-none backdrop-blur supports-[backdrop-filter]:bg-background/76",
         "transition-[opacity,transform] duration-150",
         pinned
           ? "opacity-100"
@@ -6472,7 +6538,12 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
                 key={`${artifact.kind}:${artifact.path}`}
                 className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left transition-colors hover:bg-muted/45"
                 title={artifact.path}
-                onClick={() => onOpenFilePath(artifact.path, { cwd: gitCwd ?? undefined })}
+                onClick={() =>
+                  onOpenFilePath(artifact.path, {
+                    cwd: artifact.cwd ?? gitCwd ?? undefined,
+                    displayName: artifact.label,
+                  })
+                }
               >
                 {extensionOf(artifact.path) === "png" ||
                 extensionOf(artifact.path) === "jpg" ||
@@ -6522,7 +6593,7 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
   return (
     <div
       className={cn(
-        "group/thread-context absolute right-2 top-16 z-30 hidden lg:block",
+        "group/thread-context absolute right-3 top-16 z-30 hidden lg:block",
         pinned ? "pointer-events-auto" : "bottom-4 w-10",
       )}
     >
@@ -6999,30 +7070,32 @@ const ChatHeader = memo(function ChatHeader({
             <TooltipPopup side="bottom">Toggle browser pane</TooltipPopup>
           </Tooltip>
         ) : null}
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Toggle
-                className="shrink-0"
-                pressed={diffOpen}
-                onPressedChange={onToggleDiff}
-                aria-label="Toggle diff panel"
-                variant="outline"
-                size="xs"
-                disabled={!isGitRepo}
-              >
-                <PanelLeftIcon className="size-3.5 text-muted-foreground" />
-              </Toggle>
-            }
-          />
-          <TooltipPopup side="bottom">
-            {!isGitRepo
-              ? "Diff panel is unavailable because this project is not a git repository."
-              : diffToggleShortcutLabel
-                ? `Toggle diff panel (${diffToggleShortcutLabel})`
-                : "Toggle diff panel"}
-          </TooltipPopup>
-        </Tooltip>
+        {!diffOpen ? (
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <Toggle
+                  className="shrink-0"
+                  pressed={diffOpen}
+                  onPressedChange={onToggleDiff}
+                  aria-label="Toggle diff panel"
+                  variant="outline"
+                  size="xs"
+                  disabled={!isGitRepo}
+                >
+                  <PanelLeftIcon className="size-3.5 text-muted-foreground" />
+                </Toggle>
+              }
+            />
+            <TooltipPopup side="bottom">
+              {!isGitRepo
+                ? "Diff panel is unavailable because this project is not a git repository."
+                : diffToggleShortcutLabel
+                  ? `Toggle diff panel (${diffToggleShortcutLabel})`
+                  : "Toggle diff panel"}
+            </TooltipPopup>
+          </Tooltip>
+        ) : null}
       </div>
     </div>
   );

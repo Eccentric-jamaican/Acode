@@ -298,7 +298,7 @@ type BuiltInModelSlug = (typeof MODEL_OPTIONS_BY_PROVIDER)[ProviderKind][number]
 export type ModelSlug = BuiltInModelSlug | (string & {});
 
 export const DEFAULT_MODEL_BY_PROVIDER: Record<ProviderKind, ModelSlug> = {
-  codex: "gpt-5.4",
+  codex: "gpt-5.5",
   opencode: OPENCODE_DEFAULT_MODEL_SLUG,
   claudeAgent: "claude-sonnet-4-6",
 };
@@ -355,7 +355,7 @@ export const REASONING_EFFORT_OPTIONS_BY_PROVIDER = {
 } as const satisfies Record<ProviderKind, readonly CodexReasoningEffort[]>;
 
 export const DEFAULT_REASONING_EFFORT_BY_PROVIDER = {
-  codex: "high",
+  codex: "medium",
   opencode: null,
   claudeAgent: null,
 } as const satisfies Record<ProviderKind, CodexReasoningEffort | null>;

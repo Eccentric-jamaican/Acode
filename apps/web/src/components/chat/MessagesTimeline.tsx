@@ -17,6 +17,7 @@ import {
   type VirtualItem,
   useVirtualizer,
 } from "@tanstack/react-virtual";
+import { useQuery } from "@tanstack/react-query";
 import { FileDiff } from "@pierre/diffs/react";
 import {
   BotIcon,
@@ -77,6 +78,7 @@ import {
   humanizeSubagentStatus,
   resolveSubagentPresentation,
 } from "../../lib/subagentPresentation";
+import { projectReadFileQueryOptions } from "~/lib/projectReactQuery";
 
 import ChatMarkdown from "../ChatMarkdown";
 import { Button } from "../ui/button";
@@ -165,7 +167,12 @@ export interface MessagesTimelineProps {
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenThread?: ((threadId: ThreadId) => void) | undefined;
-  onOpenFilePath?: ((path: string, options?: { cwd?: string | undefined }) => void) | undefined;
+  onOpenFilePath?:
+    | ((
+        path: string,
+        options?: { cwd?: string | undefined; displayName?: string | undefined },
+      ) => void)
+    | undefined;
   markdownCwd: string | undefined;
   resolvedTheme: "light" | "dark";
   workspaceRoot: string | undefined;
@@ -798,6 +805,16 @@ function artifactKindLabel(kind: AssistantArtifactKind): string {
   }
 }
 
+function generatedImagePreviewSrc(input: {
+  contentsBase64: string | undefined;
+  mimeType: string | undefined;
+}): string | null {
+  if (!input.contentsBase64 || !input.mimeType?.startsWith("image/")) {
+    return null;
+  }
+  return `data:${input.mimeType};base64,${input.contentsBase64}`;
+}
+
 function collectAssistantArtifacts(files: ReadonlyArray<TurnDiffFileChange>): AssistantArtifact[] {
   const seenPaths = new Set<string>();
   const artifacts: AssistantArtifact[] = [];
@@ -860,7 +877,12 @@ function collectMentionedAssistantArtifacts(input: {
 const AssistantArtifactCards = memo(function AssistantArtifactCards(props: {
   artifacts: ReadonlyArray<AssistantArtifact>;
   resolvedTheme: "light" | "dark";
-  onOpenFilePath?: ((path: string, options?: { cwd?: string | undefined }) => void) | undefined;
+  onOpenFilePath?:
+    | ((
+        path: string,
+        options?: { cwd?: string | undefined; displayName?: string | undefined },
+      ) => void)
+    | undefined;
 }) {
   if (props.artifacts.length === 0) return null;
 
@@ -1206,6 +1228,16 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   workEntry: WorkLogEntry;
   resolvedTheme: "light" | "dark";
   onOpenThread?: ((threadId: ThreadId) => void) | undefined;
+  onOpenFilePath?:
+    | ((
+        path: string,
+        options?: { cwd?: string | undefined; displayName?: string | undefined },
+      ) => void)
+    | undefined;
+  onImageExpand: (preview: ExpandedImagePreview) => void;
+  onImageLoad: () => void;
+  homeDirectory: string | undefined;
+  workspaceRoot: string | undefined;
 }) {
   const { onOpenThread, workEntry, resolvedTheme } = props;
   const iconConfig = workToneIcon(workEntry.tone);
@@ -1296,6 +1328,25 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
 
   const activeInvocationDiff =
     (activeInvocationDiffPath ? parsedByPath[activeInvocationDiffPath] : null) ?? null;
+  const generatedImages = workEntry.generatedImages ?? [];
+
+  if (generatedImages.length > 0 && !canExpandInvocationDiff && !hasChangedFiles) {
+    return (
+      <div className="flex max-w-[656px] flex-col items-start gap-2">
+        {generatedImages.map((image) => (
+          <GeneratedImageWorkPreview
+            key={`${workEntry.id}:generated-image:${image.cwd ?? ""}:${image.path}`}
+            image={image}
+            fallbackCwd={props.workspaceRoot}
+            homeDirectory={props.homeDirectory}
+            onImageExpand={props.onImageExpand}
+            onImageLoad={props.onImageLoad}
+            onOpenFilePath={props.onOpenFilePath}
+          />
+        ))}
+      </div>
+    );
+  }
 
   if ((workEntry.subagents?.length ?? 0) > 0 || workEntry.subagentAction) {
     const subagentSummary =
@@ -1533,6 +1584,21 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
               {changedFilesLabel}
             </span>
           )}
+          {generatedImages.length > 0 ? (
+            <div className="mt-1.5 grid max-w-[520px] grid-cols-1 gap-1.5 sm:grid-cols-2">
+              {generatedImages.map((image) => (
+                <GeneratedImageWorkPreview
+                  key={`${workEntry.id}:generated-image:${image.cwd ?? ""}:${image.path}`}
+                  image={image}
+                  fallbackCwd={props.workspaceRoot}
+                  homeDirectory={props.homeDirectory}
+                  onImageExpand={props.onImageExpand}
+                  onImageLoad={props.onImageLoad}
+                  onOpenFilePath={props.onOpenFilePath}
+                />
+              ))}
+            </div>
+          ) : null}
           {canExpandInvocationDiff && isInvocationDiffExpanded && (
             <div className="mt-1.5 rounded border border-border/55 bg-background/50 p-1.5">
               {invocationDiffFiles.length > 1 && (
@@ -1576,6 +1642,107 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
         </div>
       </div>
     </div>
+  );
+});
+
+const GeneratedImageWorkPreview = memo(function GeneratedImageWorkPreview(props: {
+  image: NonNullable<WorkLogEntry["generatedImages"]>[number];
+  fallbackCwd: string | undefined;
+  homeDirectory: string | undefined;
+  onImageExpand: (preview: ExpandedImagePreview) => void;
+  onImageLoad: () => void;
+  onOpenFilePath?:
+    | ((
+        path: string,
+        options?: { cwd?: string | undefined; displayName?: string | undefined },
+      ) => void)
+    | undefined;
+}) {
+  const [naturalSize, setNaturalSize] = useState<{ width: number; height: number } | null>(null);
+  const codexGeneratedImageCwd =
+    props.image.providerThreadId && props.homeDirectory
+      ? `${props.homeDirectory.replaceAll("\\", "/")}/.codex/generated_images/${
+          props.image.providerThreadId
+        }`
+      : null;
+  const cwd = props.image.cwd ?? codexGeneratedImageCwd ?? props.fallbackCwd ?? null;
+  const previewQuery = useQuery(
+    projectReadFileQueryOptions({
+      cwd,
+      relativePath: props.image.path,
+      enabled: Boolean(cwd && props.image.path),
+      staleTime: 60_000,
+    }),
+  );
+  const previewSrc =
+    props.image.previewUrl ??
+    (previewQuery.data?.status === "document"
+      ? generatedImagePreviewSrc({
+          contentsBase64: previewQuery.data.contentsBase64,
+          mimeType: previewQuery.data.mimeType,
+        })
+      : null);
+
+  if (!previewSrc) {
+    return (
+      <button
+        type="button"
+        className="flex min-w-0 items-center gap-2 rounded-md border border-border/40 bg-background/45 px-2 py-1.5 text-left text-[10px] text-muted-foreground/80 transition-colors hover:text-foreground/85"
+        onClick={() =>
+          props.onOpenFilePath?.(props.image.path, {
+            cwd: cwd ?? undefined,
+            displayName: props.image.label,
+          })
+        }
+        title={props.image.cwd ? `${props.image.cwd}/${props.image.path}` : props.image.path}
+      >
+        <EyeIcon className="size-3.5 shrink-0" />
+        <span className="truncate">{props.image.label}</span>
+      </button>
+    );
+  }
+
+  const aspectRatio =
+    naturalSize && naturalSize.height > 0 ? naturalSize.width / naturalSize.height : null;
+  const ratioClass =
+    aspectRatio === null
+      ? "max-h-[440px] max-w-full"
+      : aspectRatio >= 1.75
+        ? "max-h-[360px] w-full max-w-[656px]"
+        : aspectRatio >= 1.15
+          ? "max-h-[440px] w-full max-w-[656px]"
+          : aspectRatio >= 0.82
+            ? "max-h-[460px] max-w-[min(100%,460px)]"
+            : aspectRatio >= 0.58
+              ? "max-h-[520px] max-w-[min(100%,380px)]"
+              : "max-h-[560px] max-w-[min(100%,300px)]";
+
+  return (
+    <button
+      type="button"
+      className="group inline-block max-w-full overflow-hidden rounded-lg border border-border/45 bg-transparent text-left transition-colors hover:border-border/75"
+      onClick={() =>
+        props.onImageExpand({
+          images: [{ src: previewSrc, name: props.image.label }],
+          index: 0,
+        })
+      }
+    >
+      <img
+        src={previewSrc}
+        alt={props.image.label}
+        className={cn("block object-contain", ratioClass)}
+        loading="lazy"
+        onLoad={(event) => {
+          const image = event.currentTarget;
+          setNaturalSize({
+            width: image.naturalWidth,
+            height: image.naturalHeight,
+          });
+          props.onImageLoad();
+        }}
+      />
+    </button>
   );
 });
 
@@ -2294,6 +2461,29 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
           const hiddenCount = groupedEntries.length - visibleEntries.length;
           const onlyToolEntries = groupedEntries.every((entry) => entry.tone === "tool");
           const groupLabel = onlyToolEntries ? "Tool calls" : "Work log";
+          const imageOnlyGroup = groupedEntries.every(
+            (entry) => entry.itemType === "image_view" && (entry.generatedImages?.length ?? 0) > 0,
+          );
+
+          if (imageOnlyGroup) {
+            return (
+              <div className="space-y-2">
+                {visibleEntries.map((workEntry) => (
+                  <SimpleWorkEntryRow
+                    key={`work-row:${workEntry.id}`}
+                    workEntry={workEntry}
+                    resolvedTheme={resolvedTheme}
+                    onOpenThread={onOpenThread}
+                    onOpenFilePath={props.onOpenFilePath}
+                    onImageExpand={onImageExpand}
+                    onImageLoad={onTimelineImageLoad}
+                    homeDirectory={props.homeDirectory}
+                    workspaceRoot={workspaceRoot}
+                  />
+                ))}
+              </div>
+            );
+          }
 
           return (
             <div className="rounded-xl border border-border/45 bg-card/25 px-2 py-1.5">
@@ -2318,6 +2508,11 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
                     workEntry={workEntry}
                     resolvedTheme={resolvedTheme}
                     onOpenThread={onOpenThread}
+                    onOpenFilePath={props.onOpenFilePath}
+                    onImageExpand={onImageExpand}
+                    onImageLoad={onTimelineImageLoad}
+                    homeDirectory={props.homeDirectory}
+                    workspaceRoot={workspaceRoot}
                   />
                 ))}
               </div>

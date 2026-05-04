@@ -1,11 +1,18 @@
 import { ThreadId, type ProjectId, type RuntimeMode, type TurnId } from "@t3tools/contracts";
 import { createFileRoute, useNavigate, useRouterState } from "@tanstack/react-router";
-import { Suspense, lazy, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Suspense,
+  lazy,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import ChatView from "../components/ChatView";
-import ChatHomeSurface, {
-  resolveChatHomeSurfaceVariant,
-} from "../components/ChatHomeSurface";
+import ChatHomeSurface, { resolveChatHomeSurfaceVariant } from "../components/ChatHomeSurface";
 import IntegratedBrowserPane from "../components/IntegratedBrowserPane";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useDisposableThreadLifecycle } from "../hooks/useDisposableThreadLifecycle";
@@ -26,8 +33,16 @@ import { useStore } from "../store";
 import { Sheet, SheetPopup } from "../components/ui/sheet";
 import { Sidebar, SidebarProvider, SidebarRail, SidebarInset } from "~/components/ui/sidebar";
 import { Button } from "~/components/ui/button";
-import { Dialog, DialogDescription, DialogFooter, DialogHeader, DialogPanel, DialogPopup, DialogTitle } from "~/components/ui/dialog";
-import { ArrowLeftRight, Maximize2Icon, Minimize2Icon } from "lucide-react";
+import {
+  Dialog,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogPanel,
+  DialogPopup,
+  DialogTitle,
+} from "~/components/ui/dialog";
+import { ArrowLeftRight, Maximize2Icon, Minimize2Icon, PanelLeftIcon } from "lucide-react";
 import { WorkspaceFilesRail } from "../components/WorkspaceFilesRail";
 import {
   useSplitViewStore,
@@ -56,7 +71,9 @@ function resolveThreadBrowserContext(input: {
   threadId: ThreadId;
   threads: ReturnType<typeof useStore.getState>["threads"];
   projects: ReturnType<typeof useStore.getState>["projects"];
-  draftThreadsByThreadId: ReturnType<typeof useComposerDraftStore.getState>["draftThreadsByThreadId"];
+  draftThreadsByThreadId: ReturnType<
+    typeof useComposerDraftStore.getState
+  >["draftThreadsByThreadId"];
 }): {
   projectId: ProjectId | null;
   runtimeMode: RuntimeMode | null;
@@ -139,10 +156,18 @@ function ViewerPanelSurface(props: {
     }
     return props.railOverlay ? (
       <div className="absolute inset-y-0 right-0 z-30 w-[min(82vw,22rem)] border-l border-border/50 shadow-xl">
-        <WorkspaceFilesRail threadId={props.threadId} cwd={props.cwd} onRevealFile={props.onRevealFile} />
+        <WorkspaceFilesRail
+          threadId={props.threadId}
+          cwd={props.cwd}
+          onRevealFile={props.onRevealFile}
+        />
       </div>
     ) : (
-      <WorkspaceFilesRail threadId={props.threadId} cwd={props.cwd} onRevealFile={props.onRevealFile} />
+      <WorkspaceFilesRail
+        threadId={props.threadId}
+        cwd={props.cwd}
+        onRevealFile={props.onRevealFile}
+      />
     );
   }
 
@@ -162,18 +187,37 @@ function ViewerPanelSurface(props: {
 
   return (
     <div className="relative flex h-full min-w-0 flex-1 overflow-hidden">
-      {props.panelMode === "diff" && props.onToggleExpanded ? (
-        <Button
-          type="button"
-          size="icon-xs"
-          variant="ghost"
-          className="absolute right-3 top-3 z-20 rounded-full bg-background/80 shadow-sm backdrop-blur hover:bg-accent"
-          aria-label={props.expanded ? "Collapse panel" : "Expand panel"}
-          title={props.expanded ? "Collapse panel" : "Expand panel"}
-          onClick={props.onToggleExpanded}
-        >
-          {props.expanded ? <Minimize2Icon className="size-3.5" /> : <Maximize2Icon className="size-3.5" />}
-        </Button>
+      {props.panelMode === "diff" ? (
+        <div className="absolute right-3 top-3 z-20 flex items-center gap-1">
+          {props.onToggleExpanded ? (
+            <Button
+              type="button"
+              size="icon-xs"
+              variant="ghost"
+              className="rounded-full bg-background/80 shadow-sm backdrop-blur hover:bg-accent"
+              aria-label={props.expanded ? "Collapse panel" : "Expand panel"}
+              title={props.expanded ? "Collapse panel" : "Expand panel"}
+              onClick={props.onToggleExpanded}
+            >
+              {props.expanded ? (
+                <Minimize2Icon className="size-3.5" />
+              ) : (
+                <Maximize2Icon className="size-3.5" />
+              )}
+            </Button>
+          ) : null}
+          <Button
+            type="button"
+            size="icon-xs"
+            variant="ghost"
+            className="rounded-full bg-background/80 shadow-sm backdrop-blur hover:bg-accent"
+            aria-label="Toggle diff panel"
+            title="Toggle diff panel"
+            onClick={props.onClosePanel}
+          >
+            <PanelLeftIcon className="size-3.5" />
+          </Button>
+        </div>
       ) : null}
       <div
         className="flex-1 overflow-hidden"
@@ -186,10 +230,18 @@ function ViewerPanelSurface(props: {
       {props.filesOpen ? (
         props.railOverlay ? (
           <div className="absolute inset-y-0 right-0 z-30 w-[min(82vw,22rem)] border-l border-border/50 shadow-xl">
-            <WorkspaceFilesRail threadId={props.threadId} cwd={props.cwd} onRevealFile={props.onRevealFile} />
+            <WorkspaceFilesRail
+              threadId={props.threadId}
+              cwd={props.cwd}
+              onRevealFile={props.onRevealFile}
+            />
           </div>
         ) : (
-          <WorkspaceFilesRail threadId={props.threadId} cwd={props.cwd} onRevealFile={props.onRevealFile} />
+          <WorkspaceFilesRail
+            threadId={props.threadId}
+            cwd={props.cwd}
+            onRevealFile={props.onRevealFile}
+          />
         )
       ) : null}
     </div>
@@ -321,7 +373,11 @@ const PanePanelInlineSidebar = (props: {
       open={panelOpen}
       onOpenChange={onOpenChange}
       className="w-auto min-h-0 flex-none bg-transparent"
-      style={{ "--sidebar-width": filesOnly ? FILES_RAIL_WIDTH : DIFF_INLINE_DEFAULT_WIDTH } as React.CSSProperties}
+      style={
+        {
+          "--sidebar-width": filesOnly ? FILES_RAIL_WIDTH : DIFF_INLINE_DEFAULT_WIDTH,
+        } as React.CSSProperties
+      }
     >
       <Sidebar
         side="right"
@@ -352,7 +408,7 @@ const PanePanelInlineSidebar = (props: {
             onClosePanel={onClosePanel}
             onRevealFile={onRevealFile}
           />
-      ) : null}
+        ) : null}
         <SidebarRail />
       </Sidebar>
     </SidebarProvider>
@@ -373,7 +429,9 @@ function SplitPaneEmbeddedPanel(props: {
   onRevealFile: (path: string) => void;
   panelState: Pick<SplitViewPanePanelState, "panel" | "diffTurnId" | "diffFilePath">;
   onUpdatePanelState: (
-    patch: Partial<Pick<SplitViewPanePanelState, "panel" | "filesOpen" | "diffTurnId" | "diffFilePath">>,
+    patch: Partial<
+      Pick<SplitViewPanePanelState, "panel" | "filesOpen" | "diffTurnId" | "diffFilePath">
+    >,
   ) => void;
 }) {
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -593,7 +651,9 @@ function SplitPaneSurface(props: {
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onClosePanel: () => void;
   onUpdatePanelState: (
-    patch: Partial<Pick<SplitViewPanePanelState, "panel" | "filesOpen" | "diffTurnId" | "diffFilePath">>,
+    patch: Partial<
+      Pick<SplitViewPanePanelState, "panel" | "filesOpen" | "diffTurnId" | "diffFilePath">
+    >,
   ) => void;
   onMaximize: () => void;
   onChooseThread: () => void;
@@ -781,7 +841,9 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
   const updatePanePanelState = useCallback(
     (
       pane: SplitViewPane,
-      patch: Partial<Pick<SplitViewPanePanelState, "panel" | "filesOpen" | "diffTurnId" | "diffFilePath">>,
+      patch: Partial<
+        Pick<SplitViewPanePanelState, "panel" | "filesOpen" | "diffTurnId" | "diffFilePath">
+      >,
     ) => {
       if (!activeSplitView) return;
       const previousState =
@@ -1162,7 +1224,9 @@ function SingleChatSurface(props: {
       to: "/$threadId",
       params: { threadId: props.threadId },
       search: (previous) => {
-        const currentlyOpen = resolveFilesRailOpen(parseDiffRouteSearch(previous as Record<string, unknown>));
+        const currentlyOpen = resolveFilesRailOpen(
+          parseDiffRouteSearch(previous as Record<string, unknown>),
+        );
         return withFilesRailOpen(previous as Record<string, unknown>, !currentlyOpen);
       },
     });
@@ -1301,8 +1365,8 @@ function ChatThreadRouteView() {
   useDisposableThreadLifecycle(threadId);
   const search = Route.useSearch();
   const threadExists = useStore((store) => store.threads.some((thread) => thread.id === threadId));
-  const draftThreadExists = useComposerDraftStore(
-    (store) => Object.hasOwn(store.draftThreadsByThreadId, threadId),
+  const draftThreadExists = useComposerDraftStore((store) =>
+    Object.hasOwn(store.draftThreadsByThreadId, threadId),
   );
   const locationSearch = useRouterState({
     select: (state) => state.location.search,
@@ -1382,18 +1446,13 @@ function ChatThreadRouteView() {
           to: "/$threadId",
           params: { threadId },
           replace: true,
-          search: (previous) =>
-            withRightPanelMode(previous as Record<string, unknown>, "none"),
+          search: (previous) => withRightPanelMode(previous as Record<string, unknown>, "none"),
         });
       }
       return;
     }
 
-    if (
-      previousPanelMode === "browser" &&
-      panelMode === "none" &&
-      !hasExplicitPanelSearchIntent
-    ) {
+    if (previousPanelMode === "browser" && panelMode === "none" && !hasExplicitPanelSearchIntent) {
       // Preserve browser panel across same-project thread switches only.
       if (!previousThreadId || previousThreadId === threadId) {
         return;
@@ -1406,17 +1465,10 @@ function ChatThreadRouteView() {
         to: "/$threadId",
         params: { threadId },
         replace: true,
-        search: (previous) =>
-          withRightPanelMode(previous as Record<string, unknown>, "browser"),
+        search: (previous) => withRightPanelMode(previous as Record<string, unknown>, "browser"),
       });
     }
-  }, [
-    hasExplicitPanelSearchIntent,
-    navigate,
-    panelMode,
-    threadBrowserContext.projectId,
-    threadId,
-  ]);
+  }, [hasExplicitPanelSearchIntent, navigate, panelMode, threadBrowserContext.projectId, threadId]);
 
   useEffect(() => {
     if (panelMode === "browser") {

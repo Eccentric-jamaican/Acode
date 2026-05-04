@@ -11,7 +11,13 @@ import {
   type TurnId,
 } from "@t3tools/contracts";
 
-import type { ChatMessage, ProposedPlan, SessionPhase, ThreadSession, TurnDiffSummary } from "./types";
+import type {
+  ChatMessage,
+  ProposedPlan,
+  SessionPhase,
+  ThreadSession,
+  TurnDiffSummary,
+} from "./types";
 
 export type ProviderPickerKind = ProviderKind | "cursor";
 
@@ -33,6 +39,7 @@ export interface WorkLogEntry {
   detail?: string;
   command?: string;
   changedFiles?: ReadonlyArray<string>;
+  generatedImages?: ReadonlyArray<GeneratedImageArtifact>;
   invocationDiffFiles?: ReadonlyArray<InvocationDiffFile>;
   invocationDiffStat?: {
     additions: number;
@@ -61,6 +68,14 @@ export interface WorkLogEntry {
     latestUpdate?: string;
     isActive?: boolean;
   }>;
+}
+
+export interface GeneratedImageArtifact {
+  path: string;
+  cwd?: string;
+  label: string;
+  previewUrl?: string;
+  providerThreadId?: string;
 }
 
 export interface InvocationDiffFile {
@@ -165,9 +180,7 @@ export function isLatestTurnSettled(
   return true;
 }
 
-function requestKindFromRequestType(
-  requestType: unknown,
-): PendingApproval["requestKind"] | null {
+function requestKindFromRequestType(requestType: unknown): PendingApproval["requestKind"] | null {
   switch (requestType) {
     case "command_execution_approval":
     case "exec_command_approval":
@@ -361,9 +374,7 @@ export function deriveActivePlanState(
         return null;
       }
       const status =
-        record.status === "completed" || record.status === "inProgress"
-          ? record.status
-          : "pending";
+        record.status === "completed" || record.status === "inProgress" ? record.status : "pending";
       return {
         step: record.step,
         status,
@@ -383,7 +394,9 @@ export function deriveActivePlanState(
   return {
     createdAt: latest.createdAt,
     turnId: latest.turnId,
-    ...(payload && "explanation" in payload ? { explanation: payload.explanation as string | null } : {}),
+    ...(payload && "explanation" in payload
+      ? { explanation: payload.explanation as string | null }
+      : {}),
     steps,
   };
 }
@@ -454,6 +467,7 @@ export function deriveWorkLogEntries(
           : null;
       const command = extractToolCommand(payload);
       const changedFiles = extractChangedFiles(payload);
+      const generatedImages = extractGeneratedImageArtifacts(payload);
       const invocationDiffFiles = extractInvocationDiffFiles(payload);
       const title = extractToolTitle(payload);
       const entry: WorkLogEntry = {
@@ -475,6 +489,9 @@ export function deriveWorkLogEntries(
       }
       if (changedFiles.length > 0) {
         entry.changedFiles = changedFiles;
+      }
+      if (generatedImages.length > 0) {
+        entry.generatedImages = generatedImages;
       }
       if (invocationDiffFiles.length > 0) {
         entry.invocationDiffFiles = invocationDiffFiles;
@@ -653,9 +670,199 @@ function extractChangedFiles(payload: Record<string, unknown> | null): string[] 
   return changedFiles;
 }
 
-function normalizeInvocationDiffStatus(
+const GENERATED_IMAGE_EXTENSIONS = new Set([
+  "avif",
+  "bmp",
+  "gif",
+  "heic",
+  "jpeg",
+  "jpg",
+  "png",
+  "webp",
+]);
+const IMAGE_PATH_PATTERN =
+  /(?:^|[\s`"'(])((?:[A-Za-z]:[\\/])?(?:[\w .@()[\]-]+[\\/])*[\w .@()[\]-]+\.(?:avif|bmp|gif|heic|jpe?g|png|webp))(?=$|[\s`"',).])/gi;
+
+function basenameFromPath(pathValue: string): string {
+  return pathValue.split(/[\\/]/).at(-1) ?? pathValue;
+}
+
+function extensionFromPath(pathValue: string): string {
+  const filename = basenameFromPath(pathValue);
+  const dotIndex = filename.lastIndexOf(".");
+  if (dotIndex <= 0 || dotIndex === filename.length - 1) {
+    return "";
+  }
+  return filename.slice(dotIndex + 1).toLowerCase();
+}
+
+function generatedImageLabelForPath(pathValue: string): string {
+  const filename = basenameFromPath(pathValue);
+  return /^ig_[\da-z]+(?:[._-][\da-z]+)?\.[\da-z]+$/i.test(filename) ? "Generated image" : filename;
+}
+
+function toGeneratedImageArtifact(pathValue: string): GeneratedImageArtifact | null {
+  const trimmed = pathValue.trim().replace(/^[`"']|[`"']$/g, "");
+  if (!GENERATED_IMAGE_EXTENSIONS.has(extensionFromPath(trimmed))) {
+    return null;
+  }
+  const normalized = trimmed.replaceAll("\\", "/");
+  const windowsAbsoluteMatch = /^([A-Za-z]:\/.*)\/([^/]+)$/.exec(normalized);
+  if (windowsAbsoluteMatch) {
+    const cwd = windowsAbsoluteMatch[1];
+    const path = windowsAbsoluteMatch[2];
+    if (!cwd || !path) return null;
+    return {
+      cwd,
+      path,
+      label: generatedImageLabelForPath(path),
+    };
+  }
+  return {
+    path: normalized,
+    label: generatedImageLabelForPath(normalized),
+  };
+}
+
+function pushGeneratedImageArtifact(
+  target: GeneratedImageArtifact[],
+  seen: Set<string>,
+  pathValue: string,
+  options?: { previewUrl?: string | undefined },
+) {
+  const artifact = toGeneratedImageArtifact(pathValue);
+  if (!artifact) return;
+  const key = `${artifact.cwd ?? ""}\u0000${artifact.path}`.toLowerCase();
+  if (seen.has(key)) return;
+  seen.add(key);
+  target.push({
+    ...artifact,
+    ...(options?.previewUrl ? { previewUrl: options.previewUrl } : {}),
+  });
+}
+
+function looksLikePngBase64(value: string): boolean {
+  return value.startsWith("iVBORw0KGgo");
+}
+
+function codexGeneratedImageArtifactFromRecord(
+  record: Record<string, unknown>,
+): GeneratedImageArtifact | null {
+  const item = asRecord(record.item) ?? record;
+  const itemId = asTrimmedString(item.id);
+  if (!itemId?.startsWith("ig_")) {
+    return null;
+  }
+
+  const itemType = asTrimmedString(item.type)?.toLowerCase() ?? "";
+  if (!itemType.includes("image")) {
+    return null;
+  }
+
+  const providerThreadId = asTrimmedString(record.threadId);
+  const result = asTrimmedString(item.result);
+  const previewUrl =
+    result && looksLikePngBase64(result) ? `data:image/png;base64,${result}` : null;
+  if (!providerThreadId && !previewUrl) {
+    return null;
+  }
+
+  const path = `${itemId}.png`;
+  return {
+    path,
+    label: generatedImageLabelForPath(path),
+    ...(providerThreadId ? { providerThreadId } : {}),
+    ...(previewUrl ? { previewUrl } : {}),
+  };
+}
+
+function collectGeneratedImageArtifacts(
   value: unknown,
-): InvocationDiffFile["status"] | undefined {
+  target: GeneratedImageArtifact[],
+  seen: Set<string>,
+  depth: number,
+) {
+  if (depth > 5 || target.length >= 8) {
+    return;
+  }
+
+  if (typeof value === "string") {
+    if (value.length > 8192) {
+      pushGeneratedImageArtifact(target, seen, value);
+      return;
+    }
+    for (const match of value.matchAll(IMAGE_PATH_PATTERN)) {
+      const pathValue = match[1];
+      if (pathValue) {
+        pushGeneratedImageArtifact(target, seen, pathValue);
+      }
+    }
+    const trimmed = value.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        collectGeneratedImageArtifacts(JSON.parse(trimmed), target, seen, depth + 1);
+      } catch {
+        // Tool outputs are often plain text; malformed JSON is fine here.
+      }
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectGeneratedImageArtifacts(entry, target, seen, depth + 1);
+      if (target.length >= 8) return;
+    }
+    return;
+  }
+
+  const record = asRecord(value);
+  if (!record) return;
+
+  const codexArtifact = codexGeneratedImageArtifactFromRecord(record);
+  if (codexArtifact) {
+    const key = `${codexArtifact.cwd ?? ""}\u0000${codexArtifact.path}`.toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      target.push(codexArtifact);
+    }
+  }
+
+  for (const key of [
+    "generatedImagePath",
+    "generatedImagePaths",
+    "artifactPath",
+    "artifactPaths",
+    "outputPath",
+    "outputPaths",
+    "outputs",
+    "path",
+    "filePath",
+    "relativePath",
+    "url",
+  ]) {
+    if (key in record) {
+      collectGeneratedImageArtifacts(record[key], target, seen, depth + 1);
+    }
+  }
+
+  for (const key of ["data", "item", "result", "structuredContent", "output", "content"]) {
+    if (key in record) {
+      collectGeneratedImageArtifacts(record[key], target, seen, depth + 1);
+    }
+  }
+}
+
+export function extractGeneratedImageArtifacts(
+  payload: Record<string, unknown> | null,
+): GeneratedImageArtifact[] {
+  const artifacts: GeneratedImageArtifact[] = [];
+  const seen = new Set<string>();
+  collectGeneratedImageArtifacts(payload, artifacts, seen, 0);
+  return artifacts;
+}
+
+function normalizeInvocationDiffStatus(value: unknown): InvocationDiffFile["status"] | undefined {
   if (value === "added" || value === "deleted" || value === "modified") {
     return value;
   }
@@ -800,7 +1007,9 @@ export function deriveRevertTurnCountByUserMessageId(
 
       const summary =
         turnDiffSummaryByAssistantMessageId.get(nextEntry.message.id) ??
-        (nextEntry.message.turnId ? turnDiffSummaryByTurnId.get(nextEntry.message.turnId) : undefined);
+        (nextEntry.message.turnId
+          ? turnDiffSummaryByTurnId.get(nextEntry.message.turnId)
+          : undefined);
       if (!summary) {
         continue;
       }

@@ -371,6 +371,28 @@ label:has(> select#reasoning-effort) select {
   opacity: 0.8;
 }
 
+.chat-markdown a.chat-markdown-file-link {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.2rem;
+  vertical-align: baseline;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.chat-markdown a.chat-markdown-file-link:hover {
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--info-foreground) 40%, transparent);
+}
+
+.chat-markdown .chat-markdown-file-link-icon {
+  width: 0.9rem;
+  height: 0.9rem;
+  flex: 0 0 auto;
+  transform: translateY(0.12em);
+  color: var(--info-foreground);
+}
+
 .chat-markdown blockquote {
   border-left: 2px solid var(--border);
   padding-left: 0.8rem;

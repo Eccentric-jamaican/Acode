@@ -23,6 +23,9 @@ import {
 } from "@t3tools/contracts";
 import { Effect, FileSystem, Layer, Queue, Schema, ServiceMap, Stream } from "effect";
 import { getModelOptions } from "@t3tools/shared/model";
+import * as NodeFs from "node:fs";
+import * as NodeOs from "node:os";
+import * as NodePath from "node:path";
 
 import {
   ProviderAdapterProcessError,
@@ -419,7 +422,46 @@ function asRuntimeTaskId(taskId: string): RuntimeTaskId {
   return RuntimeTaskId.makeUnsafe(taskId);
 }
 
-function codexEventMessage(payload: Record<string, unknown> | undefined): Record<string, unknown> | undefined {
+const CODEX_GENERATED_IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp"]);
+
+function resolveCodexHome(): string {
+  const configuredHome = process.env.CODEX_HOME?.trim();
+  return configuredHome && configuredHome.length > 0
+    ? configuredHome
+    : NodePath.join(NodeOs.homedir(), ".codex");
+}
+
+function resolveCodexGeneratedImagePath(event: ProviderEvent): string | undefined {
+  const providerThreadId = event.providerThreadId?.trim();
+  const itemId = event.itemId?.trim();
+  if (!providerThreadId || !itemId?.startsWith("ig_")) {
+    return undefined;
+  }
+
+  const generatedImagesDirectory = NodePath.join(
+    resolveCodexHome(),
+    "generated_images",
+    providerThreadId,
+  );
+  const exactPath = NodePath.join(generatedImagesDirectory, `${itemId}.png`);
+  if (NodeFs.existsSync(exactPath)) {
+    return exactPath;
+  }
+
+  try {
+    const matchingFilename = NodeFs.readdirSync(generatedImagesDirectory).find((filename) => {
+      const extension = NodePath.extname(filename).toLowerCase();
+      return filename.startsWith(itemId) && CODEX_GENERATED_IMAGE_EXTENSIONS.has(extension);
+    });
+    return matchingFilename ? NodePath.join(generatedImagesDirectory, matchingFilename) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function codexEventMessage(
+  payload: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
   return asObject(payload?.msg);
 }
 
@@ -528,7 +570,26 @@ function mapItemLifecycle(
             files: invocationDiffFiles,
           },
         }
-      : (event.payload !== undefined ? event.payload : undefined);
+      : event.payload !== undefined
+        ? event.payload
+        : undefined;
+  const generatedImagePath =
+    itemType === "image_view" ? resolveCodexGeneratedImagePath(event) : undefined;
+  const enrichedData =
+    generatedImagePath && data && typeof data === "object" && !Array.isArray(data)
+      ? {
+          ...(data as Record<string, unknown>),
+          artifactPaths: [generatedImagePath],
+          generatedImagePath,
+          generatedImagePaths: [generatedImagePath],
+        }
+      : generatedImagePath
+        ? {
+            artifactPaths: [generatedImagePath],
+            generatedImagePath,
+            generatedImagePaths: [generatedImagePath],
+          }
+        : data;
   const status =
     lifecycle === "item.started"
       ? "inProgress"
@@ -543,8 +604,8 @@ function mapItemLifecycle(
       itemType,
       ...(status ? { status } : {}),
       ...(itemTitle(itemType) ? { title: itemTitle(itemType) } : {}),
-      ...(detail ? { detail } : {}),
-      ...(data !== undefined ? { data } : {}),
+      ...(detail ? { detail } : generatedImagePath ? { detail: generatedImagePath } : {}),
+      ...(enrichedData !== undefined ? { data: enrichedData } : {}),
     },
   };
 }
@@ -1078,7 +1139,9 @@ function mapToRuntimeEvents(
         type: "content.delta",
         payload: {
           streamKind:
-            asNumber(msg?.summary_index) !== undefined ? "reasoning_summary_text" : "reasoning_text",
+            asNumber(msg?.summary_index) !== undefined
+              ? "reasoning_summary_text"
+              : "reasoning_text",
           delta,
           ...(asNumber(msg?.summary_index) !== undefined
             ? { summaryIndex: asNumber(msg?.summary_index) }
@@ -1355,9 +1418,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
             detail: toMessage(cause, "Failed to start Codex adapter session."),
             cause,
           }),
-      }).pipe(
-        Effect.map((session) => session),
-      );
+      }).pipe(Effect.map((session) => session));
     };
 
     const sendTurn: CodexAdapterShape["sendTurn"] = (input) =>
