@@ -6,6 +6,7 @@ import type {
   OrchestrationReadModel,
   ThreadHandoffImportedMessage,
   ThreadId,
+  ProjectId,
 } from "@t3tools/contracts";
 import { Effect } from "effect";
 
@@ -76,6 +77,116 @@ function inferProviderFromModel(model: string): ProviderKind {
   return "codex";
 }
 
+type DecidedEvent = Omit<OrchestrationEvent, "sequence">;
+
+function activeProjectThreads(
+  readModel: OrchestrationReadModel,
+  projectId: ProjectId,
+): ReadonlyArray<OrchestrationReadModel["threads"][number]> {
+  return readModel.threads.filter(
+    (thread) => thread.projectId === projectId && thread.deletedAt === null,
+  );
+}
+
+function threadTree(
+  readModel: OrchestrationReadModel,
+  rootThreadId: ThreadId,
+): ReadonlyArray<OrchestrationReadModel["threads"][number]> {
+  const selected = new Map<ThreadId, OrchestrationReadModel["threads"][number]>();
+  const queue: ThreadId[] = [rootThreadId];
+
+  while (queue.length > 0) {
+    const nextThreadId = queue.shift();
+    if (!nextThreadId || selected.has(nextThreadId)) {
+      continue;
+    }
+
+    const thread = readModel.threads.find((entry) => entry.id === nextThreadId);
+    if (!thread) {
+      continue;
+    }
+
+    selected.set(thread.id, thread);
+    for (const child of readModel.threads) {
+      if (child.parentThreadId === thread.id && child.deletedAt === null) {
+        queue.push(child.id);
+      }
+    }
+  }
+
+  return Array.from(selected.values());
+}
+
+function childrenFirst(
+  threads: ReadonlyArray<OrchestrationReadModel["threads"][number]>,
+): ReadonlyArray<OrchestrationReadModel["threads"][number]> {
+  const selectedIds = new Set(threads.map((thread) => thread.id));
+  const byId = new Map(threads.map((thread) => [thread.id, thread] as const));
+  const depthCache = new Map<ThreadId, number>();
+
+  const depth = (thread: OrchestrationReadModel["threads"][number]): number => {
+    const cached = depthCache.get(thread.id);
+    if (cached !== undefined) {
+      return cached;
+    }
+
+    const parentId = thread.parentThreadId;
+    const parent = parentId && selectedIds.has(parentId) ? byId.get(parentId) : undefined;
+    const nextDepth = parent ? depth(parent) + 1 : 0;
+    depthCache.set(thread.id, nextDepth);
+    return nextDepth;
+  };
+
+  return threads.toSorted((left, right) => {
+    const byDepth = depth(right) - depth(left);
+    if (byDepth !== 0) {
+      return byDepth;
+    }
+    return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
+  });
+}
+
+function threadDeletedEvent(input: {
+  readonly command: OrchestrationCommand;
+  readonly threadId: ThreadId;
+  readonly occurredAt: string;
+}): DecidedEvent {
+  return {
+    ...withEventBase({
+      aggregateKind: "thread",
+      aggregateId: input.threadId,
+      occurredAt: input.occurredAt,
+      commandId: input.command.commandId,
+    }),
+    type: "thread.deleted",
+    payload: {
+      threadId: input.threadId,
+      deletedAt: input.occurredAt,
+    },
+  };
+}
+
+function threadArchivedEvent(input: {
+  readonly command: OrchestrationCommand;
+  readonly threadId: ThreadId;
+  readonly occurredAt: string;
+}): DecidedEvent {
+  return {
+    ...withEventBase({
+      aggregateKind: "thread",
+      aggregateId: input.threadId,
+      occurredAt: input.occurredAt,
+      commandId: input.command.commandId,
+    }),
+    type: "thread.archived",
+    payload: {
+      threadId: input.threadId,
+      archivedAt: input.occurredAt,
+      updatedAt: input.occurredAt,
+    },
+  };
+}
+
 function hasNativeHandoffMessages(
   thread: Pick<OrchestrationReadModel["threads"][number], "messages">,
 ): boolean {
@@ -91,9 +202,7 @@ function buildImportedHandoffMessagesFromSourceThread(
         message,
       ): message is (typeof thread.messages)[number] & {
         readonly role: "user" | "assistant";
-      } =>
-        (message.role === "user" || message.role === "assistant") &&
-        message.streaming === false,
+      } => (message.role === "user" || message.role === "assistant") && message.streaming === false,
     )
     .map((message) => ({
       messageId: newMessageId(),
@@ -198,19 +307,66 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         projectId: command.projectId,
       });
       const occurredAt = nowIso();
-      return {
-        ...withEventBase({
-          aggregateKind: "project",
-          aggregateId: command.projectId,
-          occurredAt,
-          commandId: command.commandId,
-        }),
-        type: "project.deleted",
-        payload: {
-          projectId: command.projectId,
-          deletedAt: occurredAt,
+      const projectThreads = activeProjectThreads(readModel, command.projectId);
+      if (projectThreads.length > 0 && command.deleteThreads !== true) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Project '${command.projectId}' has ${projectThreads.length} active thread${projectThreads.length === 1 ? "" : "s"}. Set deleteThreads to delete them with the project.`,
+        });
+      }
+
+      const threadEvents = command.deleteThreads
+        ? childrenFirst(projectThreads).map((thread) =>
+            threadDeletedEvent({
+              command,
+              threadId: thread.id,
+              occurredAt,
+            }),
+          )
+        : [];
+
+      return [
+        ...threadEvents,
+        {
+          ...withEventBase({
+            aggregateKind: "project",
+            aggregateId: command.projectId,
+            occurredAt,
+            commandId: command.commandId,
+          }),
+          type: "project.deleted",
+          payload: {
+            projectId: command.projectId,
+            deletedAt: occurredAt,
+          },
         },
-      };
+      ];
+    }
+
+    case "project.archive": {
+      yield* requireProject({
+        readModel,
+        command,
+        projectId: command.projectId,
+      });
+      const projectThreads = activeProjectThreads(readModel, command.projectId).filter(
+        (thread) => thread.archivedAt === null,
+      );
+      if (projectThreads.length === 0) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Project '${command.projectId}' has no unarchived threads to archive.`,
+        });
+      }
+
+      const occurredAt = nowIso();
+      return childrenFirst(projectThreads).map((thread) =>
+        threadArchivedEvent({
+          command,
+          threadId: thread.id,
+          occurredAt,
+        }),
+      );
     }
 
     case "project.orchestration-rules.update": {
@@ -219,7 +375,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         projectId: command.projectId,
       });
-      const existingRules = readModel.projectRules.find((entry) => entry.projectId === command.projectId);
+      const existingRules = readModel.projectRules.find(
+        (entry) => entry.projectId === command.projectId,
+      );
       const occurredAt = command.createdAt;
       return {
         ...withEventBase({
@@ -235,11 +393,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           defaultModel:
             command.defaultModel !== undefined
               ? command.defaultModel
-              : existingRules?.defaultModel ?? project.defaultModel ?? null,
+              : (existingRules?.defaultModel ?? project.defaultModel ?? null),
           defaultRuntimeMode:
-            command.defaultRuntimeMode ??
-            existingRules?.defaultRuntimeMode ??
-            "full-access",
+            command.defaultRuntimeMode ?? existingRules?.defaultRuntimeMode ?? "full-access",
           onSuccessMoveTo: command.onSuccessMoveTo ?? existingRules?.onSuccessMoveTo ?? "review",
           onFailureMoveTo: command.onFailureMoveTo ?? existingRules?.onFailureMoveTo ?? "blocked",
           updatedAt: occurredAt,
@@ -366,7 +522,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         projectId: task.projectId,
       });
-      const projectRules = readModel.projectRules.find((entry) => entry.projectId === task.projectId);
+      const projectRules = readModel.projectRules.find(
+        (entry) => entry.projectId === task.projectId,
+      );
       const threadId = task.threadId ?? newThreadIdFromTask(task.id);
       const existingThread = readModel.threads.find((entry) => entry.id === threadId) ?? null;
       const model = projectRules?.defaultModel ?? project.defaultModel ?? "gpt-5";
@@ -552,7 +710,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         projectId: task.projectId,
       });
-      const projectRules = readModel.projectRules.find((entry) => entry.projectId === task.projectId);
+      const projectRules = readModel.projectRules.find(
+        (entry) => entry.projectId === task.projectId,
+      );
       const threadId = task.threadId ?? newThreadIdFromTask(task.id);
       const model = projectRules?.defaultModel ?? project.defaultModel ?? "gpt-5";
       const runtimeMode = projectRules?.defaultRuntimeMode ?? "full-access";
@@ -652,7 +812,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           projectId: command.projectId,
           origin: command.origin ?? "user",
           taskId: command.taskId ?? null,
-          ...(command.parentThreadId !== undefined ? { parentThreadId: command.parentThreadId } : {}),
+          ...(command.parentThreadId !== undefined
+            ? { parentThreadId: command.parentThreadId }
+            : {}),
           ...(command.subagentAgentId !== undefined
             ? { subagentAgentId: command.subagentAgentId }
             : {}),
@@ -741,7 +903,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
 
       const importedMessagesFromSource = buildImportedHandoffMessagesFromSourceThread(sourceThread);
       const importedMessages =
-        importedMessagesFromSource.length > 0 ? importedMessagesFromSource : command.importedMessages;
+        importedMessagesFromSource.length > 0
+          ? importedMessagesFromSource
+          : command.importedMessages;
 
       const importedMessageEvents: ReadonlyArray<Omit<OrchestrationEvent, "sequence">> =
         importedMessages.map((message) => ({
@@ -769,48 +933,43 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.delete": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
       const occurredAt = nowIso();
-      return {
-        ...withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
+      const threadsToDelete =
+        command.includeChildren === true ? threadTree(readModel, command.threadId) : [thread];
+      return childrenFirst(threadsToDelete).map((entry) =>
+        threadDeletedEvent({
+          command,
+          threadId: entry.id,
           occurredAt,
-          commandId: command.commandId,
         }),
-        type: "thread.deleted",
-        payload: {
-          threadId: command.threadId,
-          deletedAt: occurredAt,
-        },
-        };
+      );
     }
 
     case "thread.archive": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
       const occurredAt = nowIso();
-      return {
-        ...withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
+      const threadsToArchive =
+        command.includeChildren === true
+          ? threadTree(readModel, command.threadId).filter(
+              (entry) => entry.deletedAt === null && entry.archivedAt === null,
+            )
+          : [thread];
+      return childrenFirst(threadsToArchive).map((entry) =>
+        threadArchivedEvent({
+          command,
+          threadId: entry.id,
           occurredAt,
-          commandId: command.commandId,
         }),
-        type: "thread.archived",
-        payload: {
-          threadId: command.threadId,
-          archivedAt: occurredAt,
-          updatedAt: occurredAt,
-        },
-      };
+      );
     }
 
     case "thread.unarchive": {
@@ -857,7 +1016,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(command.model !== undefined ? { model: command.model } : {}),
           ...(command.isPinned !== undefined ? { isPinned: command.isPinned } : {}),
           ...(command.pinnedAt !== undefined ? { pinnedAt: command.pinnedAt } : {}),
-          ...(command.parentThreadId !== undefined ? { parentThreadId: command.parentThreadId } : {}),
+          ...(command.parentThreadId !== undefined
+            ? { parentThreadId: command.parentThreadId }
+            : {}),
           ...(command.subagentAgentId !== undefined
             ? { subagentAgentId: command.subagentAgentId }
             : {}),

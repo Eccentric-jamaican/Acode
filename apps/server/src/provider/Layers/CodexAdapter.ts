@@ -739,17 +739,30 @@ function mapToRuntimeEvents(
   }
 
   if (event.method === "thread/started") {
-    const payloadThreadId = asString(asObject(payload?.thread)?.id);
+    const thread = asObject(payload?.thread);
+    const payloadThreadId = asString(thread?.id);
     const providerThreadId = payloadThreadId ?? asString(payload?.threadId);
     if (!providerThreadId) {
       return [];
     }
+    const agentNickname =
+      asString(thread?.agentNickname) ??
+      asString(thread?.agent_nickname) ??
+      asString(thread?.nickname);
+    const agentRole =
+      asString(thread?.agentRole) ?? asString(thread?.agent_role) ?? asString(thread?.role);
+    const agentId = asString(thread?.agentId) ?? asString(thread?.agent_id);
+    const name = asString(thread?.name);
     return [
       {
         ...runtimeEventBase(event, canonicalThreadId),
         type: "thread.started",
         payload: {
           providerThreadId,
+          ...(agentId ? { agentId } : {}),
+          ...(agentNickname ? { agentNickname } : {}),
+          ...(agentRole ? { agentRole } : {}),
+          ...(name ? { name } : {}),
         },
       },
     ];

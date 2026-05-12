@@ -19,7 +19,7 @@
     "start": "node dist/index.mjs",
     "prepare": "effect-language-service patch",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --exclude src/git/Layers/GitCore.test.ts && vitest run src/git/Layers/GitCore.test.ts -t \"shell process execution|initGitRepo|listGitBranches|checkoutGitBranch|createGitBranch|renameGitBranch\" && vitest run src/git/Layers/GitCore.test.ts -t \"createGitWorktree|full flow\" && vitest run src/git/Layers/GitCore.test.ts -t \"GitCore\""
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.77",

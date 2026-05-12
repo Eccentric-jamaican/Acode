@@ -66,6 +66,33 @@ function firstStringValue(
   return undefined;
 }
 
+const SUBAGENT_NAME_KEYS = [
+  "agentNickname",
+  "agent_nickname",
+  "receiverAgentNickname",
+  "receiver_agent_nickname",
+  "newAgentNickname",
+  "new_agent_nickname",
+  "agentName",
+  "agent_name",
+  "displayName",
+  "display_name",
+  "nickname",
+  "name",
+] as const;
+
+const SUBAGENT_ROLE_KEYS = [
+  "agentRole",
+  "agent_role",
+  "receiverAgentRole",
+  "receiver_agent_role",
+  "newAgentRole",
+  "new_agent_role",
+  "agentType",
+  "agent_type",
+  "role",
+] as const;
+
 function extractSubagentIdentityFromSource(
   item: Record<string, unknown>,
 ): ParsedSubagentIdentityHint | null {
@@ -75,7 +102,9 @@ function extractSubagentIdentityFromSource(
   const threadSpawn = asRecord(subagent?.thread_spawn) ?? asRecord(subagent?.threadSpawn);
   const providerThreadId =
     asTrimmedString(
-      item.threadId ??
+      item.providerThreadId ??
+        item.provider_thread_id ??
+        item.threadId ??
         item.thread_id ??
         item.conversationId ??
         item.conversation_id ??
@@ -87,13 +116,13 @@ function extractSubagentIdentityFromSource(
     firstStringValue(threadSpawn, ["agentId", "agent_id", "id"]) ??
     firstStringValue(subagent, ["agentId", "agent_id", "id"]);
   const nickname =
-    firstStringValue(item, ["agentNickname", "agent_nickname", "nickname"]) ??
-    firstStringValue(threadSpawn, ["agentNickname", "agent_nickname", "nickname", "name"]) ??
-    firstStringValue(subagent, ["agentNickname", "agent_nickname", "nickname", "name"]);
+    firstStringValue(item, SUBAGENT_NAME_KEYS) ??
+    firstStringValue(threadSpawn, SUBAGENT_NAME_KEYS) ??
+    firstStringValue(subagent, SUBAGENT_NAME_KEYS);
   const role =
-    firstStringValue(item, ["agentRole", "agent_role", "agentType", "agent_type"]) ??
-    firstStringValue(threadSpawn, ["agentRole", "agent_role", "agentType", "agent_type"]) ??
-    firstStringValue(subagent, ["agentRole", "agent_role", "agentType", "agent_type"]);
+    firstStringValue(item, SUBAGENT_ROLE_KEYS) ??
+    firstStringValue(threadSpawn, SUBAGENT_ROLE_KEYS) ??
+    firstStringValue(subagent, SUBAGENT_ROLE_KEYS);
 
   if (!providerThreadId && !agentId && !nickname && !role) {
     return null;
@@ -195,26 +224,8 @@ export function decodeSubagentReceiverAgents(
         "new_agent_id",
         "id",
       ]);
-      const nickname = firstStringValue(object, [
-        "agentNickname",
-        "agent_nickname",
-        "receiverAgentNickname",
-        "receiver_agent_nickname",
-        "newAgentNickname",
-        "new_agent_nickname",
-        "nickname",
-        "name",
-      ]);
-      const role = firstStringValue(object, [
-        "agentRole",
-        "agent_role",
-        "receiverAgentRole",
-        "receiver_agent_role",
-        "newAgentRole",
-        "new_agent_role",
-        "agentType",
-        "agent_type",
-      ]);
+      const nickname = firstStringValue(object, SUBAGENT_NAME_KEYS);
+      const role = firstStringValue(object, SUBAGENT_ROLE_KEYS);
       const directModel = firstStringValue(object, ["model", "modelName", "model_name"]);
       const requestedModel = firstStringValue(object, ["requestedModel", "requested_model"]);
       const model = directModel ?? requestedModel ?? topLevelModel;
@@ -243,24 +254,8 @@ export function decodeSubagentReceiverAgents(
   }
 
   const agentId = firstStringValue(item, ["newAgentId", "new_agent_id", "agentId", "agent_id"]);
-  const nickname = firstStringValue(item, [
-    "newAgentNickname",
-    "new_agent_nickname",
-    "agentNickname",
-    "agent_nickname",
-    "receiverAgentNickname",
-    "receiver_agent_nickname",
-  ]);
-  const role = firstStringValue(item, [
-    "receiverAgentRole",
-    "receiver_agent_role",
-    "newAgentRole",
-    "new_agent_role",
-    "agentRole",
-    "agent_role",
-    "agentType",
-    "agent_type",
-  ]);
+  const nickname = firstStringValue(item, SUBAGENT_NAME_KEYS);
+  const role = firstStringValue(item, SUBAGENT_ROLE_KEYS);
 
   return [
     {
@@ -285,38 +280,14 @@ function buildSubagentAgentState(
           agentId: firstStringValue(object, ["agentId", "agent_id"]),
         }
       : {}),
-    ...(firstStringValue(object, [
-      "agentNickname",
-      "agent_nickname",
-      "receiverAgentNickname",
-      "receiver_agent_nickname",
-    ])
+    ...(firstStringValue(object, SUBAGENT_NAME_KEYS)
       ? {
-          nickname: firstStringValue(object, [
-            "agentNickname",
-            "agent_nickname",
-            "receiverAgentNickname",
-            "receiver_agent_nickname",
-          ]),
+          nickname: firstStringValue(object, SUBAGENT_NAME_KEYS),
         }
       : {}),
-    ...(firstStringValue(object, [
-      "agentRole",
-      "agent_role",
-      "receiverAgentRole",
-      "receiver_agent_role",
-      "agentType",
-      "agent_type",
-    ])
+    ...(firstStringValue(object, SUBAGENT_ROLE_KEYS)
       ? {
-          role: firstStringValue(object, [
-            "agentRole",
-            "agent_role",
-            "receiverAgentRole",
-            "receiver_agent_role",
-            "agentType",
-            "agent_type",
-          ]),
+          role: firstStringValue(object, SUBAGENT_ROLE_KEYS),
         }
       : {}),
     ...(firstStringValue(object, [
@@ -460,6 +431,8 @@ export function extractSubagentIdentityHints(
   pushHint(extractSubagentIdentityFromSource(item));
   pushHint({
     providerThreadId: firstStringValue(item, [
+      "providerThreadId",
+      "provider_thread_id",
       "newThreadId",
       "new_thread_id",
       "receiverThreadId",
@@ -476,23 +449,10 @@ export function extractSubagentIdentityHints(
       "agent_id",
     ]),
     nickname: firstStringValue(item, [
-      "newAgentNickname",
-      "new_agent_nickname",
-      "receiverAgentNickname",
-      "receiver_agent_nickname",
-      "agentNickname",
-      "agent_nickname",
-      "nickname",
+      ...SUBAGENT_NAME_KEYS,
     ]),
     role: firstStringValue(item, [
-      "newAgentRole",
-      "new_agent_role",
-      "receiverAgentRole",
-      "receiver_agent_role",
-      "agentRole",
-      "agent_role",
-      "agentType",
-      "agent_type",
+      ...SUBAGENT_ROLE_KEYS,
     ]),
   });
 

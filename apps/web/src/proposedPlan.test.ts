@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildProposedPlanWorkspacePath,
   buildPlanImplementationThreadTitle,
   buildPlanImplementationPrompt,
   buildProposedPlanMarkdownFilename,
+  findWorkspacePlansDirectories,
   proposedPlanTitle,
   resolvePlanFollowUpSubmission,
 } from "./proposedPlan";
@@ -73,5 +75,29 @@ describe("buildProposedPlanMarkdownFilename", () => {
 
   it("falls back to a generic filename when the plan has no heading", () => {
     expect(buildProposedPlanMarkdownFilename("- step 1")).toBe("plan.md");
+  });
+});
+
+describe("findWorkspacePlansDirectories", () => {
+  it("finds plans directories anywhere in the workspace and prefers the root plans dir", () => {
+    expect(
+      findWorkspacePlansDirectories([
+        { kind: "directory", path: "docs" },
+        { kind: "directory", path: "docs/plans" },
+        { kind: "file", path: "plans.md" },
+        { kind: "directory", path: "plans" },
+      ]),
+    ).toEqual(["plans", "docs/plans"]);
+  });
+});
+
+describe("buildProposedPlanWorkspacePath", () => {
+  it("joins the selected plans directory with the generated markdown filename", () => {
+    expect(
+      buildProposedPlanWorkspacePath({
+        directoryPath: "docs/plans",
+        planMarkdown: "# Ship Better Plan Cards",
+      }),
+    ).toBe("docs/plans/ship-better-plan-cards.md");
   });
 });

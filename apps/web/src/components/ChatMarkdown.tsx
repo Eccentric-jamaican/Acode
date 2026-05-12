@@ -25,7 +25,12 @@ import { fnv1a32 } from "../lib/diffRendering";
 import { LRUCache } from "../lib/lruCache";
 import { normalizeSyntaxLanguage } from "../lib/syntaxLanguage";
 import { useTheme } from "../hooks/useTheme";
-import { resolveMarkdownFileLinkTarget, resolveMarkdownFileViewerPath } from "../markdown-links";
+import {
+  normalizeMarkdownFileLinkLabel,
+  parseMarkdownFileLinkLiteral,
+  resolveMarkdownFileLinkTarget,
+  resolveMarkdownFileViewerPath,
+} from "../markdown-links";
 import { readNativeApi } from "../nativeApi";
 import { preferredTerminalEditor } from "../terminal-links";
 import { cn } from "../lib/utils";
@@ -210,6 +215,43 @@ const MarkdownFileLinkIcon = memo(function MarkdownFileLinkIcon(props: {
   );
 });
 
+function MarkdownFileLink(props: {
+  href: string | undefined;
+  label: string | undefined;
+  targetPath: string;
+  viewerPath: string | null;
+  theme: "light" | "dark";
+  className?: string | undefined;
+  onOpenFilePath?: ((relativePath: string) => void) | undefined;
+}) {
+  const displayLabel = normalizeMarkdownFileLinkLabel(props.label, props.targetPath);
+
+  return (
+    <a
+      href={props.href}
+      className={cn("chat-markdown-file-link", props.className)}
+      title={props.viewerPath ?? props.targetPath}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (props.viewerPath && props.onOpenFilePath) {
+          props.onOpenFilePath(props.viewerPath);
+          return;
+        }
+        const api = readNativeApi();
+        if (api) {
+          void api.shell.openInEditor(props.targetPath, preferredTerminalEditor());
+        } else {
+          console.warn("Native API not found. Unable to open file in editor.");
+        }
+      }}
+    >
+      <MarkdownFileLinkIcon targetPath={props.targetPath} theme={props.theme} />
+      <span className="truncate">{displayLabel}</span>
+    </a>
+  );
+}
+
 interface SuspenseShikiCodeBlockProps {
   className: string | undefined;
   code: string;
@@ -274,30 +316,45 @@ function ChatMarkdown({
           return <a {...props} href={href} target="_blank" rel="noreferrer" />;
         }
         const viewerPath = resolveMarkdownFileViewerPath(href, cwd);
+        const label = nodeToPlainText(props.children);
 
         return (
-          <a
-            {...props}
+          <MarkdownFileLink
             href={href}
-            className={cn("chat-markdown-file-link", props.className)}
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              if (viewerPath && onOpenFilePath) {
-                onOpenFilePath(viewerPath);
-                return;
-              }
-              const api = readNativeApi();
-              if (api) {
-                void api.shell.openInEditor(targetPath, preferredTerminalEditor());
-              } else {
-                console.warn("Native API not found. Unable to open file in editor.");
-              }
-            }}
-          >
-            <MarkdownFileLinkIcon targetPath={targetPath} theme={resolvedTheme} />
-            {props.children}
-          </a>
+            label={label}
+            targetPath={targetPath}
+            viewerPath={viewerPath}
+            theme={resolvedTheme}
+            className={props.className}
+            onOpenFilePath={onOpenFilePath}
+          />
+        );
+      },
+      code({ node: _node, className, children, ...props }) {
+        const codeText = nodeToPlainText(children);
+        if (!className) {
+          const literalLink = parseMarkdownFileLinkLiteral(codeText);
+          if (literalLink) {
+            const targetPath = resolveMarkdownFileLinkTarget(literalLink.href, cwd);
+            if (targetPath) {
+              return (
+                <MarkdownFileLink
+                  href={literalLink.href}
+                  label={literalLink.label}
+                  targetPath={targetPath}
+                  viewerPath={resolveMarkdownFileViewerPath(literalLink.href, cwd)}
+                  theme={resolvedTheme}
+                  onOpenFilePath={onOpenFilePath}
+                />
+              );
+            }
+          }
+        }
+
+        return (
+          <code {...props} className={className}>
+            {children}
+          </code>
         );
       },
       pre({ node: _node, children, ...props }) {

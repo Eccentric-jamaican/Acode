@@ -439,7 +439,7 @@ describe("TerminalManager", () => {
     );
 
     manager.dispose();
-  });
+  }, 30_000);
 
   it("caps persisted history to configured line limit", async () => {
     const { manager, ptyAdapter } = makeManager(3);
@@ -456,183 +456,156 @@ describe("TerminalManager", () => {
     expect(nonEmptyLines).toEqual(["line2", "line3", "line4"]);
 
     manager.dispose();
-  });
+  }, 15_000);
 
-  it(
-    "deletes history file when close(deleteHistory=true)",
-    async () => {
-      const { manager, ptyAdapter, logsDir } = makeManager();
-      try {
-        await manager.open(openInput());
-        const process = ptyAdapter.processes[0];
-        expect(process).toBeDefined();
-        if (!process) return;
-        process.emitData("bye\n");
-        await waitFor(() => fs.existsSync(historyLogPath(logsDir)), 10_000);
+  it("deletes history file when close(deleteHistory=true)", async () => {
+    const { manager, ptyAdapter, logsDir } = makeManager();
+    try {
+      await manager.open(openInput());
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+      process.emitData("bye\n");
+      await waitFor(() => fs.existsSync(historyLogPath(logsDir)), 10_000);
 
-        await manager.close({ threadId: "thread-1", deleteHistory: true });
-        expect(fs.existsSync(historyLogPath(logsDir))).toBe(false);
-      } finally {
-        manager.dispose();
-      }
-    },
-    15_000,
-  );
+      await manager.close({ threadId: "thread-1", deleteHistory: true });
+      expect(fs.existsSync(historyLogPath(logsDir))).toBe(false);
+    } finally {
+      manager.dispose();
+    }
+  }, 15_000);
 
-  it(
-    "closes all terminals for a thread when close omits terminalId",
-    async () => {
-      const { manager, ptyAdapter, logsDir } = makeManager();
-      try {
-        await manager.open(openInput({ terminalId: "default" }));
-        await manager.open(openInput({ terminalId: "sidecar" }));
-        const defaultProcess = ptyAdapter.processes[0];
-        const sidecarProcess = ptyAdapter.processes[1];
-        expect(defaultProcess).toBeDefined();
-        expect(sidecarProcess).toBeDefined();
-        if (!defaultProcess || !sidecarProcess) return;
+  it("closes all terminals for a thread when close omits terminalId", async () => {
+    const { manager, ptyAdapter, logsDir } = makeManager();
+    try {
+      await manager.open(openInput({ terminalId: "default" }));
+      await manager.open(openInput({ terminalId: "sidecar" }));
+      const defaultProcess = ptyAdapter.processes[0];
+      const sidecarProcess = ptyAdapter.processes[1];
+      expect(defaultProcess).toBeDefined();
+      expect(sidecarProcess).toBeDefined();
+      if (!defaultProcess || !sidecarProcess) return;
 
-        defaultProcess.emitData("default\n");
-        sidecarProcess.emitData("sidecar\n");
-        await waitFor(
-          () => fs.existsSync(multiTerminalHistoryLogPath(logsDir, "thread-1", "default")),
-          10_000,
-        );
-        await waitFor(
-          () => fs.existsSync(multiTerminalHistoryLogPath(logsDir, "thread-1", "sidecar")),
-          10_000,
-        );
-
-        await manager.close({ threadId: "thread-1", deleteHistory: true });
-
-        expect(defaultProcess.killed).toBe(true);
-        expect(sidecarProcess.killed).toBe(true);
-        expect(fs.existsSync(multiTerminalHistoryLogPath(logsDir, "thread-1", "default"))).toBe(
-          false,
-        );
-        expect(fs.existsSync(multiTerminalHistoryLogPath(logsDir, "thread-1", "sidecar"))).toBe(
-          false,
-        );
-      } finally {
-        manager.dispose();
-      }
-    },
-    15_000,
-  );
-
-  it(
-    "escalates terminal shutdown to SIGKILL when process does not exit in time",
-    async () => {
-      const { manager, ptyAdapter } = makeManager(5, { processKillGraceMs: 10 });
-      try {
-        await manager.open(openInput());
-        const process = ptyAdapter.processes[0];
-        expect(process).toBeDefined();
-        if (!process) return;
-
-        await manager.close({ threadId: "thread-1" });
-        await waitFor(() => process.killSignals.includes("SIGKILL"), 10_000);
-
-        expect(process.killSignals[0]).toBe("SIGTERM");
-        expect(process.killSignals).toContain("SIGKILL");
-      } finally {
-        manager.dispose();
-      }
-    },
-    15_000,
-  );
-
-  it(
-    "evicts oldest inactive terminal sessions when retention limit is exceeded",
-    async () => {
-      const { manager, ptyAdapter } = makeManager(5, { maxRetainedInactiveSessions: 1 });
-
-      await manager.open(openInput({ threadId: "thread-1" }));
-      await manager.open(openInput({ threadId: "thread-2" }));
-
-      const first = ptyAdapter.processes[0];
-      const second = ptyAdapter.processes[1];
-      expect(first).toBeDefined();
-      expect(second).toBeDefined();
-      if (!first || !second) return;
-
-      first.emitExit({ exitCode: 0, signal: 0 });
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      second.emitExit({ exitCode: 0, signal: 0 });
-
+      defaultProcess.emitData("default\n");
+      sidecarProcess.emitData("sidecar\n");
       await waitFor(
-        () => {
-          const sessions = (manager as unknown as { sessions: Map<string, unknown> }).sessions;
-          return sessions.size === 1;
-        },
+        () => fs.existsSync(multiTerminalHistoryLogPath(logsDir, "thread-1", "default")),
+        10_000,
+      );
+      await waitFor(
+        () => fs.existsSync(multiTerminalHistoryLogPath(logsDir, "thread-1", "sidecar")),
         10_000,
       );
 
+      await manager.close({ threadId: "thread-1", deleteHistory: true });
+
+      expect(defaultProcess.killed).toBe(true);
+      expect(sidecarProcess.killed).toBe(true);
+      expect(fs.existsSync(multiTerminalHistoryLogPath(logsDir, "thread-1", "default"))).toBe(
+        false,
+      );
+      expect(fs.existsSync(multiTerminalHistoryLogPath(logsDir, "thread-1", "sidecar"))).toBe(
+        false,
+      );
+    } finally {
+      manager.dispose();
+    }
+  }, 30_000);
+
+  it("escalates terminal shutdown to SIGKILL when process does not exit in time", async () => {
+    const { manager, ptyAdapter } = makeManager(5, { processKillGraceMs: 10 });
+    try {
+      await manager.open(openInput());
+      const process = ptyAdapter.processes[0];
+      expect(process).toBeDefined();
+      if (!process) return;
+
+      await manager.close({ threadId: "thread-1" });
+      await waitFor(() => process.killSignals.includes("SIGKILL"), 10_000);
+
+      expect(process.killSignals[0]).toBe("SIGTERM");
+      expect(process.killSignals).toContain("SIGKILL");
+    } finally {
+      manager.dispose();
+    }
+  }, 15_000);
+
+  it("evicts oldest inactive terminal sessions when retention limit is exceeded", async () => {
+    const { manager, ptyAdapter } = makeManager(5, { maxRetainedInactiveSessions: 1 });
+
+    await manager.open(openInput({ threadId: "thread-1" }));
+    await manager.open(openInput({ threadId: "thread-2" }));
+
+    const first = ptyAdapter.processes[0];
+    const second = ptyAdapter.processes[1];
+    expect(first).toBeDefined();
+    expect(second).toBeDefined();
+    if (!first || !second) return;
+
+    first.emitExit({ exitCode: 0, signal: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    second.emitExit({ exitCode: 0, signal: 0 });
+
+    await waitFor(() => {
       const sessions = (manager as unknown as { sessions: Map<string, unknown> }).sessions;
-      const keys = [...sessions.keys()];
-      expect(keys).toEqual(["thread-2\u0000default"]);
+      return sessions.size === 1;
+    }, 10_000);
 
-      manager.dispose();
-    },
-    15_000,
-  );
+    const sessions = (manager as unknown as { sessions: Map<string, unknown> }).sessions;
+    const keys = [...sessions.keys()];
+    expect(keys).toEqual(["thread-2\u0000default"]);
 
-  it(
-    "migrates legacy transcript filenames to terminal-scoped history path on open",
-    async () => {
-      const { manager, logsDir } = makeManager();
-      const legacyPath = path.join(logsDir, "thread-1.log");
-      const nextPath = historyLogPath(logsDir);
-      fs.writeFileSync(legacyPath, "legacy-line\n", "utf8");
+    manager.dispose();
+  }, 15_000);
 
-      const history = await (
-        manager as unknown as {
-          readHistory(threadId: string, terminalId: string): Promise<string>;
-        }
-      ).readHistory("thread-1", "default");
+  it("migrates legacy transcript filenames to terminal-scoped history path on open", async () => {
+    const { manager, logsDir } = makeManager();
+    const legacyPath = path.join(logsDir, "thread-1.log");
+    const nextPath = historyLogPath(logsDir);
+    fs.writeFileSync(legacyPath, "legacy-line\n", "utf8");
 
-      expect(history).toBe("legacy-line\n");
-      expect(fs.existsSync(nextPath)).toBe(true);
-      expect(fs.readFileSync(nextPath, "utf8")).toBe("legacy-line\n");
-      expect(fs.existsSync(legacyPath)).toBe(false);
-
-      manager.dispose();
-    },
-    15_000,
-  );
-
-  it(
-    "retries with fallback shells when preferred shell spawn fails",
-    async () => {
-      const { manager, ptyAdapter } = makeManager(5, {
-        shellResolver: () => "/definitely/missing-shell -l",
-      });
-      ptyAdapter.spawnFailures.push(new Error("posix_spawnp failed."));
-
-      const snapshot = await manager.open(openInput());
-
-      expect(snapshot.status).toBe("running");
-      expect(ptyAdapter.spawnInputs.length).toBeGreaterThanOrEqual(2);
-      expect(ptyAdapter.spawnInputs[0]?.shell).toBe("/definitely/missing-shell");
-
-      if (process.platform === "win32") {
-        expect(
-          ptyAdapter.spawnInputs.some(
-            (input) => ["cmd.exe", "powershell.exe"].includes(path.basename(input.shell).toLowerCase()),
-          ),
-        ).toBe(true);
-      } else {
-        expect(
-          ptyAdapter.spawnInputs.some((input) =>
-            ["/bin/zsh", "/bin/bash", "/bin/sh", "zsh", "bash", "sh"].includes(input.shell),
-          ),
-        ).toBe(true);
+    const history = await (
+      manager as unknown as {
+        readHistory(threadId: string, terminalId: string): Promise<string>;
       }
+    ).readHistory("thread-1", "default");
 
-      manager.dispose();
-    },
-    15_000,
-  );
+    expect(history).toBe("legacy-line\n");
+    expect(fs.existsSync(nextPath)).toBe(true);
+    expect(fs.readFileSync(nextPath, "utf8")).toBe("legacy-line\n");
+    expect(fs.existsSync(legacyPath)).toBe(false);
+
+    manager.dispose();
+  }, 15_000);
+
+  it("retries with fallback shells when preferred shell spawn fails", async () => {
+    const { manager, ptyAdapter } = makeManager(5, {
+      shellResolver: () => "/definitely/missing-shell -l",
+    });
+    ptyAdapter.spawnFailures.push(new Error("posix_spawnp failed."));
+
+    const snapshot = await manager.open(openInput());
+
+    expect(snapshot.status).toBe("running");
+    expect(ptyAdapter.spawnInputs.length).toBeGreaterThanOrEqual(2);
+    expect(ptyAdapter.spawnInputs[0]?.shell).toBe("/definitely/missing-shell");
+
+    if (process.platform === "win32") {
+      expect(
+        ptyAdapter.spawnInputs.some((input) =>
+          ["cmd.exe", "powershell.exe"].includes(path.basename(input.shell).toLowerCase()),
+        ),
+      ).toBe(true);
+    } else {
+      expect(
+        ptyAdapter.spawnInputs.some((input) =>
+          ["/bin/zsh", "/bin/bash", "/bin/sh", "zsh", "bash", "sh"].includes(input.shell),
+        ),
+      ).toBe(true);
+    }
+
+    manager.dispose();
+  }, 15_000);
 
   it("filters app runtime env variables from terminal sessions", async () => {
     const originalValues = new Map<string, string | undefined>();

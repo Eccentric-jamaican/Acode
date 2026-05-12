@@ -44,9 +44,9 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
   type WheelEvent as ReactWheelEvent,
 } from "react";
-import { FiGitBranch } from "react-icons/fi";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useDebouncedValue } from "@tanstack/react-pacer";
 import { useNavigate, useSearch } from "@tanstack/react-router";
@@ -146,8 +146,6 @@ import {
   type FilePanelComment,
   useFilePanelStore,
 } from "../filePanelStore";
-import BranchToolbar from "./BranchToolbar";
-import GitActionsControl from "./GitActionsControl";
 import { ThreadWorktreeHandoffDialog } from "./ThreadWorktreeHandoffDialog";
 import {
   isOpenFavoriteEditorShortcut,
@@ -181,6 +179,8 @@ import {
   ZapIcon,
   PinIcon,
   PinOffIcon,
+  SearchIcon,
+  StarIcon,
 } from "lucide-react";
 import { Button } from "./ui/button";
 import { Separator } from "./ui/separator";
@@ -193,12 +193,12 @@ import {
   MenuRadioGroup,
   MenuRadioItem,
   MenuSeparator as MenuDivider,
-  MenuSub,
-  MenuSubPopup,
-  MenuSubTrigger,
   MenuShortcut,
   MenuTrigger,
 } from "./ui/menu";
+import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
+import { Combobox, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from "./ui/combobox";
+import { ScrollArea } from "./ui/scroll-area";
 import {
   ClaudeAI,
   CursorIcon,
@@ -220,7 +220,7 @@ import {
   resolveThreadHandoffBadgeLabel,
 } from "../lib/threadHandoff";
 import { decodeProjectScriptKeybindingRule } from "~/lib/projectScriptKeybindings";
-import ProjectScriptsControl, { type NewProjectScriptInput } from "./ProjectScriptsControl";
+import type { NewProjectScriptInput } from "./ProjectScriptsControl";
 import {
   commandForProjectScript,
   nextProjectScriptId,
@@ -267,7 +267,11 @@ import { ComposerExtrasMenu } from "./chat/ComposerExtrasMenu";
 
 const LAST_EDITOR_KEY = "t3code:last-editor";
 const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by-project";
+const MODEL_PICKER_FAVORITES_KEY = "t3code:model-picker-favorites:v1";
 const THREAD_CONTEXT_PANEL_PINNED_KEY = "t3code:thread-context-panel-pinned";
+const THREAD_CONTEXT_PANEL_ARTIFACTS_COLLAPSED_KEY =
+  "t3code:thread-context-panel-artifacts-collapsed";
+const THREAD_CONTEXT_PANEL_SOURCES_COLLAPSED_KEY = "t3code:thread-context-panel-sources-collapsed";
 const ATTACHMENT_PREVIEW_HANDOFF_TTL_MS = 5000;
 const IMAGE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / (1024 * 1024))}MB`;
 const IMAGE_ONLY_BOOTSTRAP_PROMPT =
@@ -718,7 +722,7 @@ function collectThreadContextArtifacts(input: {
     }
   }
 
-  return artifacts.slice(0, 8);
+  return artifacts;
 }
 
 function collectThreadContextSources(thread: Thread): ThreadContextSource[] {
@@ -751,7 +755,7 @@ function collectThreadContextSources(thread: Thread): ThreadContextSource[] {
     }
   }
 
-  return [...sources.values()].slice(0, 5);
+  return [...sources.values()];
 }
 
 type SelectedComposerShortcut = {
@@ -1569,11 +1573,14 @@ export default function ChatView({
   const selectedServiceTier = resolveAppServiceTier(selectedServiceTierSetting);
   const serverConfigQuery = useQuery(serverConfigQueryOptions());
   const homeDirectory = serverConfigQuery.data?.homeDirectory ?? null;
+  const chatWorkspaceRoot = serverConfigQuery.data?.chatWorkspaceRoot ?? null;
   const projectPickerProjects = useMemo(
-    () => projects.filter((project) => !isHomeProject(project, homeDirectory)),
-    [homeDirectory, projects],
+    () => projects.filter((project) => !isHomeProject(project, chatWorkspaceRoot ?? homeDirectory)),
+    [chatWorkspaceRoot, homeDirectory, projects],
   );
-  const isActiveHomeProject = activeProject ? isHomeProject(activeProject, homeDirectory) : false;
+  const isActiveHomeProject = activeProject
+    ? isHomeProject(activeProject, chatWorkspaceRoot ?? homeDirectory)
+    : false;
   const providerStatuses = serverConfigQuery.data?.providers ?? EMPTY_PROVIDER_STATUSES;
   const lockedProvider: ProviderKind | null = hasThreadStarted
     ? (sessionProvider ?? inferredProviderFromThreadModel ?? selectedProviderByThreadId ?? null)
@@ -5454,7 +5461,7 @@ export default function ChatView({
         <PlanModePanel activePlan={activePlan} />
       </div>
 
-      {!resolvedDiffOpen ? (
+      {!resolvedDiffOpen && !resolvedBrowserPaneOpen ? (
         <ThreadContextPanel
           thread={activeThread}
           gitCwd={gitCwd}
@@ -5490,7 +5497,7 @@ export default function ChatView({
             >
               <div className="flex w-full max-w-2xl flex-col items-center gap-3 text-center">
                 <h3 className="text-xl font-normal text-foreground/90">Let's build</h3>
-                {activeProject ? (
+                {activeProject && !isActiveHomeProject ? (
                   <Menu>
                     <MenuTrigger
                       render={
@@ -5547,6 +5554,7 @@ export default function ChatView({
               hasMessages={timelineEntries.length > 0}
               isWorking={isWorking}
               activeTurnInProgress={!latestTurnSettled}
+              threadId={activeThread.id}
               activeTurnStartedAt={activeLatestTurn?.startedAt ?? null}
               scrollContainer={messagesScrollElement}
               timelineEntries={timelineEntries}
@@ -6328,20 +6336,6 @@ export default function ChatView({
         </form>
       </div>
 
-      {isGitRepo && (
-        <BranchToolbar
-          threadId={activeThread.id}
-          onEnvModeChange={onEnvModeChange}
-          envLocked={envLocked}
-          runtimeMode={runtimeMode}
-          onRuntimeModeChange={handleRuntimeModeChange}
-          onHandoffToWorktree={onHandoffToWorktree}
-          onHandoffToLocal={onHandoffToLocal}
-          handoffBusy={handoffBusy}
-          onComposerFocusRequest={scheduleComposerFocus}
-        />
-      )}
-
       {(() => {
         if (!terminalState.terminalOpen || !activeProject) {
           return null;
@@ -6350,7 +6344,7 @@ export default function ChatView({
           <ThreadTerminalDrawer
             key={activeThread.id}
             threadId={activeThread.id}
-            cwd={gitCwd ?? activeProject.cwd}
+            cwd={activeThread.worktreePath ?? gitCwd ?? activeProject.cwd}
             runtimeEnv={threadTerminalRuntimeEnv}
             height={terminalState.terminalHeight}
             terminalIds={terminalState.terminalIds}
@@ -6399,6 +6393,61 @@ interface ThreadContextPanelProps {
   onOpenChanges: () => void;
 }
 
+function readThreadContextPanelPreference(key: string, fallback: boolean): boolean {
+  if (typeof window === "undefined") {
+    return fallback;
+  }
+  const value = localStorage.getItem(key);
+  if (value === null) {
+    return fallback;
+  }
+  return value === "true";
+}
+
+function persistThreadContextPanelPreference(key: string, value: boolean): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  localStorage.setItem(key, value ? "true" : "false");
+}
+
+function ThreadContextCollapsibleSection(props: {
+  title: string;
+  count: number;
+  collapsed: boolean;
+  emptyLabel: string;
+  onToggle: () => void;
+  children: ReactNode;
+}) {
+  const { title, count, collapsed, emptyLabel, onToggle, children } = props;
+
+  return (
+    <div className="space-y-1">
+      <button
+        type="button"
+        className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs font-medium text-muted-foreground/80 transition-colors hover:bg-muted/45 hover:text-foreground/78"
+        aria-expanded={!collapsed}
+        onClick={onToggle}
+      >
+        <ChevronDownIcon
+          className={cn(
+            "size-3.5 shrink-0 transition-transform",
+            collapsed ? "-rotate-90" : "rotate-0",
+          )}
+          aria-hidden="true"
+        />
+        <span className="min-w-0 flex-1 truncate">{title}</span>
+        <span className="shrink-0 font-mono text-[11px] text-muted-foreground/55">{count}</span>
+      </button>
+      {collapsed ? null : count > 0 ? (
+        <div className="max-h-44 space-y-1 overflow-y-auto pr-1">{children}</div>
+      ) : (
+        <p className="px-1.5 py-1.5 text-xs text-muted-foreground/55">{emptyLabel}</p>
+      )}
+    </div>
+  );
+}
+
 const ThreadContextPanel = memo(function ThreadContextPanel({
   thread,
   gitCwd,
@@ -6413,6 +6462,12 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
     }
     return localStorage.getItem(THREAD_CONTEXT_PANEL_PINNED_KEY) !== "false";
   });
+  const [artifactsCollapsed, setArtifactsCollapsed] = useState(() =>
+    readThreadContextPanelPreference(THREAD_CONTEXT_PANEL_ARTIFACTS_COLLAPSED_KEY, false),
+  );
+  const [sourcesCollapsed, setSourcesCollapsed] = useState(() =>
+    readThreadContextPanelPreference(THREAD_CONTEXT_PANEL_SOURCES_COLLAPSED_KEY, false),
+  );
   const { data: gitStatus = null } = useQuery(gitStatusQueryOptions(gitCwd));
   const progressItems = useMemo(() => collectThreadContextProgress(thread), [thread]);
   const artifacts = useMemo(
@@ -6427,6 +6482,20 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
     setPinned((current) => {
       const next = !current;
       localStorage.setItem(THREAD_CONTEXT_PANEL_PINNED_KEY, next ? "true" : "false");
+      return next;
+    });
+  }, []);
+  const toggleArtifactsCollapsed = useCallback(() => {
+    setArtifactsCollapsed((current) => {
+      const next = !current;
+      persistThreadContextPanelPreference(THREAD_CONTEXT_PANEL_ARTIFACTS_COLLAPSED_KEY, next);
+      return next;
+    });
+  }, []);
+  const toggleSourcesCollapsed = useCallback(() => {
+    setSourcesCollapsed((current) => {
+      const next = !current;
+      persistThreadContextPanelPreference(THREAD_CONTEXT_PANEL_SOURCES_COLLAPSED_KEY, next);
       return next;
     });
   }, []);
@@ -6521,71 +6590,65 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
           )}
         </button>
 
-        <div className="mt-1 flex items-center gap-2 rounded-md px-1.5 py-1.5">
-          <FiGitBranch className="size-4 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 flex-1 text-foreground/88">Git actions</span>
-          <GitActionsControl gitCwd={gitCwd} activeThreadId={activeThreadId} />
-        </div>
+        <ThreadContextCollapsibleSection
+          title="Artifacts"
+          count={artifacts.length}
+          collapsed={artifactsCollapsed}
+          emptyLabel="No artifacts yet"
+          onToggle={toggleArtifactsCollapsed}
+        >
+          {artifacts.map((artifact) => (
+            <button
+              type="button"
+              key={`${artifact.kind}:${artifact.path}`}
+              className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left transition-colors hover:bg-muted/45"
+              title={artifact.path}
+              onClick={() =>
+                onOpenFilePath(artifact.path, {
+                  cwd: artifact.cwd ?? gitCwd ?? undefined,
+                  displayName: artifact.label,
+                })
+              }
+            >
+              {extensionOf(artifact.path) === "png" ||
+              extensionOf(artifact.path) === "jpg" ||
+              extensionOf(artifact.path) === "jpeg" ||
+              extensionOf(artifact.path) === "webp" ||
+              extensionOf(artifact.path) === "gif" ? (
+                <ImageIcon className="size-4 shrink-0 text-muted-foreground" />
+              ) : (
+                <FilesIcon className="size-4 shrink-0 text-muted-foreground" />
+              )}
+              <span className="min-w-0 flex-1 truncate text-foreground/88">{artifact.label}</span>
+            </button>
+          ))}
+        </ThreadContextCollapsibleSection>
 
         <Separator className="my-2 bg-border/60" />
 
-        <div className="space-y-1">
-          <p className="px-1.5 py-1 text-xs font-medium text-muted-foreground/80">Artifacts</p>
-          {artifacts.length > 0 ? (
-            artifacts.map((artifact) => (
-              <button
-                type="button"
-                key={`${artifact.kind}:${artifact.path}`}
-                className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left transition-colors hover:bg-muted/45"
-                title={artifact.path}
-                onClick={() =>
-                  onOpenFilePath(artifact.path, {
-                    cwd: artifact.cwd ?? gitCwd ?? undefined,
-                    displayName: artifact.label,
-                  })
-                }
-              >
-                {extensionOf(artifact.path) === "png" ||
-                extensionOf(artifact.path) === "jpg" ||
-                extensionOf(artifact.path) === "jpeg" ||
-                extensionOf(artifact.path) === "webp" ||
-                extensionOf(artifact.path) === "gif" ? (
-                  <ImageIcon className="size-4 shrink-0 text-muted-foreground" />
-                ) : (
-                  <FilesIcon className="size-4 shrink-0 text-muted-foreground" />
-                )}
-                <span className="min-w-0 flex-1 truncate text-foreground/88">{artifact.label}</span>
-              </button>
-            ))
-          ) : (
-            <p className="px-1.5 py-1.5 text-xs text-muted-foreground/55">No artifacts yet</p>
-          )}
-        </div>
-
-        <Separator className="my-2 bg-border/60" />
-
-        <div className="space-y-1">
-          <p className="px-1.5 py-1 text-xs font-medium text-muted-foreground/80">Sources</p>
-          {sources.length > 0 ? (
-            sources.map((source) => (
-              <div
-                key={source.id}
-                className="flex items-center gap-2 rounded-md px-1.5 py-1.5 text-foreground/72"
-              >
-                {source.icon === "web" ? (
-                  <GlobeIcon className="size-4 shrink-0 text-muted-foreground" />
-                ) : source.icon === "browser" ? (
-                  <MousePointer2Icon className="size-4 shrink-0 text-muted-foreground" />
-                ) : (
-                  <FilesIcon className="size-4 shrink-0 text-muted-foreground" />
-                )}
-                <span className="min-w-0 flex-1 truncate">{source.label}</span>
-              </div>
-            ))
-          ) : (
-            <p className="px-1.5 py-1.5 text-xs text-muted-foreground/55">No sources yet</p>
-          )}
-        </div>
+        <ThreadContextCollapsibleSection
+          title="Sources"
+          count={sources.length}
+          collapsed={sourcesCollapsed}
+          emptyLabel="No sources yet"
+          onToggle={toggleSourcesCollapsed}
+        >
+          {sources.map((source) => (
+            <div
+              key={source.id}
+              className="flex items-center gap-2 rounded-md px-1.5 py-1.5 text-foreground/72"
+            >
+              {source.icon === "web" ? (
+                <GlobeIcon className="size-4 shrink-0 text-muted-foreground" />
+              ) : source.icon === "browser" ? (
+                <MousePointer2Icon className="size-4 shrink-0 text-muted-foreground" />
+              ) : (
+                <FilesIcon className="size-4 shrink-0 text-muted-foreground" />
+              )}
+              <span className="min-w-0 flex-1 truncate">{source.label}</span>
+            </div>
+          ))}
+        </ThreadContextCollapsibleSection>
       </div>
     </aside>
   );
@@ -6594,10 +6657,15 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
     <div
       className={cn(
         "group/thread-context absolute right-3 top-16 z-30 hidden lg:block",
-        pinned ? "pointer-events-auto" : "bottom-4 w-10",
+        pinned ? "pointer-events-auto" : "pointer-events-none bottom-4 w-8",
       )}
     >
-      {!pinned ? <div className="absolute right-0 top-0 h-full w-8" aria-hidden="true" /> : null}
+      {!pinned ? (
+        <div
+          className="pointer-events-auto absolute right-0 top-0 h-28 w-2 rounded-full bg-border/45 opacity-45 transition-colors hover:bg-border hover:opacity-80"
+          aria-hidden="true"
+        />
+      ) : null}
       <div className={pinned ? "" : "absolute right-0 top-0"}>{panel}</div>
     </div>
   );
@@ -6875,142 +6943,6 @@ const ChatHeader = memo(function ChatHeader({
         className="flex shrink-0 items-center gap-1.5 @lg/header-actions:gap-2"
         data-testid="chat-header-actions"
       >
-        {!isDisposableThread ? (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  type="button"
-                  size="xs"
-                  variant="outline"
-                  className={cn(
-                    compact ? "shrink-0 gap-1" : "shrink-0 gap-1.5",
-                    handoffCanCycle ? "cursor-ns-resize" : "",
-                  )}
-                  aria-label={handoffActionLabel}
-                  disabled={handoffDisabled}
-                  onClick={onCreateHandoff}
-                  onWheel={onHandoffWheel}
-                  onKeyDown={onHandoffKeyDown}
-                >
-                  <FiGitBranch className="size-3.5 shrink-0" />
-                  {compact ? null : <span className="truncate">Hand off to</span>}
-                  <span
-                    key={handoffActionTargetProvider ?? "codex"}
-                    className={cn(
-                      "inline-flex items-center gap-1.5",
-                      handoffProviderAnimationClass,
-                    )}
-                  >
-                    <span className="inline-flex size-3.5 shrink-0 items-center justify-center">
-                      {renderProviderIcon(handoffActionTargetProvider, "size-3.5")}
-                    </span>
-                    {!compact && (
-                      <span className="truncate">
-                        {PROVIDER_DISPLAY_NAMES[handoffActionTargetProvider ?? "codex"]}
-                      </span>
-                    )}
-                  </span>
-                </Button>
-              }
-            />
-            <TooltipPopup side="bottom">{handoffActionLabel}</TooltipPopup>
-          </Tooltip>
-        ) : null}
-        {!compact && activeProjectScripts && (
-          <ProjectScriptsControl
-            scripts={activeProjectScripts}
-            keybindings={keybindings}
-            preferredScriptId={preferredScriptId}
-            onRunScript={onRunProjectScript}
-            onAddScript={onAddProjectScript}
-            onUpdateScript={onUpdateProjectScript}
-          />
-        )}
-        {!compact && activeProjectName && (
-          <OpenInPicker
-            keybindings={keybindings}
-            availableEditors={availableEditors}
-            openInCwd={openInCwd}
-          />
-        )}
-        {!compact && onOpenTask ? (
-          <Button variant="outline" size="xs" className="shrink-0" onClick={onOpenTask}>
-            <KanbanSquareIcon className="size-3" />
-            <span className="hidden sm:inline">Open task</span>
-          </Button>
-        ) : null}
-        {compact && hasCollapsibleControls ? (
-          <Menu>
-            <MenuTrigger
-              render={
-                <Button
-                  size="icon-xs"
-                  variant="outline"
-                  className="shrink-0"
-                  aria-label="More actions"
-                />
-              }
-            >
-              <EllipsisIcon className="size-3.5" />
-            </MenuTrigger>
-            <MenuPopup align="end">
-              {activeProjectScripts
-                ? activeProjectScripts.map((script) => (
-                    <MenuItem key={script.id} onClick={() => onRunProjectScript(script)}>
-                      <span className="truncate">{script.name}</span>
-                    </MenuItem>
-                  ))
-                : null}
-              {activeProjectScripts ? (
-                <MenuItem onClick={() => setCompact(false)}>
-                  <PlusIcon className="size-3.5" />
-                  Add action
-                </MenuItem>
-              ) : null}
-              {activeProjectName ? (
-                <>
-                  <MenuDivider />
-                  <MenuItem
-                    onClick={openInPreferredEditor}
-                    disabled={!openInCwd || !preferredEditor}
-                  >
-                    Open in editor
-                  </MenuItem>
-                  <MenuItem onClick={onToggleFiles}>
-                    <FilesIcon className="size-3.5 text-muted-foreground" />
-                    File tree
-                  </MenuItem>
-                </>
-              ) : null}
-              {onOpenTask ? (
-                <MenuItem onClick={onOpenTask}>
-                  <KanbanSquareIcon className="size-3.5" />
-                  Open task
-                </MenuItem>
-              ) : null}
-            </MenuPopup>
-          </Menu>
-        ) : null}
-        {!compact ? (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Toggle
-                  className="shrink-0"
-                  pressed={filesRailOpen}
-                  onPressedChange={onToggleFiles}
-                  aria-label="Toggle file tree"
-                  variant="outline"
-                  size="xs"
-                >
-                  <FilesIcon className="size-3.5" />
-                </Toggle>
-              }
-            />
-            <TooltipPopup side="bottom">Toggle file tree</TooltipPopup>
-          </Tooltip>
-        ) : null}
         <Tooltip>
           <TooltipTrigger
             render={
@@ -7081,18 +7013,15 @@ const ChatHeader = memo(function ChatHeader({
                   aria-label="Toggle diff panel"
                   variant="outline"
                   size="xs"
-                  disabled={!isGitRepo}
                 >
                   <PanelLeftIcon className="size-3.5 text-muted-foreground" />
                 </Toggle>
               }
             />
             <TooltipPopup side="bottom">
-              {!isGitRepo
-                ? "Diff panel is unavailable because this project is not a git repository."
-                : diffToggleShortcutLabel
-                  ? `Toggle diff panel (${diffToggleShortcutLabel})`
-                  : "Toggle diff panel"}
+              {diffToggleShortcutLabel
+                ? `Toggle diff panel (${diffToggleShortcutLabel})`
+                : "Toggle diff panel"}
             </TooltipPopup>
           </Tooltip>
         ) : null}
@@ -7470,6 +7399,108 @@ const PROVIDER_ICON_BY_PROVIDER: Record<ProviderPickerKind, Icon> = {
   cursor: CursorIcon,
 };
 
+function providerModelKey(provider: ProviderKind, model: string): string {
+  return `${provider}:${model}`;
+}
+
+function readModelPickerFavorites(): string[] {
+  if (typeof window === "undefined") return [];
+  const raw = localStorage.getItem(MODEL_PICKER_FAVORITES_KEY);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((value): value is string => typeof value === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistModelPickerFavorites(favorites: ReadonlySet<string>): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(MODEL_PICKER_FAVORITES_KEY, JSON.stringify([...favorites]));
+}
+
+type OpenCodeModelFamilyId = "favorites" | "zen" | "openai" | "go" | "free" | "other";
+
+const OPENCODE_MODEL_FAMILY_ORDER: Record<OpenCodeModelFamilyId, number> = {
+  favorites: 0,
+  zen: 1,
+  openai: 2,
+  go: 3,
+  free: 4,
+  other: 5,
+};
+
+const OPENCODE_MODEL_FAMILY_META: Record<OpenCodeModelFamilyId, { label: string }> = {
+  favorites: {
+    label: "Favorites",
+  },
+  zen: {
+    label: "Zen",
+  },
+  openai: {
+    label: "OpenAI",
+  },
+  go: {
+    label: "Go",
+  },
+  free: {
+    label: "Free",
+  },
+  other: {
+    label: "Other",
+  },
+};
+
+function opencodeProviderIdFromSlug(slug: string): string {
+  const slashIndex = slug.indexOf("/");
+  return slashIndex > 0 ? slug.slice(0, slashIndex).toLowerCase() : "";
+}
+
+function resolveOpenCodeModelFamily(model: { slug: string; name: string }): OpenCodeModelFamilyId {
+  const providerId = opencodeProviderIdFromSlug(model.slug);
+  const modelId = model.slug.slice(model.slug.indexOf("/") + 1).toLowerCase();
+  const normalizedName = model.name.toLowerCase();
+  if (providerId === "zen" || providerId.includes("zen")) {
+    return "zen";
+  }
+  if (providerId === "openai") {
+    return "openai";
+  }
+  if (providerId === "opencode-go" || providerId === "go" || providerId.endsWith("-go")) {
+    return "go";
+  }
+  if (providerId === "free" || providerId === "opencode-free" || providerId.endsWith("-free")) {
+    return "free";
+  }
+  if (modelId.includes("free") || normalizedName.includes(" free")) {
+    return "free";
+  }
+  if (
+    providerId === "opencode" ||
+    normalizedName.startsWith("opencode zen") ||
+    normalizedName.includes(" opencode zen")
+  ) {
+    return "zen";
+  }
+  return "other";
+}
+
+function getOpenCodeModelDisplayName(model: { slug: string; name: string }): string {
+  const family = resolveOpenCodeModelFamily(model);
+  if (family === "other") {
+    return model.name;
+  }
+  return (
+    model.name
+      .replace(/^OpenCode\s+(?:Zen|Go|Default)\s*(?:[·-]\s*)?/i, "")
+      .replace(/^OpenAI\s*(?:[·-]\s*)?/i, "")
+      .trim() || model.name
+  );
+}
+
 function resolveModelForProviderPicker(
   provider: ProviderKind,
   value: string,
@@ -7514,13 +7545,280 @@ const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   onProviderModelChange: (provider: ProviderKind, model: ModelSlug) => void;
 }) {
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [favoriteModelKeys, setFavoriteModelKeys] = useState<ReadonlySet<string>>(
+    () => new Set(readModelPickerFavorites()),
+  );
+  const [selectedProvider, setSelectedProvider] = useState<ProviderKind | "favorites">(() =>
+    favoriteModelKeys.size > 0 ? "favorites" : props.provider,
+  );
+  const [collapsedOpenCodeFamilies, setCollapsedOpenCodeFamilies] = useState<
+    ReadonlySet<OpenCodeModelFamilyId>
+  >(() => new Set(["zen", "openai", "go", "free", "other"]));
+  const [searchQuery, setSearchQuery] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const selectedProviderOptions = props.modelOptionsByProvider[props.provider];
   const selectedModelLabel =
     selectedProviderOptions.find((option) => option.slug === props.model)?.name ?? props.model;
   const ProviderIcon = PROVIDER_ICON_BY_PROVIDER[props.provider];
+  const selectedModelKey = `${props.provider}:${props.model}`;
+  const shouldBuildModelPicker = isMenuOpen;
+
+  useEffect(() => {
+    if (props.lockedProvider !== null) {
+      setSelectedProvider(props.provider);
+    }
+  }, [props.lockedProvider, props.provider]);
+
+  useLayoutEffect(() => {
+    if (!isMenuOpen) return;
+    searchInputRef.current?.focus({ preventScroll: true });
+    const frame = window.requestAnimationFrame(() => {
+      searchInputRef.current?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [isMenuOpen]);
+
+  const flatModels = useMemo(() => {
+    if (!shouldBuildModelPicker) {
+      return [];
+    }
+    return AVAILABLE_PROVIDER_OPTIONS.flatMap((option) =>
+      props.modelOptionsByProvider[option.value].map((modelOption, originalIndex) => ({
+        ...modelOption,
+        provider: option.value,
+        providerLabel: option.label,
+        displayName:
+          option.value === "opencode" ? getOpenCodeModelDisplayName(modelOption) : modelOption.name,
+        originalIndex,
+        openCodeFamily:
+          option.value === "opencode" ? resolveOpenCodeModelFamily(modelOption) : null,
+      })),
+    );
+  }, [props.modelOptionsByProvider, shouldBuildModelPicker]);
+
+  const filteredModels = useMemo(() => {
+    const trimmedQuery = searchQuery.trim().toLowerCase();
+    const scopedModels =
+      props.lockedProvider === null
+        ? flatModels
+        : flatModels.filter((modelOption) => modelOption.provider === props.lockedProvider);
+
+    if (trimmedQuery.length > 0) {
+      const tokens = trimmedQuery.split(/\s+/u).filter(Boolean);
+      return scopedModels
+        .map((modelOption) => {
+          const haystack = [
+            modelOption.name,
+            modelOption.slug,
+            modelOption.provider,
+            modelOption.providerLabel,
+            modelOption.displayName,
+            modelOption.openCodeFamily
+              ? OPENCODE_MODEL_FAMILY_META[modelOption.openCodeFamily].label
+              : "",
+          ]
+            .join(" ")
+            .toLowerCase();
+          const matches = tokens.every((token) => haystack.includes(token));
+          if (!matches) return null;
+          const exactName = modelOption.name.toLowerCase() === trimmedQuery ? 0 : 1;
+          const prefixName = modelOption.name.toLowerCase().startsWith(trimmedQuery) ? 0 : 1;
+          return {
+            modelOption,
+            score: exactName + prefixName + haystack.indexOf(tokens[0] ?? ""),
+          };
+        })
+        .filter(
+          (
+            entry,
+          ): entry is {
+            modelOption: (typeof scopedModels)[number];
+            score: number;
+          } => entry !== null,
+        )
+        .toSorted((left, right) => {
+          const leftFamily = left.modelOption.openCodeFamily;
+          const rightFamily = right.modelOption.openCodeFamily;
+          if (leftFamily && rightFamily && leftFamily !== rightFamily) {
+            return (
+              OPENCODE_MODEL_FAMILY_ORDER[leftFamily] - OPENCODE_MODEL_FAMILY_ORDER[rightFamily]
+            );
+          }
+          const scoreDelta = left.score - right.score;
+          if (scoreDelta !== 0) return scoreDelta;
+          return left.modelOption.displayName.localeCompare(right.modelOption.displayName);
+        })
+        .map((entry) => entry.modelOption);
+    }
+
+    if (selectedProvider === "favorites") {
+      return scopedModels.filter((modelOption) =>
+        favoriteModelKeys.has(providerModelKey(modelOption.provider, modelOption.slug)),
+      );
+    }
+
+    const groupOpenCodeFavorites = selectedProvider === "opencode";
+
+    return scopedModels
+      .filter((modelOption) => modelOption.provider === selectedProvider)
+      .toSorted((left, right) => {
+        const leftFavorite = favoriteModelKeys.has(providerModelKey(left.provider, left.slug));
+        const rightFavorite = favoriteModelKeys.has(providerModelKey(right.provider, right.slug));
+        const leftFamily =
+          groupOpenCodeFavorites && left.openCodeFamily && leftFavorite
+            ? "favorites"
+            : left.openCodeFamily;
+        const rightFamily =
+          groupOpenCodeFavorites && right.openCodeFamily && rightFavorite
+            ? "favorites"
+            : right.openCodeFamily;
+        if (leftFamily && rightFamily && leftFamily !== rightFamily) {
+          return OPENCODE_MODEL_FAMILY_ORDER[leftFamily] - OPENCODE_MODEL_FAMILY_ORDER[rightFamily];
+        }
+        if (!groupOpenCodeFavorites && leftFavorite !== rightFavorite) {
+          return leftFavorite ? -1 : 1;
+        }
+        return left.originalIndex - right.originalIndex;
+      });
+  }, [favoriteModelKeys, flatModels, props.lockedProvider, searchQuery, selectedProvider]);
+
+  const modelKeys = useMemo(
+    () => flatModels.map((modelOption) => `${modelOption.provider}:${modelOption.slug}`),
+    [flatModels],
+  );
+  const isSearchingModels = searchQuery.trim().length > 0;
+  const groupOpenCodeFavorites = selectedProvider === "opencode" && !isSearchingModels;
+  const openCodeSectionForModel = useCallback(
+    (modelOption: (typeof flatModels)[number]): OpenCodeModelFamilyId | null => {
+      if (!modelOption.openCodeFamily) {
+        return null;
+      }
+      if (
+        groupOpenCodeFavorites &&
+        favoriteModelKeys.has(providerModelKey(modelOption.provider, modelOption.slug))
+      ) {
+        return "favorites";
+      }
+      return modelOption.openCodeFamily;
+    },
+    [favoriteModelKeys, groupOpenCodeFavorites],
+  );
+  const visibleModels = useMemo(
+    () =>
+      isSearchingModels
+        ? filteredModels
+        : filteredModels.filter((modelOption) => {
+            const openCodeSection = openCodeSectionForModel(modelOption);
+            return !openCodeSection || !collapsedOpenCodeFamilies.has(openCodeSection);
+          }),
+    [collapsedOpenCodeFamilies, filteredModels, isSearchingModels, openCodeSectionForModel],
+  );
+  const filteredModelKeys = useMemo(
+    () => visibleModels.map((modelOption) => `${modelOption.provider}:${modelOption.slug}`),
+    [visibleModels],
+  );
+
+  const openCodeFamilyCounts = useMemo(() => {
+    const counts = new Map<OpenCodeModelFamilyId, number>();
+    for (const modelOption of filteredModels) {
+      const openCodeSection = openCodeSectionForModel(modelOption);
+      if (!openCodeSection) {
+        continue;
+      }
+      counts.set(openCodeSection, (counts.get(openCodeSection) ?? 0) + 1);
+    }
+    return counts;
+  }, [filteredModels, openCodeSectionForModel]);
+
+  const renderedModelEntries = useMemo(() => {
+    const entries: Array<
+      | {
+          readonly type: "header";
+          readonly section: OpenCodeModelFamilyId;
+        }
+      | {
+          readonly type: "model";
+          readonly modelOption: (typeof flatModels)[number];
+          readonly index: number;
+        }
+    > = [];
+    let previousOpenCodeSection: OpenCodeModelFamilyId | null = null;
+    let visibleModelIndex = 0;
+
+    for (const modelOption of filteredModels) {
+      const openCodeSection = openCodeSectionForModel(modelOption);
+      if (openCodeSection !== null && openCodeSection !== previousOpenCodeSection) {
+        entries.push({ type: "header", section: openCodeSection });
+      }
+      previousOpenCodeSection = openCodeSection;
+
+      if (
+        !isSearchingModels &&
+        openCodeSection !== null &&
+        collapsedOpenCodeFamilies.has(openCodeSection)
+      ) {
+        continue;
+      }
+
+      entries.push({
+        type: "model",
+        modelOption,
+        index: visibleModelIndex,
+      });
+      visibleModelIndex += 1;
+    }
+
+    return entries;
+  }, [collapsedOpenCodeFamilies, filteredModels, isSearchingModels, openCodeSectionForModel]);
+
+  const selectProviderModel = (value: string) => {
+    const colonIndex = value.indexOf(":");
+    if (colonIndex === -1) return;
+    const provider = value.slice(0, colonIndex) as ProviderKind;
+    const model = value.slice(colonIndex + 1);
+    if (props.disabled) return;
+    if (props.lockedProvider !== null && props.lockedProvider !== provider) return;
+    const resolvedModel = resolveModelForProviderPicker(
+      provider,
+      model,
+      props.modelOptionsByProvider[provider],
+    );
+    if (!resolvedModel) return;
+    props.onProviderModelChange(provider, resolvedModel);
+    setIsMenuOpen(false);
+  };
+
+  const toggleFavoriteModel = (provider: ProviderKind, model: string) => {
+    setFavoriteModelKeys((current) => {
+      const next = new Set(current);
+      const key = providerModelKey(provider, model);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      persistModelPickerFavorites(next);
+      if (selectedProvider === "favorites" && next.size === 0) {
+        setSelectedProvider(provider);
+      }
+      return next;
+    });
+  };
+
+  const toggleOpenCodeFamilyCollapsed = (family: OpenCodeModelFamilyId) => {
+    setCollapsedOpenCodeFamilies((current) => {
+      const next = new Set(current);
+      if (next.has(family)) {
+        next.delete(family);
+      } else {
+        next.add(family);
+      }
+      return next;
+    });
+  };
 
   return (
-    <Menu
+    <Popover
       open={isMenuOpen}
       onOpenChange={(open) => {
         if (props.disabled) {
@@ -7530,16 +7828,15 @@ const ProviderModelPicker = memo(function ProviderModelPicker(props: {
         setIsMenuOpen(open);
       }}
     >
-      <MenuTrigger
+      <PopoverTrigger
         render={
           <Button
             size="sm"
             variant="ghost"
+            data-chat-provider-model-picker="true"
             className={cn(
-              "min-w-0 justify-start whitespace-nowrap text-muted-foreground/70 hover:text-foreground/80",
-              props.compact
-                ? "max-w-44 shrink-0 pl-2 pr-1.5 [&_svg]:mx-0"
-                : "shrink-0 px-2 sm:px-3",
+              "min-w-0 justify-start overflow-hidden whitespace-nowrap text-muted-foreground/70 hover:text-foreground/80 [&_svg]:mx-0",
+              props.compact ? "max-w-44 shrink-0 pl-2 pr-1.5" : "max-w-56 shrink-0 px-2 sm:px-3",
             )}
             disabled={props.disabled}
           />
@@ -7554,94 +7851,301 @@ const ProviderModelPicker = memo(function ProviderModelPicker(props: {
           <span className="min-w-0 truncate">{selectedModelLabel}</span>
           <ChevronDownIcon aria-hidden="true" className="size-3 shrink-0 opacity-60" />
         </span>
-      </MenuTrigger>
-      <MenuPopup align="start">
-        {AVAILABLE_PROVIDER_OPTIONS.map((option) => {
-          const OptionIcon = PROVIDER_ICON_BY_PROVIDER[option.value];
-          const isDisabledByProviderLock =
-            props.lockedProvider !== null && props.lockedProvider !== option.value;
-          return (
-            <MenuSub key={option.value}>
-              <MenuSubTrigger disabled={isDisabledByProviderLock}>
-                <OptionIcon
-                  aria-hidden="true"
-                  className="size-4 shrink-0 text-muted-foreground/85"
-                />
-                {option.label}
-              </MenuSubTrigger>
-              <MenuSubPopup className="[--available-height:min(24rem,70vh)] max-h-[min(var(--available-height),24rem)]">
-                <div className="max-h-[min(var(--available-height),24rem)] overflow-y-auto overscroll-contain">
-                  <MenuGroup>
-                    <MenuRadioGroup
-                      value={props.provider === option.value ? props.model : ""}
-                      onValueChange={(value) => {
-                        if (props.disabled) return;
-                        if (isDisabledByProviderLock) return;
-                        if (!value) return;
-                        const resolvedModel = resolveModelForProviderPicker(
-                          option.value,
-                          value,
-                          props.modelOptionsByProvider[option.value],
-                        );
-                        if (!resolvedModel) return;
-                        props.onProviderModelChange(option.value, resolvedModel);
-                        setIsMenuOpen(false);
-                      }}
-                    >
-                      {props.modelOptionsByProvider[option.value].map((modelOption) => (
-                        <MenuRadioItem
-                          key={`${option.value}:${modelOption.slug}`}
-                          value={modelOption.slug}
-                          onClick={() => setIsMenuOpen(false)}
+      </PopoverTrigger>
+      <PopoverPopup
+        align="start"
+        className="border-0 bg-transparent p-0 shadow-none before:hidden [--viewport-inline-padding:0] *:data-[slot=popover-viewport]:p-0"
+      >
+        <div className="relative flex h-screen max-h-96 w-screen max-w-100 overflow-hidden rounded-lg border bg-popover text-popover-foreground shadow-lg/5">
+          <ScrollArea scrollFade className="w-12 shrink-0 border-r bg-muted/30">
+            <div className="flex min-h-full flex-col gap-1 p-1">
+              {props.lockedProvider === null ? (
+                <>
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <button
+                          className={cn(
+                            "relative flex aspect-square w-full cursor-pointer items-center justify-center rounded transition-colors hover:bg-muted",
+                            selectedProvider === "favorites" &&
+                              "bg-background text-foreground shadow-sm",
+                          )}
+                          type="button"
+                          aria-label="Favorites"
+                          onClick={() => {
+                            setSelectedProvider("favorites");
+                            window.requestAnimationFrame(() => {
+                              searchInputRef.current?.focus({ preventScroll: true });
+                            });
+                          }}
                         >
-                          {option.value === "codex" &&
-                          shouldShowFastTierIcon(modelOption.slug, props.serviceTierSetting) ? (
-                            <ZapIcon className="size-3.5 shrink-0 text-amber-500" />
+                          {selectedProvider === "favorites" ? (
+                            <span
+                              aria-hidden
+                              className="pointer-events-none absolute -right-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-l-full bg-primary"
+                            />
                           ) : null}
-                          {modelOption.name}
-                        </MenuRadioItem>
-                      ))}
-                    </MenuRadioGroup>
-                  </MenuGroup>
-                </div>
-              </MenuSubPopup>
-            </MenuSub>
-          );
-        })}
-        {UNAVAILABLE_PROVIDER_OPTIONS.length > 0 && <MenuDivider />}
-        {UNAVAILABLE_PROVIDER_OPTIONS.map((option) => {
-          const OptionIcon = PROVIDER_ICON_BY_PROVIDER[option.value];
-          return (
-            <MenuItem key={option.value} disabled>
-              <OptionIcon
-                aria-hidden="true"
-                className={cn(
-                  "size-4 shrink-0 opacity-80",
-                  option.value === "claudeAgent" ? "" : "text-muted-foreground/85",
-                )}
-              />
-              <span>{option.label}</span>
-              <span className="ms-auto text-[11px] text-muted-foreground/80 uppercase tracking-[0.08em]">
-                Coming soon
-              </span>
-            </MenuItem>
-          );
-        })}
-        {UNAVAILABLE_PROVIDER_OPTIONS.length === 0 && <MenuDivider />}
-        {COMING_SOON_PROVIDER_OPTIONS.map((option) => {
-          const OptionIcon = option.icon;
-          return (
-            <MenuItem key={option.id} disabled>
-              <OptionIcon aria-hidden="true" className="size-4 shrink-0 opacity-80" />
-              <span>{option.label}</span>
-              <span className="ms-auto text-[11px] text-muted-foreground/80 uppercase tracking-[0.08em]">
-                Coming soon
-              </span>
-            </MenuItem>
-          );
-        })}
-      </MenuPopup>
-    </Menu>
+                          <StarIcon className="size-5 shrink-0 fill-current" />
+                        </button>
+                      }
+                    />
+                    <TooltipPopup side="left" align="center">
+                      Favorites
+                    </TooltipPopup>
+                  </Tooltip>
+                  <div className="my-1 h-px bg-border" />
+                </>
+              ) : null}
+              {AVAILABLE_PROVIDER_OPTIONS.map((option) => {
+                const OptionIcon = PROVIDER_ICON_BY_PROVIDER[option.value];
+                const isDisabled =
+                  props.lockedProvider !== null && props.lockedProvider !== option.value;
+                const isSelected = selectedProvider === option.value;
+                return (
+                  <Tooltip key={option.value}>
+                    <TooltipTrigger
+                      render={
+                        <button
+                          className={cn(
+                            "relative flex aspect-square w-full cursor-pointer items-center justify-center rounded transition-colors hover:bg-muted",
+                            isSelected && "bg-background text-foreground shadow-sm",
+                            isDisabled && "cursor-not-allowed opacity-50 hover:bg-transparent",
+                          )}
+                          disabled={isDisabled}
+                          type="button"
+                          aria-label={option.label}
+                          onClick={() => {
+                            if (isDisabled) return;
+                            setSelectedProvider(option.value);
+                            window.requestAnimationFrame(() => {
+                              searchInputRef.current?.focus({ preventScroll: true });
+                            });
+                          }}
+                        >
+                          {isSelected ? (
+                            <span
+                              aria-hidden
+                              className="pointer-events-none absolute -right-1 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-l-full bg-primary"
+                            />
+                          ) : null}
+                          <OptionIcon className="size-5 shrink-0 text-muted-foreground/85" />
+                        </button>
+                      }
+                    />
+                    <TooltipPopup side="left" align="center">
+                      {option.label}
+                    </TooltipPopup>
+                  </Tooltip>
+                );
+              })}
+              {UNAVAILABLE_PROVIDER_OPTIONS.length > 0 ||
+              COMING_SOON_PROVIDER_OPTIONS.length > 0 ? (
+                <div className="my-1 h-px bg-border" />
+              ) : null}
+              {UNAVAILABLE_PROVIDER_OPTIONS.map((option) => {
+                const OptionIcon = PROVIDER_ICON_BY_PROVIDER[option.value];
+                return (
+                  <Tooltip key={option.value}>
+                    <TooltipTrigger
+                      render={
+                        <span className="block w-full">
+                          <button
+                            className="flex aspect-square w-full cursor-not-allowed items-center justify-center rounded opacity-50"
+                            disabled
+                            type="button"
+                            aria-label={`${option.label} - coming soon`}
+                          >
+                            <OptionIcon className="size-5 shrink-0 text-muted-foreground/85" />
+                          </button>
+                        </span>
+                      }
+                    />
+                    <TooltipPopup side="left" align="center">
+                      {option.label} - Coming soon
+                    </TooltipPopup>
+                  </Tooltip>
+                );
+              })}
+              {COMING_SOON_PROVIDER_OPTIONS.map((option) => {
+                const OptionIcon = option.icon;
+                return (
+                  <Tooltip key={option.id}>
+                    <TooltipTrigger
+                      render={
+                        <span className="block w-full">
+                          <button
+                            className="flex aspect-square w-full cursor-not-allowed items-center justify-center rounded opacity-50"
+                            disabled
+                            type="button"
+                            aria-label={`${option.label} - coming soon`}
+                          >
+                            <OptionIcon className="size-5 shrink-0 text-muted-foreground/85" />
+                          </button>
+                        </span>
+                      }
+                    />
+                    <TooltipPopup side="left" align="center">
+                      {option.label} - Coming soon
+                    </TooltipPopup>
+                  </Tooltip>
+                );
+              })}
+            </div>
+          </ScrollArea>
+
+          <Combobox
+            inline
+            items={modelKeys}
+            filteredItems={filteredModelKeys}
+            filter={null}
+            autoHighlight
+            open
+            value={selectedModelKey}
+            onValueChange={(value) => {
+              if (typeof value === "string") {
+                selectProviderModel(value);
+              }
+            }}
+          >
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+              <div className="border-b px-3 py-2">
+                <ComboboxInput
+                  ref={searchInputRef}
+                  className="[&_input]:font-sans rounded-md"
+                  inputClassName="border-0 shadow-none ring-0 focus-visible:ring-0"
+                  placeholder="Search models..."
+                  showTrigger={false}
+                  startAddon={<SearchIcon className="size-4 text-muted-foreground/50" />}
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setIsMenuOpen(false);
+                    }
+                    event.stopPropagation();
+                  }}
+                  size="sm"
+                />
+              </div>
+              <div className="relative min-h-0 flex-1 before:pointer-events-none before:absolute before:inset-0 before:bg-muted/40">
+                <ComboboxList className="model-picker-list size-full divide-y px-2 py-1">
+                  {renderedModelEntries.map((entry) => {
+                    if (entry.type === "header") {
+                      const sectionMeta = OPENCODE_MODEL_FAMILY_META[entry.section];
+                      const isCollapsed =
+                        !isSearchingModels && collapsedOpenCodeFamilies.has(entry.section);
+                      return (
+                        <button
+                          key={`header:${entry.section}`}
+                          type="button"
+                          className="sticky top-0 z-10 flex w-full items-center gap-2 bg-popover/95 px-3 py-2 text-left text-[11px] font-medium uppercase tracking-[0.12em] text-muted-foreground backdrop-blur transition-colors hover:bg-muted/70 hover:text-foreground"
+                          aria-expanded={!isCollapsed}
+                          onClick={() => toggleOpenCodeFamilyCollapsed(entry.section)}
+                        >
+                          <ChevronDownIcon
+                            className={cn(
+                              "size-3.5 shrink-0 transition-transform",
+                              isCollapsed ? "-rotate-90" : "rotate-0",
+                            )}
+                            aria-hidden
+                          />
+                          <span className="min-w-0 flex-1 truncate">{sectionMeta.label}</span>
+                          <span className="shrink-0 font-mono text-[10px] text-muted-foreground/65">
+                            {openCodeFamilyCounts.get(entry.section) ?? 0}
+                          </span>
+                        </button>
+                      );
+                    }
+
+                    const modelOption = entry.modelOption;
+                    const modelKey = `${modelOption.provider}:${modelOption.slug}`;
+                    const familyMeta = modelOption.openCodeFamily
+                      ? OPENCODE_MODEL_FAMILY_META[modelOption.openCodeFamily]
+                      : null;
+                    const RowIcon = PROVIDER_ICON_BY_PROVIDER[modelOption.provider];
+                    const isFavorite = favoriteModelKeys.has(
+                      providerModelKey(modelOption.provider, modelOption.slug),
+                    );
+                    return (
+                      <ComboboxItem
+                        key={modelKey}
+                        hideIndicator
+                        index={entry.index}
+                        value={modelKey}
+                        className="w-full cursor-pointer rounded px-3 py-2 transition-colors data-highlighted:bg-muted data-selected:bg-accent data-selected:text-foreground"
+                      >
+                        <div className="flex w-full items-start gap-2">
+                          <Tooltip>
+                            <TooltipTrigger
+                              render={
+                                <button
+                                  className="mt-0.5 shrink-0 cursor-pointer opacity-45 transition-opacity hover:opacity-100"
+                                  type="button"
+                                  aria-label={
+                                    isFavorite ? "Remove from favorites" : "Add to favorites"
+                                  }
+                                  onClick={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    toggleFavoriteModel(modelOption.provider, modelOption.slug);
+                                  }}
+                                  onKeyDown={(event) => {
+                                    event.stopPropagation();
+                                  }}
+                                >
+                                  <StarIcon
+                                    className={cn(
+                                      "size-4",
+                                      isFavorite && "fill-current text-yellow-500",
+                                    )}
+                                  />
+                                </button>
+                              }
+                            />
+                            <TooltipPopup side="top" align="center">
+                              {isFavorite ? "Remove from favorites" : "Add to favorites"}
+                            </TooltipPopup>
+                          </Tooltip>
+                          <div className="mt-0.5 flex size-4 shrink-0 items-center justify-center">
+                            {modelOption.provider === "codex" &&
+                            shouldShowFastTierIcon(modelOption.slug, props.serviceTierSetting) ? (
+                              <ZapIcon className="size-3.5 text-amber-500" />
+                            ) : (
+                              <RowIcon className="size-4 text-muted-foreground/85" />
+                            )}
+                          </div>
+                          <div className="min-w-0 flex-1 text-left">
+                            <div className="truncate text-xs font-medium leading-snug">
+                              {modelOption.displayName}
+                            </div>
+                            <div className="mt-0.5 flex items-center gap-1 text-xs leading-snug text-muted-foreground/70">
+                              <RowIcon className="size-3 shrink-0" />
+                              <span className="truncate">
+                                {familyMeta
+                                  ? `${modelOption.providerLabel} · ${familyMeta.label}`
+                                  : modelOption.providerLabel}
+                              </span>
+                              {modelOption.slug !== modelOption.displayName ? (
+                                <span className="truncate opacity-80">· {modelOption.slug}</span>
+                              ) : null}
+                            </div>
+                          </div>
+                        </div>
+                      </ComboboxItem>
+                    );
+                  })}
+                </ComboboxList>
+              </div>
+              <ComboboxEmpty className="not-empty:py-6 empty:h-0 text-xs font-normal leading-snug">
+                No models found
+              </ComboboxEmpty>
+            </div>
+          </Combobox>
+        </div>
+      </PopoverPopup>
+    </Popover>
   );
 });
 

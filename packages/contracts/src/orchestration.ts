@@ -358,9 +358,7 @@ export const OrchestrationThread = Schema.Struct({
   updatedAt: IsoDateTime,
   deletedAt: Schema.NullOr(IsoDateTime),
   messages: Schema.Array(OrchestrationMessage),
-  proposedPlans: Schema.Array(OrchestrationProposedPlan).pipe(
-    Schema.withDecodingDefault(() => []),
-  ),
+  proposedPlans: Schema.Array(OrchestrationProposedPlan).pipe(Schema.withDecodingDefault(() => [])),
   activities: Schema.Array(OrchestrationThreadActivity),
   checkpoints: Schema.Array(OrchestrationCheckpointSummary),
   session: Schema.NullOr(OrchestrationSession),
@@ -372,12 +370,8 @@ export const OrchestrationReadModel = Schema.Struct({
   snapshotSequence: NonNegativeInt,
   projects: Schema.Array(OrchestrationProject),
   tasks: Schema.Array(OrchestrationTask).pipe(Schema.withDecodingDefault(() => [])),
-  taskRuntimes: Schema.Array(OrchestrationTaskRuntime).pipe(
-    Schema.withDecodingDefault(() => []),
-  ),
-  projectRules: Schema.Array(OrchestrationProjectRules).pipe(
-    Schema.withDecodingDefault(() => []),
-  ),
+  taskRuntimes: Schema.Array(OrchestrationTaskRuntime).pipe(Schema.withDecodingDefault(() => [])),
+  projectRules: Schema.Array(OrchestrationProjectRules).pipe(Schema.withDecodingDefault(() => [])),
   threads: Schema.Array(OrchestrationThread),
   updatedAt: IsoDateTime,
 });
@@ -405,6 +399,13 @@ const ProjectMetaUpdateCommand = Schema.Struct({
 
 const ProjectDeleteCommand = Schema.Struct({
   type: Schema.Literal("project.delete"),
+  commandId: CommandId,
+  projectId: ProjectId,
+  deleteThreads: Schema.optional(Schema.Boolean),
+});
+
+const ProjectArchiveCommand = Schema.Struct({
+  type: Schema.Literal("project.archive"),
   commandId: CommandId,
   projectId: ProjectId,
 });
@@ -541,12 +542,14 @@ const ThreadDeleteCommand = Schema.Struct({
   type: Schema.Literal("thread.delete"),
   commandId: CommandId,
   threadId: ThreadId,
+  includeChildren: Schema.optional(Schema.Boolean),
 });
 
 const ThreadArchiveCommand = Schema.Struct({
   type: Schema.Literal("thread.archive"),
   commandId: CommandId,
   threadId: ThreadId,
+  includeChildren: Schema.optional(Schema.Boolean),
 });
 
 const ThreadUnarchiveCommand = Schema.Struct({
@@ -704,6 +707,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
   ProjectDeleteCommand,
+  ProjectArchiveCommand,
   ProjectOrchestrationRulesUpdateCommand,
   TaskCreateCommand,
   TaskMetaUpdateCommand,
@@ -734,6 +738,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ProjectCreateCommand,
   ProjectMetaUpdateCommand,
   ProjectDeleteCommand,
+  ProjectArchiveCommand,
   ProjectOrchestrationRulesUpdateCommand,
   ClientTaskCreateCommand,
   ClientTaskMetaUpdateCommand,

@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { lazy, Suspense } from "react";
 
-import OrchestrateRouteView from "../components/orchestrate/OrchestrateRouteView";
+const OrchestrateRouteView = lazy(() => import("../components/orchestrate/OrchestrateRouteView"));
 
 type OrchestrateSearch = {
   projectId?: string;
@@ -36,11 +37,19 @@ export const Route = createFileRoute("/_chat/orchestrate")({
   component: function OrchestrateRoute() {
     const search = Route.useSearch();
     return (
-      <OrchestrateRouteView
-        projectIdFromSearch={search.projectId}
-        taskIdFromSearch={search.taskId}
-        viewFromSearch={search.view}
-      />
+      <Suspense
+        fallback={
+          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+            Loading orchestrate...
+          </div>
+        }
+      >
+        <OrchestrateRouteView
+          projectIdFromSearch={search.projectId}
+          taskIdFromSearch={search.taskId}
+          viewFromSearch={search.view}
+        />
+      </Suspense>
     );
   },
 });

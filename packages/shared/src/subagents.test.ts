@@ -30,6 +30,24 @@ describe("subagents", () => {
     ]);
   });
 
+  it("extracts user-facing names from codex thread metadata aliases", () => {
+    const hints = extractSubagentIdentityHints({
+      providerThreadId: "child-thread-named",
+      agentId: "agent-named",
+      name: "Policy Reader",
+      role: "explorer",
+    });
+
+    expect(hints).toEqual([
+      {
+        providerThreadId: "child-thread-named",
+        agentId: "agent-named",
+        nickname: "Policy Reader",
+        role: "explorer",
+      },
+    ]);
+  });
+
   it("extracts source subagent identity from claude-style nested payloads", () => {
     const hints = extractSubagentIdentityHints({
       source: {

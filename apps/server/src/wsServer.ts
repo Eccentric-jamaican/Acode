@@ -18,6 +18,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   type ClientOrchestrationCommand,
   type OrchestrationCommand,
+  type OrchestrationThread,
   ORCHESTRATION_WS_CHANNELS,
   ORCHESTRATION_WS_METHODS,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
@@ -346,6 +347,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const git = yield* GitCore;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const chatWorkspaceRoot = path.join(homeDirectory, ".codex", "chats");
 
   yield* keybindingsManager.syncDefaultKeybindingsOnStartup.pipe(
     Effect.catch((error) =>
@@ -752,6 +754,67 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const subscriptionsScope = yield* Scope.make("sequential");
   yield* Effect.addFinalizer(() => Scope.close(subscriptionsScope, Exit.void));
 
+  const cleanupThreadsAfterBulkAction = Effect.fnUntraced(function* (
+    threads: ReadonlyArray<OrchestrationThread>,
+  ) {
+    const uniqueThreads = Array.from(
+      new Map(threads.map((thread) => [thread.id, thread] as const)).values(),
+    );
+    yield* Effect.forEach(
+      uniqueThreads,
+      (thread) =>
+        Effect.all([
+          thread.session && thread.session.status !== "stopped"
+            ? startup
+                .enqueueCommand(
+                  orchestrationEngine.dispatch({
+                    type: "thread.session.stop",
+                    commandId: CommandId.makeUnsafe(crypto.randomUUID()),
+                    threadId: thread.id,
+                    createdAt: new Date().toISOString(),
+                  }),
+                )
+                .pipe(Effect.catch(() => Effect.void))
+            : Effect.void,
+          terminalManager
+            .close({
+              threadId: thread.id,
+              deleteHistory: true,
+            })
+            .pipe(Effect.catch(() => Effect.void)),
+        ]),
+      { concurrency: 8 },
+    );
+  });
+
+  const runThreadCleanupInBackground = (threads: ReadonlyArray<OrchestrationThread>) =>
+    cleanupThreadsAfterBulkAction(threads).pipe(Effect.forkIn(subscriptionsScope));
+
+  const collectThreadTree = (
+    threads: ReadonlyArray<OrchestrationThread>,
+    rootThreadId: ThreadId,
+  ): OrchestrationThread[] => {
+    const selected = new Map<ThreadId, OrchestrationThread>();
+    const queue: ThreadId[] = [rootThreadId];
+    while (queue.length > 0) {
+      const threadId = queue.shift();
+      if (!threadId || selected.has(threadId)) {
+        continue;
+      }
+      const thread = threads.find((entry) => entry.id === threadId);
+      if (!thread) {
+        continue;
+      }
+      selected.set(thread.id, thread);
+      for (const child of threads) {
+        if (child.parentThreadId === thread.id && child.deletedAt === null) {
+          queue.push(child.id);
+        }
+      }
+    }
+    return Array.from(selected.values());
+  };
+
   yield* Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) =>
     broadcastPush({
       type: "push",
@@ -935,36 +998,41 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       case ORCHESTRATION_WS_METHODS.dispatchCommand: {
         const { command } = request.body;
         const normalizedCommand = yield* normalizeDispatchCommand({ command });
-        if (normalizedCommand.type === "thread.archive") {
+        if (
+          normalizedCommand.type === "thread.archive" ||
+          normalizedCommand.type === "thread.delete" ||
+          normalizedCommand.type === "project.archive" ||
+          (normalizedCommand.type === "project.delete" && normalizedCommand.deleteThreads === true)
+        ) {
           const snapshot = yield* projectionReadModelQuery.getSnapshot();
-          const thread = snapshot.threads.find(
-            (entry) => entry.id === normalizedCommand.threadId && entry.deletedAt === null,
-          );
-          const archiveResult = yield* startup.enqueueCommand(
+          const affectedThreads =
+            normalizedCommand.type === "project.archive"
+              ? snapshot.threads.filter(
+                  (thread) =>
+                    thread.projectId === normalizedCommand.projectId &&
+                    thread.deletedAt === null &&
+                    thread.archivedAt === null,
+                )
+              : normalizedCommand.type === "project.delete"
+                ? snapshot.threads.filter(
+                    (thread) =>
+                      thread.projectId === normalizedCommand.projectId && thread.deletedAt === null,
+                  )
+                : normalizedCommand.includeChildren === true
+                  ? collectThreadTree(snapshot.threads, normalizedCommand.threadId)
+                  : snapshot.threads.filter(
+                      (thread) =>
+                        thread.id === normalizedCommand.threadId && thread.deletedAt === null,
+                    );
+          const result = yield* startup.enqueueCommand(
             orchestrationEngine.dispatch(normalizedCommand),
           );
 
-          if (thread?.session && thread.session.status !== "stopped") {
-            yield* startup
-              .enqueueCommand(
-                orchestrationEngine.dispatch({
-                  type: "thread.session.stop",
-                  commandId: CommandId.makeUnsafe(crypto.randomUUID()),
-                  threadId: normalizedCommand.threadId,
-                  createdAt: new Date().toISOString(),
-                }),
-              )
-              .pipe(Effect.catch(() => Effect.void));
+          if (affectedThreads.length > 0) {
+            yield* runThreadCleanupInBackground(affectedThreads);
           }
 
-          yield* terminalManager
-            .close({
-              threadId: normalizedCommand.threadId,
-              deleteHistory: true,
-            })
-            .pipe(Effect.catch(() => Effect.void));
-
-          return archiveResult;
+          return result;
         }
         return yield* startup.enqueueCommand(orchestrationEngine.dispatch(normalizedCommand));
       }
@@ -1223,12 +1291,14 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       }
 
       case WS_METHODS.serverGetConfig:
+        yield* fileSystem.makeDirectory(chatWorkspaceRoot, { recursive: true }).pipe(Effect.ignore);
         const keybindingsConfig = yield* keybindingsManager.loadConfigState;
         const providerState = yield* getProviderStateSnapshot();
         const settings = yield* serverSettings.getSettings;
         return {
           cwd,
           homeDirectory,
+          chatWorkspaceRoot,
           keybindingsConfigPath,
           keybindings: keybindingsConfig.keybindings,
           issues: keybindingsConfig.issues,

@@ -155,6 +155,7 @@ const ServerProviderAccounts = Schema.Array(ServerProviderAccountSummary);
 export const ServerConfig = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   homeDirectory: Schema.optional(TrimmedNonEmptyString),
+  chatWorkspaceRoot: Schema.optional(TrimmedNonEmptyString),
   keybindingsConfigPath: TrimmedNonEmptyString,
   keybindings: ResolvedKeybindingsConfig,
   issues: ServerConfigIssues,

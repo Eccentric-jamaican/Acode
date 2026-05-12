@@ -17,7 +17,8 @@ import {
   type VirtualItem,
   useVirtualizer,
 } from "@tanstack/react-virtual";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { parsePatchFiles } from "@pierre/diffs";
 import { FileDiff } from "@pierre/diffs/react";
 import {
   BotIcon,
@@ -30,7 +31,6 @@ import {
   ExternalLinkIcon,
   EyeIcon,
   FileIcon,
-  FolderClosedIcon,
   FolderIcon,
   GlobeIcon,
   HammerIcon,
@@ -54,12 +54,7 @@ import {
 } from "../../session-logic";
 import { AUTO_SCROLL_BOTTOM_THRESHOLD_PX } from "../../chat-scroll";
 import { type TurnDiffFileChange, type TurnDiffSummary } from "../../types";
-import {
-  buildTurnDiffTree,
-  summarizeTurnDiffStats,
-  type TurnDiffTreeNode,
-} from "../../lib/turnDiffTree";
-import { resolveDiffThemeName } from "../../lib/diffRendering";
+import { buildPatchCacheKey, resolveDiffThemeName } from "../../lib/diffRendering";
 import {
   type RenderableInvocationDiffFile,
   toRenderableInvocationDiffFile,
@@ -69,7 +64,12 @@ import {
   reconstructRangeFromOffsets,
   serializeRangeWithinContainer,
 } from "../../chatPinnedSelections";
-import { buildProposedPlanMarkdownFilename, proposedPlanTitle } from "../../proposedPlan";
+import {
+  buildProposedPlanMarkdownFilename,
+  buildProposedPlanWorkspacePath,
+  findWorkspacePlansDirectories,
+  proposedPlanTitle,
+} from "../../proposedPlan";
 import { type PinnedSelectionDraft } from "../../composerDraftStore";
 import { readNativeApi } from "~/nativeApi";
 import { cn } from "~/lib/utils";
@@ -78,7 +78,8 @@ import {
   humanizeSubagentStatus,
   resolveSubagentPresentation,
 } from "../../lib/subagentPresentation";
-import { projectReadFileQueryOptions } from "~/lib/projectReactQuery";
+import { projectQueryKeys, projectReadFileQueryOptions } from "~/lib/projectReactQuery";
+import { checkpointDiffQueryOptions } from "~/lib/providerReactQuery";
 
 import ChatMarkdown from "../ChatMarkdown";
 import { Button } from "../ui/button";
@@ -86,6 +87,7 @@ import { Input } from "../ui/input";
 import { Badge } from "../ui/badge";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { estimateTimelineMessageHeight } from "../timelineHeight";
+import { OpenAI } from "../Icons";
 import {
   Dialog,
   DialogDescription,
@@ -121,6 +123,8 @@ const CHAT_PIN_MARKER_SCROLL_SETTLE_MS = 96;
 const CHAT_SELECTION_IGNORE_SELECTOR =
   "button, summary, [role='button'], [role='menuitem'], input, textarea, select, option, [data-chat-selection-ignore='true']";
 const EMPTY_INVOCATION_DIFF_FILES: ReadonlyArray<InvocationDiffFile> = [];
+const INLINE_EDIT_DIFF_MAX_CHANGED_LINES = 300;
+const INLINE_EDIT_DIFF_MAX_CONTENT_CHARS = 120_000;
 const LEADING_PROVIDER_MENTION_PATTERN = /^([$/])([^\s]+)(?=\s|$)/;
 
 type AssistantArtifactKind = "document" | "image" | "markdown" | "slides" | "spreadsheet" | "pdf";
@@ -151,6 +155,7 @@ export interface MessagesTimelineProps {
   hasMessages: boolean;
   isWorking: boolean;
   activeTurnInProgress: boolean;
+  threadId: ThreadId;
   activeTurnStartedAt: string | null;
   scrollContainer: HTMLDivElement | null;
   timelineEntries: ReturnType<typeof deriveTimelineEntries>;
@@ -645,7 +650,28 @@ function capitalizePhrase(value: string): string {
   return `${trimmed.charAt(0).toUpperCase()}${trimmed.slice(1)}`;
 }
 
+function humanizeToolName(value: string): string {
+  const compact = value.trim();
+  if (!compact) return "Tool";
+  return compact
+    .replace(/[_-]+/g, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => capitalizePhrase(part.toLowerCase()))
+    .join(" ");
+}
+
 function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
+  if (isCommandWorkEntry(workEntry)) {
+    return isActiveWorkEntry(workEntry) ? "Running" : "Ran command";
+  }
+  if (isFileReadWorkEntry(workEntry)) {
+    return "Read";
+  }
+  const toolName = workEntryToolName(workEntry);
+  if (toolName) {
+    return humanizeToolName(toolName);
+  }
   if (!workEntry.toolTitle) {
     return capitalizePhrase(normalizeCompactToolLabel(workEntry.label));
   }
@@ -654,7 +680,7 @@ function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
 
 function workEntryKindLabel(workEntry: TimelineWorkEntry): string | null {
   if (workEntry.requestKind === "command") return "Approval";
-  if (workEntry.requestKind === "file-read") return "Read";
+  if (workEntry.requestKind === "file-read") return null;
   if (workEntry.requestKind === "file-change") return "Approval";
 
   switch (workEntry.itemType) {
@@ -669,12 +695,351 @@ function workEntryKindLabel(workEntry: TimelineWorkEntry): string | null {
     case "mcp_tool_call":
       return "MCP";
     case "dynamic_tool_call":
-      return "Tool";
+      return null;
     case "collab_agent_tool_call":
       return "Agent";
     default:
       return workEntry.tone === "tool" ? "Tool" : null;
   }
+}
+
+function isCommandWorkEntry(workEntry: WorkLogEntry): boolean {
+  return workEntry.itemType === "command_execution" || Boolean(workEntry.command);
+}
+
+function isEditWorkEntry(workEntry: WorkLogEntry): boolean {
+  return (
+    workEntry.itemType === "file_change" ||
+    (workEntry.changedFiles?.length ?? 0) > 0 ||
+    (workEntry.invocationDiffFiles?.length ?? 0) > 0
+  );
+}
+
+function isWebSearchWorkEntry(workEntry: WorkLogEntry): boolean {
+  return workEntry.itemType === "web_search";
+}
+
+function isActiveWorkEntry(workEntry: WorkLogEntry): boolean {
+  const payload =
+    workEntry.payload && typeof workEntry.payload === "object"
+      ? (workEntry.payload as Record<string, unknown>)
+      : null;
+  if (payload?.status === "inProgress" || payload?.status === "running") {
+    return true;
+  }
+  const text = `${workEntry.label} ${workEntry.toolTitle ?? ""}`.toLowerCase();
+  return (
+    text.includes("started") ||
+    text.includes("starting") ||
+    text.includes("running") ||
+    text.includes("editing") ||
+    text.includes("in progress")
+  );
+}
+
+function truncateWorkLabel(value: string, maxLength = 72): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= maxLength) return trimmed;
+  return `${trimmed.slice(0, maxLength - 3).trimEnd()}...`;
+}
+
+function basenameOfWorkPath(path: string): string {
+  const normalized = path.replaceAll("\\", "/");
+  const segments = normalized.split("/");
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const segment = segments[index];
+    if (segment) return segment;
+  }
+  return normalized;
+}
+
+function workLogRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+function workLogString(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function workEntryDataRecord(workEntry: WorkLogEntry): Record<string, unknown> | null {
+  return workLogRecord(workLogRecord(workEntry.payload)?.data);
+}
+
+function workEntryInputRecord(workEntry: WorkLogEntry): Record<string, unknown> | null {
+  const payload = workLogRecord(workEntry.payload);
+  const data = workEntryDataRecord(workEntry);
+  return workLogRecord(data?.input) ?? workLogRecord(payload?.args);
+}
+
+function workEntryToolName(workEntry: WorkLogEntry): string | null {
+  const payload = workLogRecord(workEntry.payload);
+  const data = workEntryDataRecord(workEntry);
+  return (
+    workLogString(data?.toolName) ??
+    workLogString(data?.name) ??
+    workLogString(payload?.toolName)
+  );
+}
+
+function inputStringForKeys(
+  input: Record<string, unknown> | null,
+  keys: ReadonlyArray<string>,
+): string | null {
+  if (!input) return null;
+  for (const key of keys) {
+    const value = workLogString(input[key]);
+    if (value) return value;
+  }
+  return null;
+}
+
+function isFileReadWorkEntry(workEntry: WorkLogEntry): boolean {
+  return workEntry.requestKind === "file-read";
+}
+
+function workEntryInputPath(workEntry: WorkLogEntry): string | null {
+  return inputStringForKeys(workEntryInputRecord(workEntry), [
+    "filePath",
+    "path",
+    "relativePath",
+    "filename",
+  ]);
+}
+
+function workEntryStatusLabel(workEntry: WorkLogEntry): string {
+  if (isActiveWorkEntry(workEntry) && isWebSearchWorkEntry(workEntry)) return "Searching";
+  if (isActiveWorkEntry(workEntry)) return isEditWorkEntry(workEntry) ? "Editing" : "Running";
+  return workEntry.tone === "error" ? "Failed" : "Success";
+}
+
+function workEntryStatusClass(workEntry: WorkLogEntry): string {
+  if (isActiveWorkEntry(workEntry)) return "text-info-foreground";
+  return workEntry.tone === "error" ? "text-destructive/90" : "text-muted-foreground/80";
+}
+
+function unwrapShellLauncherCommand(command: string): string {
+  const trimmed = command.trim();
+  const commandMatch =
+    trimmed.match(/\s-(?:Command|c)\s+'([\s\S]*)'$/i) ??
+    trimmed.match(/\s-(?:Command|c)\s+"([\s\S]*)"$/i);
+  const unwrapped = commandMatch?.[1]?.trim();
+  return unwrapped && unwrapped.length > 0 ? unwrapped : trimmed;
+}
+
+function commandPreview(command: string): string {
+  const trimmed = unwrapShellLauncherCommand(command);
+  if (trimmed.length <= 180) return trimmed;
+  return `${trimmed.slice(0, 177).trimEnd()}...`;
+}
+
+function workEntryPreview(workEntry: WorkLogEntry): string | null {
+  if (isWebSearchWorkEntry(workEntry)) {
+    return (
+      workEntry.webSearchQueries?.[0] ??
+      workEntry.webSearchUrls?.[0] ??
+      workEntry.detail?.split(/\r?\n/, 1)[0]?.trim() ??
+      null
+    );
+  }
+  if (workEntry.command) {
+    return commandPreview(workEntry.command);
+  }
+  if (isFileReadWorkEntry(workEntry)) {
+    return workEntryInputPath(workEntry) ?? workEntry.label;
+  }
+  const file = workEntry.invocationDiffFiles?.[0]?.path ?? workEntry.changedFiles?.[0] ?? null;
+  if (file) {
+    return file;
+  }
+  const toolInputPreview = inputStringForKeys(workEntryInputRecord(workEntry), [
+    "description",
+    "pattern",
+    "query",
+    "path",
+    "filePath",
+    "prompt",
+  ]);
+  if (toolInputPreview) {
+    return toolInputPreview;
+  }
+  if (workEntry.detail) {
+    return workEntry.detail.split(/\r?\n/, 1)[0]?.trim() ?? null;
+  }
+  return null;
+}
+
+function primaryEditPath(workEntry: WorkLogEntry): string | null {
+  return workEntry.invocationDiffFiles?.[0]?.path ?? workEntry.changedFiles?.[0] ?? null;
+}
+
+function normalizeWorkPathForCompare(path: string): string {
+  return path.replaceAll("\\", "/").toLowerCase();
+}
+
+function normalizeFileDiffPathForWorkLog(fileDiff: { name?: string; prevName?: string }): string {
+  const raw = fileDiff.name ?? fileDiff.prevName ?? "";
+  return raw.startsWith("a/") || raw.startsWith("b/") ? raw.slice(2) : raw;
+}
+
+function editStatForEntry(
+  workEntry: WorkLogEntry,
+  turnDiffSummaryByTurnId: ReadonlyMap<TurnId, TurnDiffSummary>,
+): { additions: number; deletions: number } | null {
+  if (workEntry.invocationDiffStat && hasNonZeroStat(workEntry.invocationDiffStat)) {
+    return workEntry.invocationDiffStat;
+  }
+  const path = primaryEditPath(workEntry);
+  if (!path || !workEntry.turnId) {
+    return null;
+  }
+  const summary = turnDiffSummaryByTurnId.get(workEntry.turnId);
+  const file = findTurnDiffFileForPath(summary, path);
+  if (!file) {
+    return null;
+  }
+  return {
+    additions: file.additions ?? 0,
+    deletions: file.deletions ?? 0,
+  };
+}
+
+function invocationDiffContentCharCount(workEntry: WorkLogEntry): number {
+  let count = 0;
+  for (const file of workEntry.invocationDiffFiles ?? []) {
+    count += file.patch?.length ?? 0;
+    count += file.before?.length ?? 0;
+    count += file.after?.length ?? 0;
+  }
+  return count;
+}
+
+function inlineEditDiffBlockReason(
+  workEntry: WorkLogEntry,
+  editStat: { additions: number; deletions: number } | null,
+): string | null {
+  const changedLineCount = editStat ? editStat.additions + editStat.deletions : 0;
+  if (changedLineCount > INLINE_EDIT_DIFF_MAX_CHANGED_LINES) {
+    return `This diff has ${changedLineCount.toLocaleString()} changed lines.`;
+  }
+  const contentCharCount = invocationDiffContentCharCount(workEntry);
+  if (contentCharCount > INLINE_EDIT_DIFF_MAX_CONTENT_CHARS) {
+    return "This diff is too large to render inline.";
+  }
+  return null;
+}
+
+function findTurnDiffFileForPath(
+  summary: TurnDiffSummary | undefined,
+  path: string,
+): TurnDiffFileChange | null {
+  const normalizedPath = normalizeWorkPathForCompare(path);
+  const basename = basenameOfWorkPath(path).toLowerCase();
+  return (
+    summary?.files.find((candidate) => {
+      const candidatePath = normalizeWorkPathForCompare(candidate.path);
+      return (
+        candidatePath === normalizedPath ||
+        basenameOfWorkPath(candidate.path).toLowerCase() === basename
+      );
+    }) ?? null
+  );
+}
+
+type WebSearchDisplayItem = {
+  id: string;
+  text: string;
+  kind: "query" | "url" | "detail";
+};
+
+function webSearchDisplayItemsForEntry(workEntry: WorkLogEntry): WebSearchDisplayItem[] {
+  const items: WebSearchDisplayItem[] = [];
+  const seen = new Set<string>();
+  const pushItem = (kind: WebSearchDisplayItem["kind"], text: string | null | undefined) => {
+    const trimmed = text?.trim();
+    if (!trimmed) return;
+    const key = `${kind}:${trimmed.toLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    items.push({ id: `${workEntry.id}:${kind}:${items.length}`, kind, text: trimmed });
+  };
+
+  for (const query of workEntry.webSearchQueries ?? []) {
+    pushItem("query", query);
+  }
+  for (const url of workEntry.webSearchUrls ?? []) {
+    pushItem("url", url);
+  }
+  if (items.length === 0) {
+    pushItem("detail", workEntry.detail ?? workEntry.label);
+  }
+  return items;
+}
+
+function webSearchDisplayItemsForEntries(
+  entries: ReadonlyArray<WorkLogEntry>,
+): WebSearchDisplayItem[] {
+  const items: WebSearchDisplayItem[] = [];
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    for (const item of webSearchDisplayItemsForEntry(entry)) {
+      const key = `${item.kind}:${item.text.toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      items.push({ ...item, id: `web-search:${items.length}:${item.id}` });
+    }
+  }
+  return items;
+}
+
+function workGroupSummary(entries: ReadonlyArray<WorkLogEntry>, fallbackLabel: string): string {
+  if (entries.length === 0) {
+    return fallbackLabel;
+  }
+  if (entries.every(isWebSearchWorkEntry)) {
+    const items = webSearchDisplayItemsForEntries(entries);
+    const firstSearch = items.find((item) => item.kind === "query") ?? items[0];
+    if (entries.some(isActiveWorkEntry)) {
+      return `Searching the web${firstSearch ? ` for ${truncateWorkLabel(firstSearch.text, 42)}` : ""}`;
+    }
+    const count = Math.max(items.length, entries.length);
+    return `Searched web ${count} ${count === 1 ? "time" : "times"}`;
+  }
+  if (entries.every(isCommandWorkEntry)) {
+    return `Ran ${entries.length} ${entries.length === 1 ? "command" : "commands"}`;
+  }
+  if (entries.every(isFileReadWorkEntry)) {
+    return `Read ${entries.length} ${entries.length === 1 ? "file" : "files"}`;
+  }
+  if (entries.every(isEditWorkEntry)) {
+    const completedFiles = new Set<string>();
+    const activeFiles = new Set<string>();
+    for (const entry of entries) {
+      const target = isActiveWorkEntry(entry) ? activeFiles : completedFiles;
+      for (const file of entry.invocationDiffFiles ?? []) {
+        target.add(file.path);
+      }
+      for (const file of entry.changedFiles ?? []) {
+        target.add(file);
+      }
+    }
+    const parts: string[] = [];
+    if (completedFiles.size > 0) {
+      parts.push(completedFiles.size === 1 ? "Edited file" : `Edited ${completedFiles.size} files`);
+    }
+    if (activeFiles.size > 0) {
+      parts.push(activeFiles.size === 1 ? "editing file" : `editing ${activeFiles.size} files`);
+    }
+    if (parts.length > 0) {
+      return parts.join(", ");
+    }
+    return `Edited ${entries.length} ${entries.length === 1 ? "file" : "files"}`;
+  }
+  if (fallbackLabel === "Tool calls") {
+    return `Used ${entries.length} ${entries.length === 1 ? "tool" : "tools"}`;
+  }
+  return `${fallbackLabel} (${entries.length})`;
 }
 
 function estimateTimelineProposedPlanHeight(proposedPlan: TimelineProposedPlan): number {
@@ -752,27 +1117,6 @@ export const DiffStatLabel = memo(function DiffStatLabel(props: {
   );
 });
 
-function collectDirectoryPaths(nodes: ReadonlyArray<TurnDiffTreeNode>): string[] {
-  const paths: string[] = [];
-  for (const node of nodes) {
-    if (node.kind !== "directory") continue;
-    paths.push(node.path);
-    paths.push(...collectDirectoryPaths(node.children));
-  }
-  return paths;
-}
-
-function buildDirectoryExpansionState(
-  directoryPaths: ReadonlyArray<string>,
-  expanded: boolean,
-): Record<string, boolean> {
-  const expandedState: Record<string, boolean> = {};
-  for (const directoryPath of directoryPaths) {
-    expandedState[directoryPath] = expanded;
-  }
-  return expandedState;
-}
-
 function fileExtension(pathValue: string): string {
   const fileName = pathValue.split(/[\\/]/).at(-1) ?? pathValue;
   const extensionIndex = fileName.lastIndexOf(".");
@@ -813,18 +1157,6 @@ function generatedImagePreviewSrc(input: {
     return null;
   }
   return `data:${input.mimeType};base64,${input.contentsBase64}`;
-}
-
-function collectAssistantArtifacts(files: ReadonlyArray<TurnDiffFileChange>): AssistantArtifact[] {
-  const seenPaths = new Set<string>();
-  const artifacts: AssistantArtifact[] = [];
-  for (const file of files) {
-    const artifactKind = artifactKindForPath(file.path);
-    if (!artifactKind || seenPaths.has(file.path)) continue;
-    seenPaths.add(file.path);
-    artifacts.push({ ...file, artifactKind, source: "checkpoint" });
-  }
-  return artifacts;
 }
 
 type AssistantArtifact = TurnDiffFileChange & {
@@ -933,114 +1265,6 @@ const AssistantArtifactCards = memo(function AssistantArtifactCards(props: {
   );
 });
 
-const ChangedFilesTree = memo(function ChangedFilesTree(props: {
-  turnId: TurnId;
-  files: ReadonlyArray<TurnDiffFileChange>;
-  allDirectoriesExpanded: boolean;
-  resolvedTheme: "light" | "dark";
-  onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
-}) {
-  const { files, allDirectoriesExpanded, onOpenTurnDiff, resolvedTheme, turnId } = props;
-  const treeNodes = useMemo(() => buildTurnDiffTree(files), [files]);
-  const directoryPathsKey = useMemo(
-    () => collectDirectoryPaths(treeNodes).join("\u0000"),
-    [treeNodes],
-  );
-  const allDirectoryExpansionState = useMemo(
-    () =>
-      buildDirectoryExpansionState(
-        directoryPathsKey ? directoryPathsKey.split("\u0000") : [],
-        allDirectoriesExpanded,
-      ),
-    [allDirectoriesExpanded, directoryPathsKey],
-  );
-  const [expandedDirectories, setExpandedDirectories] = useState<Record<string, boolean>>(() =>
-    buildDirectoryExpansionState(directoryPathsKey ? directoryPathsKey.split("\u0000") : [], true),
-  );
-
-  useEffect(() => {
-    setExpandedDirectories(allDirectoryExpansionState);
-  }, [allDirectoryExpansionState]);
-
-  const toggleDirectory = useCallback((pathValue: string, fallbackExpanded: boolean) => {
-    setExpandedDirectories((current) => ({
-      ...current,
-      [pathValue]: !(current[pathValue] ?? fallbackExpanded),
-    }));
-  }, []);
-
-  const renderTreeNode = (node: TurnDiffTreeNode, depth: number) => {
-    const leftPadding = 8 + depth * 14;
-    if (node.kind === "directory") {
-      const isExpanded = expandedDirectories[node.path] ?? depth === 0;
-      return (
-        <div key={`dir:${node.path}`}>
-          <button
-            type="button"
-            className="group flex w-full items-center gap-1.5 rounded-md py-1 pr-2 text-left hover:bg-background/80"
-            style={{ paddingLeft: `${leftPadding}px` }}
-            onClick={() => toggleDirectory(node.path, depth === 0)}
-          >
-            <ChevronRightIcon
-              aria-hidden="true"
-              className={cn(
-                "size-3.5 shrink-0 text-muted-foreground/70 transition-transform group-hover:text-foreground/80",
-                isExpanded && "rotate-90",
-              )}
-            />
-            {isExpanded ? (
-              <FolderIcon className="size-3.5 shrink-0 text-muted-foreground/75" />
-            ) : (
-              <FolderClosedIcon className="size-3.5 shrink-0 text-muted-foreground/75" />
-            )}
-            <span className="truncate font-mono text-[11px] text-muted-foreground/90 group-hover:text-foreground/90">
-              {node.name}
-            </span>
-            {hasNonZeroStat(node.stat) && (
-              <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums">
-                <DiffStatLabel additions={node.stat.additions} deletions={node.stat.deletions} />
-              </span>
-            )}
-          </button>
-          {isExpanded && (
-            <div className="space-y-0.5">
-              {node.children.map((childNode) => renderTreeNode(childNode, depth + 1))}
-            </div>
-          )}
-        </div>
-      );
-    }
-
-    return (
-      <button
-        key={`file:${node.path}`}
-        type="button"
-        className="group flex w-full items-center gap-1.5 rounded-md py-1 pr-2 text-left hover:bg-background/80"
-        style={{ paddingLeft: `${leftPadding}px` }}
-        onClick={() => onOpenTurnDiff(turnId, node.path)}
-      >
-        <span aria-hidden="true" className="size-3.5 shrink-0" />
-        <VscodeEntryIcon
-          pathValue={node.path}
-          kind="file"
-          theme={resolvedTheme}
-          className="size-3.5 text-muted-foreground/70"
-        />
-        <span className="truncate font-mono text-[11px] text-muted-foreground/80 group-hover:text-foreground/90">
-          {node.name}
-        </span>
-        {node.stat && (
-          <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums">
-            <DiffStatLabel additions={node.stat.additions} deletions={node.stat.deletions} />
-          </span>
-        )}
-      </button>
-    );
-  };
-
-  return <div className="space-y-0.5">{treeNodes.map((node) => renderTreeNode(node, 0))}</div>;
-});
-
 const ProposedPlanCard = memo(function ProposedPlanCard(props: {
   planMarkdown: string;
   cwd: string | undefined;
@@ -1051,8 +1275,12 @@ const ProposedPlanCard = memo(function ProposedPlanCard(props: {
   const { planMarkdown, cwd, workspaceRoot, sourceId } = props;
   const [expanded, setExpanded] = useState(false);
   const [isSaveDialogOpen, setIsSaveDialogOpen] = useState(false);
+  const [plansDirectoryChoices, setPlansDirectoryChoices] = useState<ReadonlyArray<string>>([]);
+  const [isPlansDirectoryDialogOpen, setIsPlansDirectoryDialogOpen] = useState(false);
   const [savePath, setSavePath] = useState("");
   const [isSavingToWorkspace, setIsSavingToWorkspace] = useState(false);
+  const [isAddingToPlansDirectory, setIsAddingToPlansDirectory] = useState(false);
+  const queryClient = useQueryClient();
   const savePathInputId = useId();
   const title = proposedPlanTitle(planMarkdown) ?? "Proposed plan";
   const lineCount = planMarkdown.split("\n").length;
@@ -1062,6 +1290,18 @@ const ProposedPlanCard = memo(function ProposedPlanCard(props: {
 
   const handleDownload = () => {
     downloadTextFile(downloadFilename, saveContents);
+  };
+
+  const invalidateWorkspaceEntries = () => {
+    if (!workspaceRoot) {
+      return;
+    }
+    void queryClient.invalidateQueries({
+      queryKey: projectQueryKeys.listTree(workspaceRoot),
+    });
+    void queryClient.invalidateQueries({
+      queryKey: projectQueryKeys.listDirectory(workspaceRoot, null),
+    });
   };
 
   const openSaveDialog = () => {
@@ -1100,6 +1340,7 @@ const ProposedPlanCard = memo(function ProposedPlanCard(props: {
       })
       .then((result) => {
         setIsSaveDialogOpen(false);
+        invalidateWorkspaceEntries();
         toastManager.add({
           type: "success",
           title: "Plan saved to workspace",
@@ -1123,8 +1364,87 @@ const ProposedPlanCard = memo(function ProposedPlanCard(props: {
       );
   };
 
+  const saveToPlansDirectory = async (directoryPath: string, createDirectory: boolean) => {
+    const api = readNativeApi();
+    if (!api || !workspaceRoot) {
+      return;
+    }
+    const relativePath = buildProposedPlanWorkspacePath({
+      directoryPath,
+      planMarkdown,
+    });
+    setIsAddingToPlansDirectory(true);
+    try {
+      if (createDirectory) {
+        await api.projects.createDirectory({
+          cwd: workspaceRoot,
+          relativePath: directoryPath,
+        });
+      }
+      const result = await api.projects.writeFile({
+        cwd: workspaceRoot,
+        relativePath,
+        contents: saveContents,
+      });
+      setIsPlansDirectoryDialogOpen(false);
+      setPlansDirectoryChoices([]);
+      invalidateWorkspaceEntries();
+      toastManager.add({
+        type: "success",
+        title: "Plan added to plans directory",
+        description: result.relativePath,
+      });
+    } catch (error) {
+      toastManager.add({
+        type: "error",
+        title: "Could not add plan",
+        description: error instanceof Error ? error.message : "An error occurred while saving.",
+      });
+    } finally {
+      setIsAddingToPlansDirectory(false);
+    }
+  };
+
+  const addToPlansDirectory = () => {
+    const api = readNativeApi();
+    if (!api || !workspaceRoot) {
+      toastManager.add({
+        type: "error",
+        title: "Workspace path is unavailable",
+        description: "This thread does not have a workspace path to save into.",
+      });
+      return;
+    }
+
+    setIsAddingToPlansDirectory(true);
+    void (async () => {
+      try {
+        const tree = await api.projects.listTree({ cwd: workspaceRoot });
+        const plansDirectories = findWorkspacePlansDirectories(tree.entries);
+        if (plansDirectories.length > 1) {
+          setPlansDirectoryChoices(plansDirectories);
+          setIsPlansDirectoryDialogOpen(true);
+          return;
+        }
+        const [existingPlansDirectory] = plansDirectories;
+        await saveToPlansDirectory(existingPlansDirectory ?? "plans", !existingPlansDirectory);
+      } catch (error) {
+        toastManager.add({
+          type: "error",
+          title: "Could not inspect workspace",
+          description:
+            error instanceof Error
+              ? error.message
+              : "An error occurred while looking for plans directories.",
+        });
+      } finally {
+        setIsAddingToPlansDirectory(false);
+      }
+    })();
+  };
+
   return (
-    <div className="rounded-[24px] border border-border/80 bg-card/70 p-4 sm:p-5">
+    <div className="rounded-[20px] border border-border/55 bg-card/55 p-4 shadow-sm shadow-black/5 sm:p-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex min-w-0 items-center gap-2">
           <Badge variant="secondary">Plan</Badge>
@@ -1138,6 +1458,12 @@ const ProposedPlanCard = memo(function ProposedPlanCard(props: {
           </MenuTrigger>
           <MenuPopup align="end">
             <MenuItem onClick={handleDownload}>Download as markdown</MenuItem>
+            <MenuItem
+              onClick={addToPlansDirectory}
+              disabled={!workspaceRoot || isAddingToPlansDirectory}
+            >
+              Add to plans directory
+            </MenuItem>
             <MenuItem onClick={openSaveDialog} disabled={!workspaceRoot || isSavingToWorkspace}>
               Save to workspace
             </MenuItem>
@@ -1161,7 +1487,7 @@ const ProposedPlanCard = memo(function ProposedPlanCard(props: {
             />
           </div>
           {canCollapse && !expanded ? (
-            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-24 bg-linear-to-t from-card/95 via-card/80 to-transparent" />
+            <div className="pointer-events-none absolute inset-x-0 bottom-0 h-24 rounded-b-[18px] bg-linear-to-t from-card/85 via-card/55 to-transparent" />
           ) : null}
         </div>
         {canCollapse ? (
@@ -1220,6 +1546,656 @@ const ProposedPlanCard = memo(function ProposedPlanCard(props: {
           </DialogFooter>
         </DialogPopup>
       </Dialog>
+
+      <Dialog
+        open={isPlansDirectoryDialogOpen}
+        onOpenChange={(open) => {
+          if (!isAddingToPlansDirectory) {
+            setIsPlansDirectoryDialogOpen(open);
+          }
+        }}
+      >
+        <DialogPopup className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Choose a plans directory</DialogTitle>
+            <DialogDescription>
+              This workspace has more than one <code>plans</code> directory.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogPanel className="space-y-2">
+            {plansDirectoryChoices.map((directoryPath) => (
+              <button
+                key={directoryPath}
+                type="button"
+                className="flex w-full min-w-0 items-center gap-2 rounded-md border border-border/70 bg-background/60 px-3 py-2 text-left text-sm transition-colors hover:bg-muted/60 disabled:pointer-events-none disabled:opacity-50"
+                disabled={isAddingToPlansDirectory}
+                onClick={() => void saveToPlansDirectory(directoryPath, false)}
+              >
+                <FolderIcon className="size-4 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate font-mono text-xs">{directoryPath}</span>
+              </button>
+            ))}
+          </DialogPanel>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setIsPlansDirectoryDialogOpen(false)}
+              disabled={isAddingToPlansDirectory}
+            >
+              Cancel
+            </Button>
+          </DialogFooter>
+        </DialogPopup>
+      </Dialog>
+    </div>
+  );
+});
+
+const WorkLogGroup = memo(function WorkLogGroup(props: {
+  groupId: string;
+  groupedEntries: ReadonlyArray<WorkLogEntry>;
+  visibleEntries: ReadonlyArray<WorkLogEntry>;
+  hiddenCount: number;
+  hasOverflow: boolean;
+  isExpanded: boolean;
+  groupLabel: string;
+  resolvedTheme: "light" | "dark";
+  threadId: ThreadId;
+  turnDiffSummaryByTurnId: ReadonlyMap<TurnId, TurnDiffSummary>;
+  onToggleWorkGroup: (groupId: string) => void;
+  onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
+  onOpenThread?: ((threadId: ThreadId) => void) | undefined;
+  onOpenFilePath?:
+    | ((
+        path: string,
+        options?: { cwd?: string | undefined; displayName?: string | undefined },
+      ) => void)
+    | undefined;
+  onImageExpand: (preview: ExpandedImagePreview) => void;
+  onImageLoad: () => void;
+  homeDirectory: string | undefined;
+  workspaceRoot: string | undefined;
+}) {
+  const [expandedEntryId, setExpandedEntryId] = useState<string | null>(null);
+  const [isGroupCollapsed, setIsGroupCollapsed] = useState(() =>
+    props.groupedEntries.every(isEditWorkEntry),
+  );
+  const summary = workGroupSummary(props.groupedEntries, props.groupLabel);
+  const isWebSearchGroup = props.groupedEntries.every(isWebSearchWorkEntry);
+  const singleEditEntry =
+    props.visibleEntries.length === 1 && isEditWorkEntry(props.visibleEntries[0] as WorkLogEntry);
+  const singleEditWorkEntry = singleEditEntry ? (props.visibleEntries[0] as WorkLogEntry) : null;
+  const singleEditTurnSummary = singleEditWorkEntry?.turnId
+    ? props.turnDiffSummaryByTurnId.get(singleEditWorkEntry.turnId)
+    : undefined;
+  const singleEditCheckpointTurnCount =
+    typeof singleEditTurnSummary?.checkpointTurnCount === "number"
+      ? singleEditTurnSummary.checkpointTurnCount
+      : null;
+  const singleEditStat = singleEditWorkEntry
+    ? editStatForEntry(singleEditWorkEntry, props.turnDiffSummaryByTurnId)
+    : null;
+  const singleEditInlineBlockReason = singleEditWorkEntry
+    ? inlineEditDiffBlockReason(singleEditWorkEntry, singleEditStat)
+    : null;
+  useQuery(
+    checkpointDiffQueryOptions({
+      threadId: props.threadId,
+      fromTurnCount:
+        singleEditCheckpointTurnCount !== null
+          ? Math.max(0, singleEditCheckpointTurnCount - 1)
+          : null,
+      toTurnCount: singleEditCheckpointTurnCount,
+      cacheScope: singleEditWorkEntry ? `work-log:${singleEditWorkEntry.id}` : null,
+      enabled:
+        singleEditWorkEntry !== null &&
+        singleEditInlineBlockReason === null &&
+        (singleEditWorkEntry.invocationDiffFiles?.length ?? 0) === 0 &&
+        singleEditCheckpointTurnCount !== null,
+    }),
+  );
+  const SummaryIcon = props.groupedEntries.every(isEditWorkEntry)
+    ? SquarePenIcon
+    : isWebSearchGroup
+      ? GlobeIcon
+      : props.groupedEntries.every(isCommandWorkEntry)
+        ? TerminalIcon
+        : props.groupedEntries.every(isFileReadWorkEntry)
+          ? EyeIcon
+          : WrenchIcon;
+
+  useEffect(() => {
+    if (!expandedEntryId) return;
+    if (!props.visibleEntries.some((entry) => entry.id === expandedEntryId)) {
+      setExpandedEntryId(null);
+    }
+  }, [expandedEntryId, props.visibleEntries]);
+
+  return (
+    <div className="max-w-full space-y-2">
+      <div className="flex items-center gap-2 text-muted-foreground/78">
+        <button
+          type="button"
+          className="group inline-flex min-w-0 items-center gap-2 rounded-md px-1 py-0.5 text-left transition-colors hover:bg-accent/35 hover:text-foreground/88"
+          onClick={() => {
+            setIsGroupCollapsed((current) => !current);
+            setExpandedEntryId(null);
+          }}
+          aria-expanded={!isGroupCollapsed}
+        >
+          <SummaryIcon className="size-3.5 shrink-0" />
+          {singleEditWorkEntry && !isGroupCollapsed ? (
+            <span className="truncate text-sm">Edited file</span>
+          ) : singleEditWorkEntry ? (
+            <>
+              <span className="shrink-0 text-sm font-medium text-foreground/86">
+                {isActiveWorkEntry(singleEditWorkEntry) ? "Editing" : "Edited"}
+              </span>
+              {primaryEditPath(singleEditWorkEntry) ? (
+                <span
+                  className="min-w-0 truncate text-sm text-info-foreground"
+                  title={primaryEditPath(singleEditWorkEntry) ?? undefined}
+                >
+                  {basenameOfWorkPath(primaryEditPath(singleEditWorkEntry) ?? "")}
+                </span>
+              ) : null}
+              {(() => {
+                const editStat = editStatForEntry(
+                  singleEditWorkEntry,
+                  props.turnDiffSummaryByTurnId,
+                );
+                return editStat && hasNonZeroStat(editStat) ? (
+                  <span className="shrink-0 font-mono text-xs transition-colors duration-300">
+                    <span className="text-emerald-400">+{editStat.additions}</span>
+                    <span className="ml-1 text-red-400">-{editStat.deletions}</span>
+                  </span>
+                ) : null;
+              })()}
+            </>
+          ) : (
+            <span className="truncate text-sm">{summary}</span>
+          )}
+          <ChevronRightIcon
+            className={cn(
+              "size-3 shrink-0 transition-transform duration-150",
+              !isGroupCollapsed ? "rotate-90" : "",
+            )}
+          />
+        </button>
+        {props.hasOverflow ? (
+          <button
+            type="button"
+            className="rounded px-1.5 py-0.5 text-xs text-muted-foreground/55 transition-colors hover:bg-accent/30 hover:text-foreground/75"
+            onClick={() => props.onToggleWorkGroup(props.groupId)}
+          >
+            {props.isExpanded ? "Show less" : `Show ${props.hiddenCount} more`}
+          </button>
+        ) : null}
+      </div>
+      {!isGroupCollapsed ? (
+        <div className="space-y-1 pl-0.5">
+          {singleEditWorkEntry ? (
+            <WorkLogEntryDetail
+              workEntry={singleEditWorkEntry}
+              resolvedTheme={props.resolvedTheme}
+              threadId={props.threadId}
+              turnDiffSummaryByTurnId={props.turnDiffSummaryByTurnId}
+              onOpenThread={props.onOpenThread}
+              onOpenFilePath={props.onOpenFilePath}
+              onOpenTurnDiff={props.onOpenTurnDiff}
+              onImageExpand={props.onImageExpand}
+              onImageLoad={props.onImageLoad}
+              homeDirectory={props.homeDirectory}
+              workspaceRoot={props.workspaceRoot}
+            />
+          ) : isWebSearchGroup ? (
+            <WebSearchWorkLogRows entries={props.visibleEntries} />
+          ) : (
+            props.visibleEntries.map((workEntry) => {
+              const isEntryExpanded = workEntry.id === expandedEntryId;
+              return (
+                <div key={`work-line:${workEntry.id}`} className="space-y-1">
+                  <WorkLogEntryLine
+                    workEntry={workEntry}
+                    active={isEntryExpanded}
+                    turnDiffSummaryByTurnId={props.turnDiffSummaryByTurnId}
+                    onToggle={() => {
+                      setExpandedEntryId((current) =>
+                        current === workEntry.id ? null : workEntry.id,
+                      );
+                    }}
+                  />
+                  {isEntryExpanded ? (
+                    <WorkLogEntryDetail
+                      workEntry={workEntry}
+                      resolvedTheme={props.resolvedTheme}
+                      threadId={props.threadId}
+                      turnDiffSummaryByTurnId={props.turnDiffSummaryByTurnId}
+                      onOpenThread={props.onOpenThread}
+                      onOpenFilePath={props.onOpenFilePath}
+                      onOpenTurnDiff={props.onOpenTurnDiff}
+                      onImageExpand={props.onImageExpand}
+                      onImageLoad={props.onImageLoad}
+                      homeDirectory={props.homeDirectory}
+                      workspaceRoot={props.workspaceRoot}
+                    />
+                  ) : null}
+                </div>
+              );
+            })
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+});
+
+const WebSearchWorkLogRows = memo(function WebSearchWorkLogRows(props: {
+  entries: ReadonlyArray<WorkLogEntry>;
+}) {
+  const items = webSearchDisplayItemsForEntries(props.entries);
+  return (
+    <div className="space-y-1">
+      {items.map((item) => (
+        <div
+          key={item.id}
+          className="flex min-w-0 items-center gap-2 rounded-md px-1.5 py-0.5 text-muted-foreground/72"
+        >
+          <OpenAI className="size-3.5 shrink-0 text-muted-foreground/78" aria-hidden="true" />
+          <span className="min-w-0 flex-1 truncate text-sm" title={item.text}>
+            {item.text}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+});
+
+const WorkLogEntryLine = memo(function WorkLogEntryLine(props: {
+  workEntry: WorkLogEntry;
+  active: boolean;
+  turnDiffSummaryByTurnId: ReadonlyMap<TurnId, TurnDiffSummary>;
+  onToggle: () => void;
+}) {
+  const EntryIcon = workEntryIcon(props.workEntry);
+  const heading = toolWorkEntryHeading(props.workEntry);
+  const preview = workEntryPreview(props.workEntry);
+  const kindLabel = workEntryKindLabel(props.workEntry);
+  const isEditing = isEditWorkEntry(props.workEntry) && isActiveWorkEntry(props.workEntry);
+  const isEdit = isEditWorkEntry(props.workEntry);
+  const editPath = isEdit ? primaryEditPath(props.workEntry) : null;
+  const canExpandEdit =
+    isEdit &&
+    ((props.workEntry.invocationDiffFiles?.length ?? 0) > 0 ||
+      Boolean(editPath && props.workEntry.turnId));
+  const editStat = isEdit ? editStatForEntry(props.workEntry, props.turnDiffSummaryByTurnId) : null;
+  const hasStat = isEdit
+    ? Boolean(editStat && hasNonZeroStat(editStat))
+    : props.workEntry.invocationDiffStat && hasNonZeroStat(props.workEntry.invocationDiffStat);
+
+  return (
+    <button
+      type="button"
+      disabled={isEdit && !canExpandEdit}
+      className={cn(
+        "group flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors",
+        props.active
+          ? "bg-accent/35 text-foreground"
+          : "text-muted-foreground/72 enabled:hover:bg-accent/25 enabled:hover:text-foreground/88",
+        isEdit && !canExpandEdit ? "cursor-default" : "",
+      )}
+      onClick={props.onToggle}
+    >
+      <EntryIcon className="size-3.5 shrink-0" />
+      <span className="min-w-0 shrink-0 text-sm font-medium text-foreground/86">
+        {isEdit && editPath ? (isEditing ? "Editing" : "Edited") : heading}
+      </span>
+      {kindLabel && !isEdit && !isCommandWorkEntry(props.workEntry) ? (
+        <span className="shrink-0 rounded border border-border/45 px-1.5 py-0.5 text-[10px] leading-none text-muted-foreground/55">
+          {kindLabel}
+        </span>
+      ) : null}
+      {editPath ? (
+        <span
+          className="min-w-0 truncate text-sm text-info-foreground"
+          title={editPath}
+        >
+          {basenameOfWorkPath(editPath)}
+        </span>
+      ) : preview ? (
+        <span
+          className={cn(
+            "min-w-0 truncate text-sm",
+            isEditing ? "shrink-0 text-info-foreground" : "flex-1 text-muted-foreground/62",
+          )}
+          title={preview}
+        >
+          {isEditing ? basenameOfWorkPath(preview) : preview}
+        </span>
+      ) : (
+        <span className="min-w-0 flex-1" />
+      )}
+      {hasStat && (isEdit ? editStat : props.workEntry.invocationDiffStat) ? (
+        <span className="shrink-0 font-mono text-xs transition-colors duration-300">
+          <span className="text-emerald-400">
+            +{(isEdit ? editStat : props.workEntry.invocationDiffStat)?.additions ?? 0}
+          </span>
+          <span className="ml-1 text-red-400">
+            -{(isEdit ? editStat : props.workEntry.invocationDiffStat)?.deletions ?? 0}
+          </span>
+        </span>
+      ) : null}
+      {!isEdit || canExpandEdit ? (
+        <ChevronRightIcon
+          className={cn(
+            "size-3 shrink-0 text-muted-foreground/45 transition-transform duration-150 group-hover:text-foreground/65",
+            props.active ? "rotate-90" : "",
+          )}
+        />
+      ) : null}
+    </button>
+  );
+});
+
+const WorkLogEntryDetail = memo(function WorkLogEntryDetail(props: {
+  workEntry: WorkLogEntry;
+  resolvedTheme: "light" | "dark";
+  threadId: ThreadId;
+  turnDiffSummaryByTurnId: ReadonlyMap<TurnId, TurnDiffSummary>;
+  onOpenThread?: ((threadId: ThreadId) => void) | undefined;
+  onOpenFilePath?:
+    | ((
+        path: string,
+        options?: { cwd?: string | undefined; displayName?: string | undefined },
+      ) => void)
+    | undefined;
+  onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
+  onImageExpand: (preview: ExpandedImagePreview) => void;
+  onImageLoad: () => void;
+  homeDirectory: string | undefined;
+  workspaceRoot: string | undefined;
+}) {
+  const workEntry = props.workEntry;
+  const invocationDiffFiles = workEntry.invocationDiffFiles ?? EMPTY_INVOCATION_DIFF_FILES;
+  const turnSummary = workEntry.turnId
+    ? props.turnDiffSummaryByTurnId.get(workEntry.turnId)
+    : undefined;
+  const checkpointTurnCount =
+    typeof turnSummary?.checkpointTurnCount === "number" ? turnSummary.checkpointTurnCount : null;
+  const editStat = isEditWorkEntry(workEntry)
+    ? editStatForEntry(workEntry, props.turnDiffSummaryByTurnId)
+    : null;
+  const inlineDiffBlockReason = isEditWorkEntry(workEntry)
+    ? inlineEditDiffBlockReason(workEntry, editStat)
+    : null;
+  const checkpointDiffQuery = useQuery(
+    checkpointDiffQueryOptions({
+      threadId: props.threadId,
+      fromTurnCount:
+        checkpointTurnCount !== null ? Math.max(0, checkpointTurnCount - 1) : null,
+      toTurnCount: checkpointTurnCount,
+      cacheScope: `work-log:${workEntry.id}`,
+      enabled:
+        isEditWorkEntry(workEntry) &&
+        inlineDiffBlockReason === null &&
+        invocationDiffFiles.length === 0 &&
+        checkpointTurnCount !== null,
+    }),
+  );
+  const renderableDiffFiles = useMemo<RenderableInvocationDiffFile[]>(() => {
+    if (inlineDiffBlockReason !== null) {
+      return [];
+    }
+    const invocationFiles = invocationDiffFiles
+      .map((file) => toRenderableInvocationDiffFile(file, `work-detail:${workEntry.id}:${file.path}`))
+      .filter((file): file is RenderableInvocationDiffFile => file !== null);
+    if (invocationFiles.length > 0) {
+      return invocationFiles;
+    }
+    const patch = checkpointDiffQuery.data?.diff ?? "";
+    if (!patch.trim()) {
+      return [];
+    }
+    return parsePatchFiles(patch, buildPatchCacheKey(patch, `work-log:${workEntry.id}`))
+      .flatMap((parsedPatch) => parsedPatch.files)
+      .map((fileDiff) => {
+        const path = normalizeFileDiffPathForWorkLog(fileDiff);
+        const summaryFile = findTurnDiffFileForPath(turnSummary, path);
+        return {
+          path,
+          additions: summaryFile?.additions ?? 0,
+          deletions: summaryFile?.deletions ?? 0,
+          fileDiff,
+        } satisfies RenderableInvocationDiffFile;
+      })
+      .filter((file) => {
+        const editPath = primaryEditPath(workEntry);
+        if (!editPath) {
+          return true;
+        }
+        const normalizedFilePath = normalizeWorkPathForCompare(file.path);
+        const normalizedEditPath = normalizeWorkPathForCompare(editPath);
+        return (
+          normalizedFilePath === normalizedEditPath ||
+          basenameOfWorkPath(file.path).toLowerCase() ===
+            basenameOfWorkPath(editPath).toLowerCase()
+        );
+      });
+  }, [
+    checkpointDiffQuery.data?.diff,
+    inlineDiffBlockReason,
+    invocationDiffFiles,
+    turnSummary,
+    workEntry,
+  ]);
+  const [activeDiffPath, setActiveDiffPath] = useState<string | null>(
+    invocationDiffFiles[0]?.path ?? null,
+  );
+  const activeDiffFile = activeDiffPath
+    ? renderableDiffFiles.find((file) => file.path === activeDiffPath)
+    : null;
+  const activeDiff = activeDiffFile ?? null;
+  const commandOutput =
+    workEntry.detail &&
+    workEntry.detail.trim() !== workEntry.command?.trim() &&
+    workEntry.detail.trim() !== unwrapShellLauncherCommand(workEntry.command ?? "")
+      ? workEntry.detail.trim()
+      : null;
+  const shellCommand = workEntry.command ? unwrapShellLauncherCommand(workEntry.command) : null;
+  const changedFiles = [
+    ...new Map(
+      [
+        ...renderableDiffFiles.map((file) => [file.path, file] as const),
+        ...(workEntry.changedFiles ?? []).map(
+          (path) =>
+            [
+              path,
+              { path, additions: 0, deletions: 0 } satisfies InvocationDiffFile,
+            ] as const,
+        ),
+      ].map(([path, file]) => [path, file] as const),
+    ).values(),
+  ];
+
+  useEffect(() => {
+    const nextPath = renderableDiffFiles[0]?.path ?? null;
+    if (!activeDiffPath || !renderableDiffFiles.some((file) => file.path === activeDiffPath)) {
+      setActiveDiffPath(nextPath);
+    }
+  }, [activeDiffPath, renderableDiffFiles]);
+
+  if ((workEntry.subagents?.length ?? 0) > 0 || (workEntry.generatedImages?.length ?? 0) > 0) {
+    return (
+      <SimpleWorkEntryRow
+        workEntry={workEntry}
+        resolvedTheme={props.resolvedTheme}
+        onOpenThread={props.onOpenThread}
+        onOpenFilePath={props.onOpenFilePath}
+        onImageExpand={props.onImageExpand}
+        onImageLoad={props.onImageLoad}
+        homeDirectory={props.homeDirectory}
+        workspaceRoot={props.workspaceRoot}
+      />
+    );
+  }
+
+  if (isEditWorkEntry(workEntry)) {
+    const editPath = activeDiffFile?.path ?? primaryEditPath(workEntry);
+    if (inlineDiffBlockReason) {
+      const canOpenDiff = Boolean(workEntry.turnId && editPath);
+      return (
+        <div className="rounded-lg border border-border/50 bg-background/40 px-3 py-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="min-w-0 flex-1 truncate text-sm text-muted-foreground/78">
+              Large diff hidden in chat. {inlineDiffBlockReason}
+            </span>
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              disabled={!canOpenDiff}
+              onClick={() => {
+                if (workEntry.turnId) {
+                  props.onOpenTurnDiff(workEntry.turnId, editPath ?? undefined);
+                }
+              }}
+            >
+              Open diff
+            </Button>
+          </div>
+        </div>
+      );
+    }
+    if (activeDiff) {
+      return (
+        <div className="overflow-hidden rounded-lg border border-border/50 bg-background/40">
+          <div className="flex min-w-0 items-center gap-2 border-b border-border/45 bg-card/45 px-3 py-1.5">
+            <span className="min-w-0 flex-1 truncate font-mono text-sm text-muted-foreground/88">
+              {editPath ? basenameOfWorkPath(editPath) : "Edited file"}
+            </span>
+            {editStat && hasNonZeroStat(editStat) ? (
+              <span className="shrink-0 font-mono text-xs">
+                <span className="text-emerald-400">+{editStat.additions}</span>
+                <span className="ml-1 text-red-400">-{editStat.deletions}</span>
+              </span>
+            ) : null}
+            <CopyIcon className="size-3.5 shrink-0 text-muted-foreground/55" />
+          </div>
+          <div className="max-h-[420px] overflow-auto">
+            <FileDiff
+              fileDiff={activeDiff.fileDiff}
+              options={{
+                disableFileHeader: true,
+                diffStyle: "unified",
+                hunkSeparators: () => null,
+                lineDiffType: "none",
+                theme: resolveDiffThemeName(props.resolvedTheme),
+                themeType: props.resolvedTheme,
+              }}
+            />
+          </div>
+        </div>
+      );
+    }
+    if (checkpointDiffQuery.isLoading || checkpointDiffQuery.isFetching) {
+      return (
+        <div className="rounded-lg border border-border/50 bg-background/40 px-3 py-2 text-sm text-muted-foreground/70">
+          Loading diff...
+        </div>
+      );
+    }
+    return null;
+  }
+
+  if (!shellCommand && !commandOutput && changedFiles.length === 0 && !activeDiff) {
+    return null;
+  }
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-border/50 bg-card/45">
+      {shellCommand ? (
+        <div className="px-3 py-2">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="text-sm text-foreground/86">Shell</span>
+            <span className={cn("text-sm", workEntryStatusClass(workEntry))}>
+              {workEntryStatusLabel(workEntry)}
+            </span>
+          </div>
+          <pre className="max-h-[320px] overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-5 text-foreground/92">
+            <span className="text-foreground">$ </span>
+            {shellCommand}
+            {commandOutput ? `\n${commandOutput}` : ""}
+          </pre>
+        </div>
+      ) : null}
+      {!shellCommand && commandOutput ? (
+        <div className="px-3 py-2">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="text-sm text-foreground/86">
+              {isFileReadWorkEntry(workEntry) ? "Output" : (workEntryToolName(workEntry) ?? "Tool")}
+            </span>
+            <span className={cn("text-sm", workEntryStatusClass(workEntry))}>
+              {workEntryStatusLabel(workEntry)}
+            </span>
+          </div>
+          <pre className="max-h-[320px] overflow-auto whitespace-pre-wrap break-words font-mono text-[12px] leading-5 text-foreground/92">
+            {commandOutput}
+          </pre>
+        </div>
+      ) : null}
+      {changedFiles.length > 0 ? (
+        <div
+          className={cn(
+            "space-y-1.5 px-3 py-2",
+            shellCommand || commandOutput ? "border-t border-border/45" : "",
+          )}
+        >
+          {changedFiles.map((file) => (
+            <button
+              key={`${workEntry.id}:changed-file:${file.path}`}
+              type="button"
+              className={cn(
+                "flex w-full min-w-0 items-center gap-2 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-accent/25",
+                file.path === activeDiffPath ? "bg-accent/30" : "",
+              )}
+              onClick={() => setActiveDiffPath(file.path)}
+            >
+              <VscodeEntryIcon
+                pathValue={file.path}
+                kind="file"
+                theme={props.resolvedTheme}
+                className="size-3.5"
+              />
+              <span
+                className="min-w-0 flex-1 truncate text-sm text-info-foreground"
+                title={file.path}
+              >
+                {basenameOfWorkPath(file.path)}
+              </span>
+              {file.additions || file.deletions ? (
+                <span className="shrink-0 font-mono text-xs transition-colors duration-300">
+                  <span className="text-emerald-400">+{file.additions}</span>
+                  <span className="ml-1 text-red-400">-{file.deletions}</span>
+                </span>
+              ) : null}
+            </button>
+          ))}
+        </div>
+      ) : null}
+      {activeDiff ? (
+        <div className="max-h-[420px] overflow-auto border-t border-border/45 bg-background/40">
+          <FileDiff
+            fileDiff={activeDiff.fileDiff}
+            options={{
+              diffStyle: "unified",
+              lineDiffType: "none",
+              theme: resolveDiffThemeName(props.resolvedTheme),
+              themeType: props.resolvedTheme,
+            }}
+          />
+        </div>
+      ) : null}
     </div>
   );
 });
@@ -1748,16 +2724,16 @@ const GeneratedImageWorkPreview = memo(function GeneratedImageWorkPreview(props:
 
 export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTimelineProps) {
   const {
-    isFocusedPane = true,
-    hasMessages,
-    isWorking,
-    activeTurnInProgress,
-    activeTurnStartedAt,
+  isFocusedPane = true,
+  hasMessages,
+  isWorking,
+  activeTurnInProgress,
+  threadId,
+  activeTurnStartedAt,
     scrollContainer,
     timelineEntries,
     completionDividerBeforeEntryId,
     completionSummary,
-    turnDiffSummaryByAssistantMessageId,
     turnDiffSummaryByTurnId,
     nowIso,
     expandedWorkGroups,
@@ -2430,15 +3406,6 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
 
   const virtualRows = rowVirtualizer.getVirtualItems();
   const nonVirtualizedRows = rows.slice(virtualizedRowCount);
-  const [allDirectoriesExpandedByTurnId, setAllDirectoriesExpandedByTurnId] = useState<
-    Record<string, boolean>
-  >({});
-  const onToggleAllDirectories = useCallback((turnId: TurnId) => {
-    setAllDirectoriesExpandedByTurnId((current) => ({
-      ...current,
-      [turnId]: !(current[turnId] ?? true),
-    }));
-  }, []);
 
   const renderRowContent = (row: TimelineRow) => (
     <div
@@ -2486,37 +3453,26 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
           }
 
           return (
-            <div className="rounded-xl border border-border/45 bg-card/25 px-2 py-1.5">
-              <div className="mb-1.5 flex items-center justify-between gap-2 px-0.5">
-                <p className="text-[9px] uppercase tracking-[0.16em] text-muted-foreground/55">
-                  {groupLabel} ({groupedEntries.length})
-                </p>
-                {hasOverflow && (
-                  <button
-                    type="button"
-                    className="text-[9px] uppercase tracking-[0.12em] text-muted-foreground/55 transition-colors duration-150 hover:text-foreground/75"
-                    onClick={() => onToggleWorkGroup(groupId)}
-                  >
-                    {isExpanded ? "Show less" : `Show ${hiddenCount} more`}
-                  </button>
-                )}
-              </div>
-              <div className="space-y-0.5">
-                {visibleEntries.map((workEntry) => (
-                  <SimpleWorkEntryRow
-                    key={`work-row:${workEntry.id}`}
-                    workEntry={workEntry}
-                    resolvedTheme={resolvedTheme}
-                    onOpenThread={onOpenThread}
-                    onOpenFilePath={props.onOpenFilePath}
-                    onImageExpand={onImageExpand}
-                    onImageLoad={onTimelineImageLoad}
-                    homeDirectory={props.homeDirectory}
-                    workspaceRoot={workspaceRoot}
-                  />
-                ))}
-              </div>
-            </div>
+            <WorkLogGroup
+              groupId={groupId}
+              groupedEntries={groupedEntries}
+              visibleEntries={visibleEntries}
+              hiddenCount={hiddenCount}
+              hasOverflow={hasOverflow}
+              isExpanded={isExpanded}
+              groupLabel={groupLabel}
+              resolvedTheme={resolvedTheme}
+              threadId={threadId}
+              turnDiffSummaryByTurnId={turnDiffSummaryByTurnId}
+              onToggleWorkGroup={onToggleWorkGroup}
+              onOpenTurnDiff={onOpenTurnDiff}
+              onOpenThread={onOpenThread}
+              onOpenFilePath={props.onOpenFilePath}
+              onImageExpand={onImageExpand}
+              onImageLoad={onTimelineImageLoad}
+              homeDirectory={props.homeDirectory}
+              workspaceRoot={workspaceRoot}
+            />
           );
         })()}
 
@@ -2637,108 +3593,18 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
                   />
                 </div>
                 {(() => {
-                  const turnSummary =
-                    turnDiffSummaryByAssistantMessageId.get(row.message.id) ??
-                    (row.message.turnId
-                      ? turnDiffSummaryByTurnId.get(row.message.turnId)
-                      : undefined);
-                  if (!turnSummary) {
-                    const mentionedArtifacts = collectMentionedAssistantArtifacts({
-                      text: messageText,
-                      existingPaths: new Set(),
-                      workspaceRoot,
-                      homeDirectory: props.homeDirectory,
-                    });
-                    return (
-                      <AssistantArtifactCards
-                        artifacts={mentionedArtifacts}
-                        resolvedTheme={resolvedTheme}
-                        onOpenFilePath={props.onOpenFilePath}
-                      />
-                    );
-                  }
-                  const checkpointFiles = turnSummary.files;
-                  if (checkpointFiles.length === 0) {
-                    const mentionedArtifacts = collectMentionedAssistantArtifacts({
-                      text: messageText,
-                      existingPaths: new Set(),
-                      workspaceRoot,
-                      homeDirectory: props.homeDirectory,
-                    });
-                    return (
-                      <AssistantArtifactCards
-                        artifacts={mentionedArtifacts}
-                        resolvedTheme={resolvedTheme}
-                        onOpenFilePath={props.onOpenFilePath}
-                      />
-                    );
-                  }
-                  const summaryStat = summarizeTurnDiffStats(checkpointFiles);
-                  const changedFileCountLabel = String(checkpointFiles.length);
-                  const checkpointArtifacts = collectAssistantArtifacts(checkpointFiles);
-                  const assistantArtifacts = [
-                    ...checkpointArtifacts,
-                    ...collectMentionedAssistantArtifacts({
-                      text: messageText,
-                      existingPaths: new Set(checkpointArtifacts.map((artifact) => artifact.path)),
-                      workspaceRoot,
-                      homeDirectory: props.homeDirectory,
-                    }),
-                  ];
-                  const allDirectoriesExpanded =
-                    allDirectoriesExpandedByTurnId[turnSummary.turnId] ?? true;
+                  const mentionedArtifacts = collectMentionedAssistantArtifacts({
+                    text: messageText,
+                    existingPaths: new Set(),
+                    workspaceRoot,
+                    homeDirectory: props.homeDirectory,
+                  });
                   return (
-                    <>
-                      <AssistantArtifactCards
-                        artifacts={assistantArtifacts}
-                        resolvedTheme={resolvedTheme}
-                        onOpenFilePath={props.onOpenFilePath}
-                      />
-                      <div className="mt-2 rounded-lg border border-border/80 bg-card/45 p-2.5">
-                        <div className="mb-1.5 flex items-center justify-between gap-2">
-                          <p className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground/65">
-                            <span>Changed files ({changedFileCountLabel})</span>
-                            {hasNonZeroStat(summaryStat) && (
-                              <>
-                                <span className="mx-1">•</span>
-                                <DiffStatLabel
-                                  additions={summaryStat.additions}
-                                  deletions={summaryStat.deletions}
-                                />
-                              </>
-                            )}
-                          </p>
-                          <div className="flex items-center gap-1.5">
-                            <Button
-                              type="button"
-                              size="xs"
-                              variant="outline"
-                              onClick={() => onToggleAllDirectories(turnSummary.turnId)}
-                            >
-                              {allDirectoriesExpanded ? "Collapse all" : "Expand all"}
-                            </Button>
-                            <Button
-                              type="button"
-                              size="xs"
-                              variant="outline"
-                              onClick={() =>
-                                onOpenTurnDiff(turnSummary.turnId, checkpointFiles[0]?.path)
-                              }
-                            >
-                              View diff
-                            </Button>
-                          </div>
-                        </div>
-                        <ChangedFilesTree
-                          key={`changed-files-tree:${turnSummary.turnId}`}
-                          turnId={turnSummary.turnId}
-                          files={checkpointFiles}
-                          allDirectoriesExpanded={allDirectoriesExpanded}
-                          resolvedTheme={resolvedTheme}
-                          onOpenTurnDiff={onOpenTurnDiff}
-                        />
-                      </div>
-                    </>
+                    <AssistantArtifactCards
+                      artifacts={mentionedArtifacts}
+                      resolvedTheme={resolvedTheme}
+                      onOpenFilePath={props.onOpenFilePath}
+                    />
                   );
                 })()}
                 <div

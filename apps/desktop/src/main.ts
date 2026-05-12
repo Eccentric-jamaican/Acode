@@ -90,6 +90,7 @@ const BROWSER_CAPTURE_INSPECT_SELECTION_CHANNEL = "desktop:browser-capture-inspe
 const BROWSER_EVENT_CHANNEL = "desktop:browser-event";
 const BROWSER_PAGE_EVENT_CHANNEL = "desktop:browser-page-event";
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
+const shouldOpenDevToolsOnStartup = process.env.T3CODE_DESKTOP_OPEN_DEVTOOLS === "1";
 const APP_DISPLAY_NAME = getAppDisplayName(isDevelopment);
 const STATE_DIR = resolveDesktopStateDir(process.env.T3CODE_STATE_DIR);
 const legacyStateImport = importLegacyDesktopStateIfNeeded({
@@ -2336,7 +2337,9 @@ function createWindow(): BrowserWindow {
 
   if (isDevelopment) {
     void window.loadURL(process.env.VITE_DEV_SERVER_URL as string);
-    window.webContents.openDevTools({ mode: "detach" });
+    if (shouldOpenDevToolsOnStartup) {
+      window.webContents.openDevTools({ mode: "detach" });
+    }
   } else {
     void window.loadURL(`${DESKTOP_SCHEME}://app/index.html`);
   }
@@ -2386,16 +2389,21 @@ async function bootstrap(): Promise<void> {
   writeDesktopLogHeader("bootstrap ipc handlers registered");
   startBackend();
   writeDesktopLogHeader("bootstrap backend start requested");
-  const backendReady = await waitForBackendReady(backendPort, BACKEND_READY_TIMEOUT_MS);
-  if (!backendReady) {
-    writeDesktopLogHeader(
-      `backend did not become ready within ${BACKEND_READY_TIMEOUT_MS}ms on port=${backendPort}; launching window anyway`,
-    );
-  } else {
-    writeDesktopLogHeader(`backend is accepting connections on port=${backendPort}`);
-  }
   mainWindow = createWindow();
   writeDesktopLogHeader("bootstrap main window created");
+  void waitForBackendReady(backendPort, BACKEND_READY_TIMEOUT_MS)
+    .then((backendReady) => {
+      if (!backendReady) {
+        writeDesktopLogHeader(
+          `backend did not become ready within ${BACKEND_READY_TIMEOUT_MS}ms on port=${backendPort}; renderer will keep reconnecting`,
+        );
+        return;
+      }
+      writeDesktopLogHeader(`backend is accepting connections on port=${backendPort}`);
+    })
+    .catch((error) => {
+      writeDesktopLogHeader(`backend readiness monitor failed: ${formatErrorMessage(error)}`);
+    });
 }
 
 app.on("before-quit", () => {

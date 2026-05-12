@@ -2,6 +2,7 @@ import {
   ApprovalRequestId,
   type AssistantDeliveryMode,
   CommandId,
+  EventId,
   MessageId,
   type OrchestrationEvent,
   CheckpointRef,
@@ -40,7 +41,10 @@ const BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_CACHE_CAPACITY = 20_000;
 const BUFFERED_MESSAGE_TEXT_BY_MESSAGE_ID_TTL = Duration.minutes(120);
 const BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY = 10_000;
 const BUFFERED_PROPOSED_PLAN_BY_ID_TTL = Duration.minutes(120);
+const BUFFERED_TOOL_OUTPUT_BY_ID_CACHE_CAPACITY = 20_000;
+const BUFFERED_TOOL_OUTPUT_BY_ID_TTL = Duration.minutes(120);
 const MAX_BUFFERED_ASSISTANT_CHARS = 24_000;
+const MAX_BUFFERED_TOOL_OUTPUT_CHARS = 24_000;
 const STRICT_PROVIDER_LIFECYCLE_GUARD = process.env.T3CODE_STRICT_PROVIDER_LIFECYCLE_GUARD !== "0";
 
 type TurnStartRequestedDomainEvent = Extract<
@@ -577,6 +581,7 @@ function runtimeEventToActivities(
           summary,
           payload: {
             itemType: event.payload.itemType,
+            ...(event.itemId ? { providerItemId: String(event.itemId) } : {}),
             ...(event.payload.status ? { status: event.payload.status } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(event.payload.data !== undefined ? { data: event.payload.data } : {}),
@@ -601,6 +606,7 @@ function runtimeEventToActivities(
           summary,
           payload: {
             itemType: event.payload.itemType,
+            ...(event.itemId ? { providerItemId: String(event.itemId) } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(event.payload.data !== undefined ? { data: event.payload.data } : {}),
           },
@@ -624,6 +630,7 @@ function runtimeEventToActivities(
           summary: `${title} started`,
           payload: {
             itemType: event.payload.itemType,
+            ...(event.itemId ? { providerItemId: String(event.itemId) } : {}),
             ...(event.payload.detail ? { detail: truncateDetail(event.payload.detail) } : {}),
             ...(event.payload.data !== undefined ? { data: event.payload.data } : {}),
           },
@@ -665,6 +672,11 @@ const make = Effect.gen(function* () {
     capacity: BUFFERED_PROPOSED_PLAN_BY_ID_CACHE_CAPACITY,
     timeToLive: BUFFERED_PROPOSED_PLAN_BY_ID_TTL,
     lookup: () => Effect.succeed({ text: "", createdAt: "" }),
+  });
+  const bufferedToolOutputById = yield* Cache.make<string, string>({
+    capacity: BUFFERED_TOOL_OUTPUT_BY_ID_CACHE_CAPACITY,
+    timeToLive: BUFFERED_TOOL_OUTPUT_BY_ID_TTL,
+    lookup: () => Effect.succeed(""),
   });
 
   const rememberAssistantMessageId = (
@@ -1177,6 +1189,15 @@ const make = Effect.gen(function* () {
           : undefined;
       const proposedPlanDelta =
         event.type === "turn.proposed.delta" ? event.payload.delta : undefined;
+      const toolOutputDelta =
+        event.type === "content.delta" &&
+        (event.payload.streamKind === "command_output" ||
+          event.payload.streamKind === "file_change_output")
+          ? {
+              delta: event.payload.delta,
+              streamKind: event.payload.streamKind,
+            }
+          : undefined;
 
       if (assistantDelta && assistantDelta.length > 0) {
         const assistantMessageId = MessageId.makeUnsafe(
@@ -1217,6 +1238,40 @@ const make = Effect.gen(function* () {
       if (proposedPlanDelta && proposedPlanDelta.length > 0) {
         const routedPlanId = proposedPlanIdFromEvent(event, routedThread.id);
         yield* appendBufferedProposedPlan(routedPlanId, proposedPlanDelta, now);
+      }
+
+      if (toolOutputDelta && toolOutputDelta.delta.length > 0) {
+        const providerItemId = String(event.itemId ?? event.eventId);
+        const outputKey = `${routedThread.id}:${providerItemId}`;
+        const existingOutput = yield* Cache.getOption(bufferedToolOutputById, outputKey).pipe(
+          Effect.map(Option.getOrElse(() => "")),
+        );
+        const nextOutput = `${existingOutput}${toolOutputDelta.delta}`.slice(
+          -MAX_BUFFERED_TOOL_OUTPUT_CHARS,
+        );
+        yield* Cache.set(bufferedToolOutputById, outputKey, nextOutput);
+        const itemType =
+          toolOutputDelta.streamKind === "file_change_output" ? "file_change" : "command_execution";
+        yield* orchestrationEngine.dispatch({
+          type: "thread.activity.append",
+          commandId: providerCommandId(event, "tool-output-append"),
+          threadId: routedThread.id,
+          activity: {
+            id: EventId.makeUnsafe(`tool-output:${providerItemId}`),
+            createdAt: event.createdAt,
+            tone: "tool",
+            kind: "tool.updated",
+            summary: itemType === "file_change" ? "File change output" : "Ran command",
+            payload: {
+              itemType,
+              providerItemId,
+              status: "inProgress",
+              detail: truncateDetail(nextOutput, MAX_BUFFERED_TOOL_OUTPUT_CHARS),
+            },
+            turnId: toTurnId(event.turnId) ?? null,
+          },
+          createdAt: event.createdAt,
+        });
       }
 
       const assistantCompletion =

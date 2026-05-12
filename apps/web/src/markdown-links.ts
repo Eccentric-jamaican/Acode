@@ -8,6 +8,7 @@ const RELATIVE_FILE_PATH_PATTERN = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+(?::\d
 const RELATIVE_FILE_NAME_PATTERN = /^[A-Za-z0-9._-]+\.[A-Za-z0-9_-]+(?::\d+){0,2}$/;
 const POSITION_SUFFIX_PATTERN = /:\d+(?::\d+)?$/;
 const POSITION_ONLY_PATTERN = /^\d+(?::\d+)?$/;
+const MARKDOWN_LINK_LITERAL_PATTERN = /^\[([^\]]+)\]\(([^)]+)\)$/;
 const POSIX_FILE_ROOT_PREFIXES = [
   "/Users/",
   "/home/",
@@ -102,9 +103,41 @@ function stripEditorPositionSuffix(path: string): string {
   return path.replace(POSITION_SUFFIX_PATTERN, "");
 }
 
+function basenameOfPath(path: string): string {
+  const withoutPosition = stripEditorPositionSuffix(path).replaceAll("\\", "/");
+  const segments = withoutPosition.split("/").filter(Boolean);
+  return segments.at(-1) ?? withoutPosition;
+}
+
 function normalizeForPathComparison(path: string): string {
   const normalized = path.replaceAll("\\", "/").replace(/\/+$/, "");
   return /^[A-Za-z]:/.test(normalized) ? normalized[0]!.toLowerCase() + normalized.slice(1) : normalized;
+}
+
+export function parseMarkdownFileLinkLiteral(
+  value: string,
+): { label: string; href: string } | null {
+  const match = value.trim().match(MARKDOWN_LINK_LITERAL_PATTERN);
+  if (!match?.[1] || !match[2]) {
+    return null;
+  }
+  return {
+    label: match[1].trim(),
+    href: match[2].trim(),
+  };
+}
+
+export function normalizeMarkdownFileLinkLabel(
+  label: string | undefined,
+  targetPath: string,
+): string {
+  const normalizedLabel = label?.trim();
+  if (normalizedLabel && isLikelyPathCandidate(normalizedLabel)) {
+    return basenameOfPath(normalizedLabel);
+  }
+  return normalizedLabel && normalizedLabel.length > 0
+    ? normalizedLabel
+    : basenameOfPath(targetPath);
 }
 
 export function resolveMarkdownFileLinkTarget(

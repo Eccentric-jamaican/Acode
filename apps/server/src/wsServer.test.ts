@@ -50,12 +50,12 @@ import {
   ProviderDiscoveryService,
   type ProviderDiscoveryServiceShape,
 } from "./provider/Services/ProviderDiscoveryService";
-import {
-  ProviderRegistry,
-  type ProviderRegistryShape,
-} from "./provider/Services/ProviderRegistry";
+import { ProviderRegistry, type ProviderRegistryShape } from "./provider/Services/ProviderRegistry";
 import { ProviderHealth, type ProviderHealthShape } from "./provider/Services/ProviderHealth";
-import { CodexAccountService, type CodexAccountServiceShape } from "./provider/Services/CodexAccountService";
+import {
+  CodexAccountService,
+  type CodexAccountServiceShape,
+} from "./provider/Services/CodexAccountService";
 import { Open, type OpenShape } from "./open";
 import { GitManager, type GitManagerShape } from "./git/Services/GitManager.ts";
 import type { GitCoreShape } from "./git/Services/GitCore.ts";
@@ -963,6 +963,7 @@ describe("WebSocket Server", () => {
     expect(response.result).toEqual({
       cwd: "/my/workspace",
       homeDirectory: expect.any(String),
+      chatWorkspaceRoot: expect.any(String),
       keybindingsConfigPath: keybindingsPath,
       keybindings: DEFAULT_RESOLVED_KEYBINDINGS,
       issues: [],
@@ -992,6 +993,7 @@ describe("WebSocket Server", () => {
     expect(response.result).toEqual({
       cwd: "/my/workspace",
       homeDirectory: expect.any(String),
+      chatWorkspaceRoot: expect.any(String),
       keybindingsConfigPath: keybindingsPath,
       keybindings: DEFAULT_RESOLVED_KEYBINDINGS,
       issues: [],
@@ -1026,6 +1028,7 @@ describe("WebSocket Server", () => {
     expect(response.result).toEqual({
       cwd: "/my/workspace",
       homeDirectory: expect.any(String),
+      chatWorkspaceRoot: expect.any(String),
       keybindingsConfigPath: keybindingsPath,
       keybindings: DEFAULT_RESOLVED_KEYBINDINGS,
       issues: [
@@ -1305,6 +1308,7 @@ describe("WebSocket Server", () => {
     expect(response.result).toEqual({
       cwd: "/my/workspace",
       homeDirectory: expect.any(String),
+      chatWorkspaceRoot: expect.any(String),
       keybindingsConfigPath: keybindingsPath,
       keybindings: compileKeybindings(persistedConfig),
       issues: [],
@@ -1356,6 +1360,7 @@ describe("WebSocket Server", () => {
     expect(configResponse.result).toEqual({
       cwd: "/my/workspace",
       homeDirectory: expect.any(String),
+      chatWorkspaceRoot: expect.any(String),
       keybindingsConfigPath: keybindingsPath,
       keybindings: compileKeybindings(persistedConfig),
       issues: [],
@@ -1578,21 +1583,19 @@ describe("WebSocket Server", () => {
       return event.type === "thread.session-set";
     });
 
-    emitRuntimeEvent(
-      {
-        type: "content.delta",
-        eventId: asEventId("evt-ws-runtime-message-delta"),
-        provider: "codex",
-        threadId: asThreadId("thread-1"),
-        createdAt: new Date().toISOString(),
-        turnId: asTurnId("turn-1"),
-        itemId: asProviderItemId("item-1"),
-        payload: {
-          streamKind: "assistant_text",
-          delta: "hello from runtime",
-        },
-      } as unknown as ProviderRuntimeEvent,
-    );
+    emitRuntimeEvent({
+      type: "content.delta",
+      eventId: asEventId("evt-ws-runtime-message-delta"),
+      provider: "codex",
+      threadId: asThreadId("thread-1"),
+      createdAt: new Date().toISOString(),
+      turnId: asTurnId("turn-1"),
+      itemId: asProviderItemId("item-1"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "hello from runtime",
+      },
+    } as unknown as ProviderRuntimeEvent);
 
     const domainPush = await waitForPush(ws, ORCHESTRATION_WS_CHANNELS.domainEvent, (push) => {
       const event = push.data as { type?: string; payload?: { messageId?: string; text?: string } };
@@ -1910,7 +1913,9 @@ describe("WebSocket Server", () => {
     });
 
     expect(response.result).toBeUndefined();
-    expect(response.error?.message).toContain("Workspace file path must stay within the project root.");
+    expect(response.error?.message).toContain(
+      "Workspace file path must stay within the project root.",
+    );
     expect(fs.existsSync(path.join(workspace, "..", "escape.md"))).toBe(false);
   });
 
@@ -1985,7 +1990,13 @@ describe("WebSocket Server", () => {
       Effect.succeed({ action: "stageAll" as const, status: "applied" as const }),
     );
     const runStackedAction = vi.fn(() => Effect.void as any);
-    const gitManager: GitManagerShape = { status, diff, filePreview, reviewAction, runStackedAction };
+    const gitManager: GitManagerShape = {
+      status,
+      diff,
+      filePreview,
+      reviewAction,
+      runStackedAction,
+    };
 
     server = await createTestServer({ cwd: "/test", gitManager });
     const addr = server.address();
@@ -2015,7 +2026,13 @@ describe("WebSocket Server", () => {
       Effect.succeed({ action: "stageAll" as const, status: "applied" as const }),
     );
     const runStackedAction = vi.fn(() => Effect.void as any);
-    const gitManager: GitManagerShape = { status, diff, filePreview, reviewAction, runStackedAction };
+    const gitManager: GitManagerShape = {
+      status,
+      diff,
+      filePreview,
+      reviewAction,
+      runStackedAction,
+    };
 
     server = await createTestServer({ cwd: "/test", gitManager });
     const addr = server.address();
@@ -2044,7 +2061,13 @@ describe("WebSocket Server", () => {
     const filePreview = vi.fn(() => Effect.void as any);
     const reviewAction = vi.fn(() => Effect.succeed(reviewActionResult));
     const runStackedAction = vi.fn(() => Effect.void as any);
-    const gitManager: GitManagerShape = { status, diff, filePreview, reviewAction, runStackedAction };
+    const gitManager: GitManagerShape = {
+      status,
+      diff,
+      filePreview,
+      reviewAction,
+      runStackedAction,
+    };
 
     server = await createTestServer({ cwd: "/test", gitManager });
     const addr = server.address();

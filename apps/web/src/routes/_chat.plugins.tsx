@@ -1,6 +1,7 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { lazy, Suspense } from "react";
 
-import PluginCatalogRouteView from "../components/PluginCatalogRouteView";
+const PluginCatalogRouteView = lazy(() => import("../components/PluginCatalogRouteView"));
 
 type PluginsSearch = {
   pluginName?: string;
@@ -31,11 +32,19 @@ export const Route = createFileRoute("/_chat/plugins")({
   component: function PluginsRoute() {
     const search = Route.useSearch();
     return (
-      <PluginCatalogRouteView
-        mode="plugins"
-        pluginName={search.pluginName}
-        marketplacePath={search.marketplacePath}
-      />
+      <Suspense
+        fallback={
+          <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+            Loading plugins...
+          </div>
+        }
+      >
+        <PluginCatalogRouteView
+          mode="plugins"
+          pluginName={search.pluginName}
+          marketplacePath={search.marketplacePath}
+        />
+      </Suspense>
     );
   },
 });

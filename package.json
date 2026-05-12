@@ -29,7 +29,7 @@
     "lint": "oxlint --report-unused-disable-directives",
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
-    "test": "turbo run test",
+    "test": "bun run scripts/run-tests.ts",
     "build:contracts": "turbo run build --filter=@t3tools/contracts",
     "build:marketing": "turbo run build --filter=@t3tools/marketing",
     "build:desktop": "turbo run build --filter=@t3tools/desktop --filter=t3",

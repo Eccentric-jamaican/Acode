@@ -92,6 +92,44 @@ function resolveThreadBrowserContext(input: {
   };
 }
 
+function resolveFallbackThreadId(input: {
+  threads: ReturnType<typeof useStore.getState>["threads"];
+  excludeThreadIds: ReadonlySet<ThreadId>;
+}): ThreadId | null {
+  let fallbackThreadId: ThreadId | null = null;
+  let fallbackTimestamp = Number.NEGATIVE_INFINITY;
+
+  for (const thread of input.threads) {
+    if (input.excludeThreadIds.has(thread.id) || thread.archivedAt != null) {
+      continue;
+    }
+
+    const timestamp = Date.parse(thread.updatedAt ?? thread.createdAt);
+    if (timestamp > fallbackTimestamp) {
+      fallbackThreadId = thread.id;
+      fallbackTimestamp = timestamp;
+    }
+  }
+
+  return fallbackThreadId;
+}
+
+function isThreadRouteAvailable(input: {
+  threadId: ThreadId | null;
+  threads: ReturnType<typeof useStore.getState>["threads"];
+  draftThreadsByThreadId: ReturnType<
+    typeof useComposerDraftStore.getState
+  >["draftThreadsByThreadId"];
+}): boolean {
+  if (!input.threadId) {
+    return false;
+  }
+  return (
+    input.threads.some((thread) => thread.id === input.threadId && thread.archivedAt == null) ||
+    Object.hasOwn(input.draftThreadsByThreadId, input.threadId)
+  );
+}
+
 const RightPanelSheet = (props: {
   children: ReactNode;
   panelOpen: boolean;
@@ -1364,7 +1402,9 @@ function ChatThreadRouteView() {
   });
   useDisposableThreadLifecycle(threadId);
   const search = Route.useSearch();
-  const threadExists = useStore((store) => store.threads.some((thread) => thread.id === threadId));
+  const threadExists = useStore((store) =>
+    store.threads.some((thread) => thread.id === threadId && thread.archivedAt == null),
+  );
   const draftThreadExists = useComposerDraftStore((store) =>
     Object.hasOwn(store.draftThreadsByThreadId, threadId),
   );
@@ -1392,6 +1432,7 @@ function ChatThreadRouteView() {
   const panelMode = resolveRightPanelMode(search);
   const filesOpen = resolveFilesRailOpen(search);
   const splitView = useSplitViewStore(selectSplitView(search.splitViewId ?? null));
+  const removeThreadFromSplitViews = useSplitViewStore((store) => store.removeThreadFromSplitViews);
   const activeProjectId = threadBrowserContext.projectId;
 
   const hasExplicitPanelSearchIntent = useMemo(() => {
@@ -1404,26 +1445,102 @@ function ChatThreadRouteView() {
       return;
     }
 
+    const fallbackThreadId = resolveFallbackThreadId({
+      threads,
+      excludeThreadIds: new Set([threadId]),
+    });
+
     if (isSplitRoute(search)) {
       if (!splitView) {
-        void navigate({
-          to: "/$threadId",
-          params: { threadId },
-          replace: true,
-          search: (previous) => {
-            const rest = stripDiffSearchParams(previous);
-            const { splitViewId: _, ...withoutSplitView } = rest as Record<string, unknown>;
-            return withoutSplitView;
-          },
-        });
+        if (routeThreadExists) {
+          void navigate({
+            to: "/$threadId",
+            params: { threadId },
+            replace: true,
+            search: (previous) => {
+              const rest = stripDiffSearchParams(previous);
+              const { splitViewId: _, ...withoutSplitView } = rest as Record<string, unknown>;
+              return withoutSplitView;
+            },
+          });
+        } else if (fallbackThreadId) {
+          void navigate({
+            to: "/$threadId",
+            params: { threadId: fallbackThreadId },
+            replace: true,
+          });
+        } else {
+          void navigate({ to: "/", replace: true });
+        }
+        return;
+      }
+
+      const splitThreadIds = [splitView.leftThreadId, splitView.rightThreadId].filter(
+        (candidate): candidate is ThreadId => candidate !== null,
+      );
+      const availableSplitThreadIds = splitThreadIds.filter((candidate) =>
+        isThreadRouteAvailable({
+          threadId: candidate,
+          threads,
+          draftThreadsByThreadId,
+        }),
+      );
+      for (const staleThreadId of splitThreadIds) {
+        if (!availableSplitThreadIds.includes(staleThreadId)) {
+          removeThreadFromSplitViews(staleThreadId);
+        }
+      }
+
+      if (!routeThreadExists) {
+        const nextThreadId =
+          availableSplitThreadIds.find((candidate) => candidate !== threadId) ?? fallbackThreadId;
+        if (nextThreadId) {
+          const keepSplitView = availableSplitThreadIds.some(
+            (candidate) => candidate === nextThreadId,
+          );
+          if (keepSplitView) {
+            void navigate({
+              to: "/$threadId",
+              params: { threadId: nextThreadId },
+              replace: true,
+              search: () => ({ splitViewId: splitView.id }),
+            });
+          } else {
+            void navigate({
+              to: "/$threadId",
+              params: { threadId: nextThreadId },
+              replace: true,
+            });
+          }
+        } else {
+          void navigate({ to: "/", replace: true });
+        }
       }
       return;
     }
 
     if (!routeThreadExists) {
-      void navigate({ to: "/", replace: true });
+      if (fallbackThreadId) {
+        void navigate({
+          to: "/$threadId",
+          params: { threadId: fallbackThreadId },
+          replace: true,
+        });
+      } else {
+        void navigate({ to: "/", replace: true });
+      }
     }
-  }, [navigate, routeThreadExists, search, splitView, threadId, threadsHydrated]);
+  }, [
+    draftThreadsByThreadId,
+    navigate,
+    removeThreadFromSplitViews,
+    routeThreadExists,
+    search,
+    splitView,
+    threadId,
+    threads,
+    threadsHydrated,
+  ]);
 
   useEffect(() => {
     const previousThreadId = previousThreadIdRef.current;
@@ -1483,12 +1600,12 @@ function ChatThreadRouteView() {
     return <ChatHomeSurface variant={hydrationError ? "error" : "hydrating"} />;
   }
 
-  if (splitView && search.splitViewId) {
-    return <SplitChatSurface splitViewId={search.splitViewId} routeThreadId={threadId} />;
-  }
-
   if (!routeThreadExists) {
     return <ChatHomeSurface variant={homeVariant} />;
+  }
+
+  if (splitView && search.splitViewId) {
+    return <SplitChatSurface splitViewId={search.splitViewId} routeThreadId={threadId} />;
   }
 
   return (

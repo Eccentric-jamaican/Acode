@@ -708,6 +708,217 @@ describe("deriveWorkLogEntries", () => {
     expect(entries.map((entry) => entry.id)).toEqual(["first", "second"]);
   });
 
+  it("uses command result output as work log detail", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "command-complete",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "tool.completed",
+        summary: "Ran command",
+        payload: {
+          itemType: "command_execution",
+          detail: "rg foo",
+          data: {
+            item: {
+              command: "rg foo",
+              result: {
+                stdout: "apps/web/src/session-logic.ts:42:foo",
+                stderr: "",
+              },
+            },
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities, undefined);
+    expect(entry?.command).toBe("rg foo");
+    expect(entry?.detail).toBe("apps/web/src/session-logic.ts:42:foo");
+  });
+
+  it("merges streamed command output into the matching command work log row", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "command-complete",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "tool.completed",
+        summary: "Ran command",
+        payload: {
+          itemType: "command_execution",
+          providerItemId: "item-command-1",
+          detail: "rg foo",
+          data: {
+            item: {
+              command: "rg foo",
+            },
+          },
+        },
+      }),
+      makeActivity({
+        id: "command-output",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "tool.updated",
+        summary: "Ran command",
+        payload: {
+          itemType: "command_execution",
+          providerItemId: "item-command-1",
+          detail: "apps/web/src/session-logic.ts:42:foo",
+        },
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities, undefined);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.command).toBe("rg foo");
+    expect(entries[0]?.detail).toBe("apps/web/src/session-logic.ts:42:foo");
+  });
+
+  it("normalizes legacy bash lifecycle rows into one command entry", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "placeholder-progress",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "tool.updated",
+        summary: "bash",
+        payload: {
+          itemType: "dynamic_tool_call",
+          status: "inProgress",
+          data: {
+            toolName: "bash",
+            input: {},
+          },
+        },
+      }),
+      makeActivity({
+        id: "command-progress",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "tool.updated",
+        summary: "bash",
+        payload: {
+          itemType: "dynamic_tool_call",
+          status: "inProgress",
+          data: {
+            toolName: "bash",
+            input: {
+              command: "rg foo apps/web/src",
+              description: "Find foo",
+            },
+          },
+        },
+      }),
+      makeActivity({
+        id: "command-complete",
+        createdAt: "2026-02-23T00:00:03.000Z",
+        kind: "tool.completed",
+        summary: "Find foo",
+        payload: {
+          itemType: "command_execution",
+          data: {
+            toolName: "bash",
+            input: {
+              command: "rg foo apps/web/src",
+              description: "Find foo",
+            },
+            output: "apps/web/src/session-logic.ts:42:foo",
+          },
+        },
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities, undefined);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.itemType).toBe("command_execution");
+    expect(entries[0]?.command).toBe("rg foo apps/web/src");
+    expect(entries[0]?.detail).toBe("apps/web/src/session-logic.ts:42:foo");
+  });
+
+  it("treats legacy read tools as file reads without changed files", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "read-complete",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "tool.completed",
+        summary: "README.md",
+        payload: {
+          itemType: "dynamic_tool_call",
+          data: {
+            toolName: "read",
+            input: {
+              filePath: "C:\\Users\\Addis\\source\\repos\\t3code\\README.md",
+            },
+            output: "file contents",
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities, undefined);
+    expect(entry?.requestKind).toBe("file-read");
+    expect(entry?.itemType).toBe("dynamic_tool_call");
+    expect(entry?.changedFiles).toBeUndefined();
+    expect(entry?.detail).toBe("file contents");
+  });
+
+  it("infers legacy write tools as file changes", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "write-complete",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "tool.completed",
+        summary: "write",
+        payload: {
+          itemType: "dynamic_tool_call",
+          data: {
+            toolName: "write",
+            input: {
+              filePath: "apps/web/src/session-logic.ts",
+              content: "hello",
+            },
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities, undefined);
+    expect(entry?.requestKind).toBe("file-change");
+    expect(entry?.itemType).toBe("file_change");
+    expect(entry?.changedFiles).toEqual(["apps/web/src/session-logic.ts"]);
+  });
+
+  it("extracts compact web search queries and urls", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "web-search",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "tool.completed",
+        summary: "Web search",
+        payload: {
+          itemType: "web_search",
+          data: {
+            item: {
+              input: {
+                query: "latest OpenAI news",
+              },
+              result: {
+                results: [
+                  { url: "https://openai.com/news/company-announcements/" },
+                  { url: "https://openai.com/index/gpt-5-5-instant/" },
+                ],
+              },
+            },
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities, undefined);
+    expect(entry?.webSearchQueries).toEqual(["latest OpenAI news"]);
+    expect(entry?.webSearchUrls).toEqual([
+      "https://openai.com/news/company-announcements/",
+      "https://openai.com/index/gpt-5-5-instant/",
+    ]);
+  });
+
   it("omits collab subagent tool lifecycle rows from the chat work log", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

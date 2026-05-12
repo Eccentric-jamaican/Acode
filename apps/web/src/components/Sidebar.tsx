@@ -152,6 +152,28 @@ function getErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message.trim().length > 0 ? error.message : fallback;
 }
 
+function collectThreadTree(threads: ReadonlyArray<Thread>, rootThreadId: ThreadId): Thread[] {
+  const selected = new Map<ThreadId, Thread>();
+  const queue: ThreadId[] = [rootThreadId];
+  while (queue.length > 0) {
+    const threadId = queue.shift();
+    if (!threadId || selected.has(threadId)) {
+      continue;
+    }
+    const thread = threads.find((entry) => entry.id === threadId);
+    if (!thread) {
+      continue;
+    }
+    selected.set(thread.id, thread);
+    for (const child of threads) {
+      if (child.parentThreadId === thread.id) {
+        queue.push(child.id);
+      }
+    }
+  }
+  return Array.from(selected.values());
+}
+
 async function copyTextToClipboard(text: string): Promise<void> {
   if (typeof navigator === "undefined" || navigator.clipboard?.writeText === undefined) {
     throw new Error("Clipboard API unavailable.");
@@ -773,12 +795,6 @@ const PRIMARY_NAV_ITEMS: Array<{
     testId: "sidebar-primary-new-thread",
   },
   {
-    icon: Clock3Icon ?? HistoryIcon,
-    label: "Automations",
-    action: "placeholder",
-    testId: "sidebar-primary-automations",
-  },
-  {
     icon: BlocksIcon ?? LayoutGridIcon,
     label: "Skills",
     action: "skills",
@@ -829,6 +845,11 @@ function isHomeProject(project: Project, homeDirectory: string | null | undefine
   );
 }
 
+function joinClientPath(root: string, child: string): string {
+  const separator = root.includes("\\") ? "\\" : "/";
+  return `${root.replace(/[\\/]+$/, "")}${separator}${child}`;
+}
+
 export default function Sidebar() {
   const projects = useStore((store) => store.projects);
   const threads = useStore((store) => store.threads);
@@ -870,6 +891,7 @@ export default function Sidebar() {
   const { data: serverConfig } = useQuery(serverConfigQueryOptions());
   const keybindings = serverConfig?.keybindings ?? EMPTY_KEYBINDINGS;
   const homeDirectory = serverConfig?.homeDirectory ?? null;
+  const chatWorkspaceRoot = serverConfig?.chatWorkspaceRoot ?? null;
   const queryClient = useQueryClient();
   const removeWorktreeMutation = useMutation(gitRemoveWorktreeMutationOptions({ queryClient }));
   const [settingsPopoverOpen, setSettingsPopoverOpen] = useState(false);
@@ -1030,12 +1052,14 @@ export default function Sidebar() {
     return map;
   }, [threadGitStatusCwds, threadGitStatusQueries, threadGitTargets]);
   const homeProject = useMemo(
-    () => projects.find((project) => isHomeProject(project, homeDirectory)) ?? null,
-    [homeDirectory, projects],
+    () =>
+      projects.find((project) => isHomeProject(project, chatWorkspaceRoot ?? homeDirectory)) ??
+      null,
+    [chatWorkspaceRoot, homeDirectory, projects],
   );
   const workspaceProjects = useMemo(
-    () => projects.filter((project) => !isHomeProject(project, homeDirectory)),
-    [homeDirectory, projects],
+    () => projects.filter((project) => !isHomeProject(project, chatWorkspaceRoot ?? homeDirectory)),
+    [chatWorkspaceRoot, homeDirectory, projects],
   );
   const projectById = useMemo(
     () => new Map(projects.map((project) => [project.id, project] as const)),
@@ -1311,10 +1335,21 @@ export default function Sidebar() {
       const threadId = newThreadId();
       const createdAt = new Date().toISOString();
       return (async () => {
+        let worktreePath = options?.worktreePath ?? null;
+        if (projectId === homeProjectId && worktreePath === null && chatWorkspaceRoot) {
+          const api = readNativeApi();
+          await api?.projects
+            .createDirectory({
+              cwd: chatWorkspaceRoot,
+              relativePath: threadId,
+            })
+            .catch(() => undefined);
+          worktreePath = joinClientPath(chatWorkspaceRoot, threadId);
+        }
         setProjectDraftThreadId(projectId, threadId, {
           createdAt,
           branch: options?.branch ?? null,
-          worktreePath: options?.worktreePath ?? null,
+          worktreePath,
           envMode: options?.envMode ?? "local",
           runtimeMode: DEFAULT_RUNTIME_MODE,
           ...(wantsTemporaryThread ? { isTemporary: true } : {}),
@@ -1332,6 +1367,8 @@ export default function Sidebar() {
     [
       clearProjectDraftThreadId,
       getDraftThreadByProjectId,
+      chatWorkspaceRoot,
+      homeProjectId,
       navigate,
       getDraftThread,
       routeThreadId,
@@ -1451,11 +1488,12 @@ export default function Sidebar() {
   }, [addProjectFromPath, isPickingFolder]);
 
   const getOrCreateHomeProjectId = useCallback(async (): Promise<ProjectId | null> => {
-    if (!homeDirectory) {
+    const workspaceRoot = chatWorkspaceRoot ?? homeDirectory;
+    if (!workspaceRoot) {
       return null;
     }
     const existingHomeProject =
-      homeProject ?? projects.find((project) => project.cwd === homeDirectory);
+      homeProject ?? projects.find((project) => project.cwd === workspaceRoot);
     if (existingHomeProject) {
       return existingHomeProject.id;
     }
@@ -1477,12 +1515,12 @@ export default function Sidebar() {
       commandId: newCommandId(),
       projectId,
       title: HOME_PROJECT_TITLE,
-      workspaceRoot: homeDirectory,
+      workspaceRoot,
       defaultModel: DEFAULT_MODEL_BY_PROVIDER.codex,
       createdAt,
     });
     return projectId;
-  }, [homeDirectory, homeProject, projects]);
+  }, [chatWorkspaceRoot, homeDirectory, homeProject, projects]);
 
   const handlePrimaryNewThread = useCallback(() => {
     void (async () => {
@@ -1720,16 +1758,22 @@ export default function Sidebar() {
       if (!api) return;
       const thread = threads.find((entry) => entry.id === threadId);
       if (!thread) return;
+      const affectedThreads = collectThreadTree(threads, threadId).filter(
+        (entry) => entry.archivedAt == null,
+      );
+      const affectedThreadIds = new Set(affectedThreads.map((entry) => entry.id));
 
       await api.orchestration.dispatchCommand({
         type: "thread.archive",
         commandId: newCommandId(),
         threadId,
+        includeChildren: true,
       });
 
-      if (routeThreadId === threadId) {
+      if (routeThreadId && affectedThreadIds.has(routeThreadId)) {
         const fallbackThreadId =
-          threads.find((entry) => entry.id !== threadId && entry.archivedAt == null)?.id ?? null;
+          threads.find((entry) => !affectedThreadIds.has(entry.id) && entry.archivedAt == null)
+            ?.id ?? null;
         if (fallbackThreadId) {
           void navigate({
             to: "/$threadId",
@@ -1808,40 +1852,46 @@ export default function Sidebar() {
         return;
       }
 
-      let archivedCount = 0;
-      let failureCount = 0;
-      for (const thread of projectThreads) {
-        try {
-          await archiveThread(thread.id);
-          archivedCount += 1;
-        } catch (error) {
-          failureCount += 1;
-          console.error("Failed to archive thread during bulk archive", {
-            threadId: thread.id,
-            projectId,
-            error,
-          });
-        }
-      }
+      const affectedThreadIds = new Set(projectThreads.map((thread) => thread.id));
 
-      if (archivedCount > 0) {
-        toastManager.add({
-          type: failureCount > 0 ? "warning" : "success",
-          title: archivedCount === 1 ? "Thread archived" : `Archived ${archivedCount} threads`,
-          description:
-            failureCount > 0
-              ? `Failed to archive ${failureCount} thread${failureCount === 1 ? "" : "s"} in "${project.name}".`
-              : `"${project.name}" archived.`,
+      try {
+        await api.orchestration.dispatchCommand({
+          type: "project.archive",
+          commandId: newCommandId(),
+          projectId,
         });
-      } else {
+        if (routeThreadId && affectedThreadIds.has(routeThreadId)) {
+          const fallbackThreadId =
+            threads.find((thread) => !affectedThreadIds.has(thread.id) && thread.archivedAt == null)
+              ?.id ?? null;
+          if (fallbackThreadId) {
+            void navigate({
+              to: "/$threadId",
+              params: { threadId: fallbackThreadId },
+              replace: true,
+            });
+          } else {
+            void navigate({ to: "/", replace: true });
+          }
+        }
+        toastManager.add({
+          type: "success",
+          title:
+            projectThreads.length === 1
+              ? "Thread archived"
+              : `Archived ${projectThreads.length} threads`,
+          description: `"${project.name}" archived.`,
+        });
+      } catch (error) {
+        console.error("Failed to archive threads during bulk archive", { projectId, error });
         toastManager.add({
           type: "error",
           title: "Failed to archive threads",
-          description: `Could not archive threads in "${project.name}".`,
+          description: getErrorMessage(error, `Could not archive threads in "${project.name}".`),
         });
       }
     },
-    [archiveThread, projects, threads],
+    [navigate, projects, routeThreadId, threads],
   );
 
   const handleThreadContextMenu = useCallback(
@@ -1953,9 +2003,14 @@ export default function Sidebar() {
       }
       if (clicked !== "delete") return;
       if (appSettings.confirmThreadDelete) {
+        const affectedThreads = collectThreadTree(threads, threadId);
+        const childCount = Math.max(affectedThreads.length - 1, 0);
         const confirmed = await api.dialogs.confirm(
           [
             `Delete thread "${thread.title}"?`,
+            ...(childCount > 0
+              ? [`This will also delete ${childCount} child thread${childCount === 1 ? "" : "s"}.`]
+              : []),
             "This permanently clears conversation history for this thread.",
           ].join("\n"),
         );
@@ -1963,6 +2018,8 @@ export default function Sidebar() {
           return;
         }
       }
+      const affectedThreads = collectThreadTree(threads, threadId);
+      const affectedThreadIds = new Set(affectedThreads.map((entry) => entry.id));
       const threadProject = projects.find((project) => project.id === thread.projectId);
       const orphanedWorktreePath = getOrphanedWorktreePathForThread(threads, threadId);
       const displayWorktreePath = orphanedWorktreePath
@@ -2000,17 +2057,22 @@ export default function Sidebar() {
         // Terminal may already be closed
       }
 
-      const shouldNavigateToFallback = routeThreadId === threadId;
-      const fallbackThreadId = threads.find((entry) => entry.id !== threadId)?.id ?? null;
+      const shouldNavigateToFallback = routeThreadId ? affectedThreadIds.has(routeThreadId) : false;
+      const fallbackThreadId =
+        threads.find((entry) => !affectedThreadIds.has(entry.id) && entry.archivedAt == null)?.id ??
+        null;
       await api.orchestration.dispatchCommand({
         type: "thread.delete",
         commandId: newCommandId(),
         threadId,
+        includeChildren: true,
       });
-      clearComposerDraftForThread(threadId);
-      clearProjectDraftThreadById(thread.projectId, thread.id);
-      clearTerminalState(threadId);
-      clearTemporaryThread(threadId);
+      for (const affectedThread of affectedThreads) {
+        clearComposerDraftForThread(affectedThread.id);
+        clearProjectDraftThreadById(affectedThread.projectId, affectedThread.id);
+        clearTerminalState(affectedThread.id);
+        clearTemporaryThread(affectedThread.id);
+      }
       if (shouldNavigateToFallback) {
         if (fallbackThreadId) {
           void navigate({
@@ -2049,7 +2111,6 @@ export default function Sidebar() {
       }
     },
     [
-      appSettings.confirmThreadArchive,
       appSettings.confirmThreadDelete,
       confirmAndArchiveThread,
       clearComposerDraftForThread,
@@ -2075,8 +2136,8 @@ export default function Sidebar() {
       if (!api) return;
       const clicked = await api.contextMenu.show(
         [
-          { id: "archive-threads", label: "Archive threads" },
-          { id: "delete", label: "Delete", destructive: true },
+          { id: "archive-threads", label: "Archive project" },
+          { id: "delete", label: "Delete project", destructive: true },
         ],
         position,
       );
@@ -2090,32 +2151,57 @@ export default function Sidebar() {
       if (!project) return;
 
       const projectThreads = threads.filter((thread) => thread.projectId === projectId);
-      if (projectThreads.length > 0) {
-        toastManager.add({
-          type: "warning",
-          title: "Project is not empty",
-          description: "Delete all threads in this project before deleting it.",
-        });
-        return;
-      }
-
       const confirmed = await api.dialogs.confirm(
-        [`Delete project "${project.name}"?`, "This action cannot be undone."].join("\n"),
+        [
+          `Delete project "${project.name}"?`,
+          ...(projectThreads.length > 0
+            ? [
+                `This will first delete ${projectThreads.length} thread${projectThreads.length === 1 ? "" : "s"} in the project.`,
+              ]
+            : []),
+          "This action cannot be undone.",
+        ].join("\n"),
       );
       if (!confirmed) return;
 
       try {
+        const affectedThreadIds = new Set(projectThreads.map((thread) => thread.id));
+        const shouldNavigateToFallback =
+          routeThreadId !== undefined &&
+          routeThreadId !== null &&
+          affectedThreadIds.has(routeThreadId);
+        const fallbackThreadId =
+          threads.find((thread) => !affectedThreadIds.has(thread.id) && thread.archivedAt == null)
+            ?.id ?? null;
         const projectDraftThread = getDraftThreadByProjectId(projectId);
         if (projectDraftThread) {
           clearComposerDraftForThread(projectDraftThread.threadId);
           clearTemporaryThread(projectDraftThread.threadId);
+        }
+        for (const thread of projectThreads) {
+          clearComposerDraftForThread(thread.id);
+          clearProjectDraftThreadById(thread.projectId, thread.id);
+          clearTerminalState(thread.id);
+          clearTemporaryThread(thread.id);
         }
         clearProjectDraftThreadId(projectId);
         await api.orchestration.dispatchCommand({
           type: "project.delete",
           commandId: newCommandId(),
           projectId,
+          deleteThreads: true,
         });
+        if (shouldNavigateToFallback) {
+          if (fallbackThreadId) {
+            void navigate({
+              to: "/$threadId",
+              params: { threadId: fallbackThreadId },
+              replace: true,
+            });
+          } else {
+            void navigate({ to: "/", replace: true });
+          }
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown error deleting project.";
         console.error("Failed to remove project", { projectId, error });
@@ -2130,9 +2216,13 @@ export default function Sidebar() {
       archiveAllThreadsInProject,
       clearComposerDraftForThread,
       clearProjectDraftThreadId,
+      clearProjectDraftThreadById,
       clearTemporaryThread,
+      clearTerminalState,
       getDraftThreadByProjectId,
+      navigate,
       projects,
+      routeThreadId,
       threads,
     ],
   );
@@ -2314,25 +2404,26 @@ export default function Sidebar() {
       })),
     [workspaceProjects],
   );
-  const searchPaletteThreads = useMemo<SidebarSearchThread[]>(
-    () =>
-      threads.map((thread) => ({
-        id: thread.id,
-        title: thread.title,
-        projectId: thread.projectId,
-        projectName:
-          thread.projectId === homeProjectId
-            ? "Chats"
-            : (projectById.get(thread.projectId)?.name ?? "Unknown project"),
-        provider: getProviderFromModel(thread.model),
-        createdAt: thread.createdAt,
-        updatedAt: thread.updatedAt,
-        messages: thread.messages.map((message) => ({
-          text: message.text,
-        })),
+  const searchPaletteThreads = useMemo<SidebarSearchThread[]>(() => {
+    if (!searchPaletteOpen) {
+      return [];
+    }
+    return threads.map((thread) => ({
+      id: thread.id,
+      title: thread.title,
+      projectId: thread.projectId,
+      projectName:
+        thread.projectId === homeProjectId
+          ? "Chats"
+          : (projectById.get(thread.projectId)?.name ?? "Unknown project"),
+      provider: getProviderFromModel(thread.model),
+      createdAt: thread.createdAt,
+      updatedAt: thread.updatedAt,
+      messages: thread.messages.map((message) => ({
+        text: message.text,
       })),
-    [homeProjectId, projectById, threads],
-  );
+    }));
+  }, [homeProjectId, projectById, searchPaletteOpen, threads]);
   const searchPaletteActions = useMemo<SidebarSearchAction[]>(
     () => [
       {

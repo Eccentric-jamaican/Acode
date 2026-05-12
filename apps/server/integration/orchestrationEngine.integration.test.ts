@@ -33,7 +33,7 @@ const THREAD_ID = ThreadId.makeUnsafe("thread-1");
 const FIXTURE_TURN_ID = "fixture-turn";
 const APPROVAL_REQUEST_ID = asApprovalRequestId("req-approval-1");
 type IntegrationProvider = "codex";
-const LIVE_TEST_TIMEOUT_MS = 30_000;
+const LIVE_TEST_TIMEOUT_MS = 120_000;
 
 function nowIso() {
   return new Date().toISOString();

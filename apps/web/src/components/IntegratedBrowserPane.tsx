@@ -6,13 +6,7 @@ import type {
   RuntimeMode,
   ThreadId,
 } from "@t3tools/contracts";
-import {
-  ArrowLeftIcon,
-  ArrowRightIcon,
-  RefreshCwIcon,
-  SearchIcon,
-  XIcon,
-} from "lucide-react";
+import { ArrowLeftIcon, ArrowRightIcon, RefreshCwIcon, SearchIcon, XIcon } from "lucide-react";
 import {
   type CSSProperties,
   type KeyboardEvent,
@@ -255,15 +249,16 @@ function filterBrowserUrlSuggestions(
   const scored = suggestions
     .filter((entry) => {
       const title = entry.title?.toLowerCase() ?? "";
-      return (
-        entry.url.toLowerCase().includes(normalizedQuery) || title.includes(normalizedQuery)
-      );
+      return entry.url.toLowerCase().includes(normalizedQuery) || title.includes(normalizedQuery);
     })
     .map((entry) => {
       const lowerUrl = entry.url.toLowerCase();
       const lowerTitle = entry.title?.toLowerCase() ?? "";
       let score = 0;
-      if (lowerUrl.startsWith(`https://${normalizedQuery}`) || lowerUrl.startsWith(`http://${normalizedQuery}`)) {
+      if (
+        lowerUrl.startsWith(`https://${normalizedQuery}`) ||
+        lowerUrl.startsWith(`http://${normalizedQuery}`)
+      ) {
         score += 80;
       } else if (lowerUrl.includes(normalizedQuery)) {
         score += 35;
@@ -346,9 +341,7 @@ function BrowserUrlInput(props: BrowserUrlInputProps) {
         }
         event.preventDefault();
         setHighlightedIndex((existing) =>
-          existing < 0
-            ? 0
-            : Math.min(existing + 1, filteredSuggestions.length - 1),
+          existing < 0 ? 0 : Math.min(existing + 1, filteredSuggestions.length - 1),
         );
         return;
       }
@@ -357,9 +350,7 @@ function BrowserUrlInput(props: BrowserUrlInputProps) {
           return;
         }
         event.preventDefault();
-        setHighlightedIndex((existing) =>
-          existing <= 0 ? 0 : existing - 1,
-        );
+        setHighlightedIndex((existing) => (existing <= 0 ? 0 : existing - 1));
         return;
       }
       if (event.key === "Escape") {
@@ -370,11 +361,7 @@ function BrowserUrlInput(props: BrowserUrlInputProps) {
         return;
       }
       event.preventDefault();
-      if (
-        menuOpen &&
-        highlightedIndex >= 0 &&
-        highlightedIndex < filteredSuggestions.length
-      ) {
+      if (menuOpen && highlightedIndex >= 0 && highlightedIndex < filteredSuggestions.length) {
         applySuggestion(filteredSuggestions[highlightedIndex]!.url);
         return;
       }
@@ -422,7 +409,9 @@ function BrowserUrlInput(props: BrowserUrlInputProps) {
                   {entry.title ? (
                     <span className="block w-full truncate text-xs font-medium">{entry.title}</span>
                   ) : null}
-                  <span className="block w-full truncate text-[11px] text-muted-foreground">{entry.url}</span>
+                  <span className="block w-full truncate text-[11px] text-muted-foreground">
+                    {entry.url}
+                  </span>
                 </button>
               );
             })}
@@ -433,7 +422,10 @@ function BrowserUrlInput(props: BrowserUrlInputProps) {
   );
 }
 
-function arePaneBoundsEqual(left: BrowserPaneBounds | null, right: BrowserPaneBounds | null): boolean {
+function arePaneBoundsEqual(
+  left: BrowserPaneBounds | null,
+  right: BrowserPaneBounds | null,
+): boolean {
   return (
     left?.x === right?.x &&
     left?.y === right?.y &&
@@ -496,6 +488,63 @@ interface BrowserPaneProps {
   onRequestClose: () => void;
 }
 
+interface BrowserTabsStripProps {
+  tabs: ReadonlyArray<NonNullable<BrowserSessionSnapshot["tabs"]>[number]>;
+  activeTabId: BrowserTabId | null;
+  controlsDisabled: boolean;
+  onActivateTab: (tabId: BrowserTabId) => void;
+  onCloseTab: (tabId: BrowserTabId) => void;
+}
+
+function BrowserTabsStrip(props: BrowserTabsStripProps) {
+  const { tabs, activeTabId, controlsDisabled, onActivateTab, onCloseTab } = props;
+
+  return (
+    <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+      {tabs.map((tab) => {
+        const isActive = tab.tabId === activeTabId;
+        const tabLabel = tab.navigation.title?.trim() || tab.navigation.url || "New tab";
+        return (
+          <div
+            key={tab.tabId}
+            className={cn(
+              "group flex min-w-0 max-w-[180px] items-center rounded border text-xs",
+              isActive
+                ? "border-border bg-muted/70 text-foreground"
+                : "border-transparent bg-muted/40 text-muted-foreground hover:border-border/70 hover:text-foreground",
+            )}
+            title={tabLabel}
+          >
+            <button
+              type="button"
+              className="min-w-0 flex-1 truncate py-0.5 pl-2 pr-1 text-left"
+              disabled={controlsDisabled}
+              onClick={() => onActivateTab(tab.tabId)}
+            >
+              {tabLabel}
+            </button>
+            <button
+              type="button"
+              aria-label={`Close tab ${tabLabel}`}
+              className="mr-1 rounded p-0.5 opacity-70 hover:bg-background hover:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40"
+              disabled={controlsDisabled}
+              onPointerDown={(event) => {
+                event.stopPropagation();
+              }}
+              onClick={(event) => {
+                event.stopPropagation();
+                onCloseTab(tab.tabId);
+              }}
+            >
+              <XIcon className="size-3" />
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function IntegratedBrowserPane(props: BrowserPaneProps) {
   const {
     activeProjectId,
@@ -515,7 +564,9 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [snapshot, setSnapshot] = useState<BrowserSessionSnapshot | null>(null);
   const [urlInput, setUrlInput] = useState("");
-  const [urlHistory, setUrlHistory] = useState<ReadonlyArray<string>>(() => readBrowserUrlHistory());
+  const [urlHistory, setUrlHistory] = useState<ReadonlyArray<string>>(() =>
+    readBrowserUrlHistory(),
+  );
   const [containerWidth, setContainerWidth] = useState(() =>
     typeof window === "undefined" ? 0 : window.innerWidth,
   );
@@ -633,7 +684,14 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
           drainCaptureQueue();
         }
       });
-  }, [addImage, addInspectCapture, api, handleBrowserError, runBrowserAction, settings.keepInspectModeAfterCapture]);
+  }, [
+    addImage,
+    addInspectCapture,
+    api,
+    handleBrowserError,
+    runBrowserAction,
+    settings.keepInspectModeAfterCapture,
+  ]);
 
   useEffect(() => {
     if (!api?.browser) {
@@ -656,13 +714,7 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
       }
     });
     return unsubscribe;
-  }, [
-    activeProjectId,
-    activeThreadId,
-    api,
-    drainCaptureQueue,
-    onRequestOpen,
-  ]);
+  }, [activeProjectId, activeThreadId, api, drainCaptureQueue, onRequestOpen]);
 
   useEffect(() => {
     if (!api?.browser || !activeProjectId) {
@@ -942,53 +994,17 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
     return (
       <div className="flex min-h-0 flex-1 flex-col">
         <div
-          className={cn(
-            "relative z-[60] flex min-w-0 shrink-0 flex-col border-b border-border",
-          )}
+          className={cn("relative z-[60] flex min-w-0 shrink-0 flex-col border-b border-border")}
           data-testid="integrated-browser-top-header"
         >
           <div className="flex h-8 min-w-0 items-center gap-1 px-2">
-            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
-              {tabs.map((tab) => {
-                const isActive = tab.tabId === activeTab?.tabId;
-                const tabLabel = tab.navigation.title?.trim() || tab.navigation.url || "New tab";
-                return (
-                  <button
-                    key={tab.tabId}
-                    type="button"
-                    className={cn(
-                      "group flex min-w-0 max-w-[180px] items-center gap-1 rounded border px-2 py-0.5 text-xs",
-                      isActive
-                        ? "border-border bg-muted/70 text-foreground"
-                        : "border-transparent bg-muted/40 text-muted-foreground hover:border-border/70 hover:text-foreground",
-                    )}
-                    onClick={() => activateTab(tab.tabId)}
-                    title={tabLabel}
-                  >
-                    <span className="truncate">{tabLabel}</span>
-                    <span
-                      role="button"
-                      tabIndex={0}
-                      aria-label={`Close tab ${tabLabel}`}
-                      className="rounded p-0.5 opacity-70 hover:bg-background hover:opacity-100"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        closeTab(tab.tabId);
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          closeTab(tab.tabId);
-                        }
-                      }}
-                    >
-                      <XIcon className="size-3" />
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
+            <BrowserTabsStrip
+              tabs={tabs}
+              activeTabId={activeTab?.tabId ?? null}
+              controlsDisabled={controlsDisabled}
+              onActivateTab={activateTab}
+              onCloseTab={closeTab}
+            />
             <Button
               type="button"
               variant="ghost"
@@ -1077,7 +1093,10 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
                 ariaLabel="Browser URL"
               />
             </div>
-            <div className="flex shrink-0 items-center gap-1" data-testid="integrated-browser-header-actions">
+            <div
+              className="flex shrink-0 items-center gap-1"
+              data-testid="integrated-browser-header-actions"
+            >
               <Toggle
                 pressed={activeTab?.inspectMode === true}
                 onPressedChange={(next) => {
@@ -1145,53 +1164,17 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
       />
       <div className="flex min-w-0 flex-1 flex-col">
         <div
-          className={cn(
-            "relative z-[60] flex min-w-0 shrink-0 flex-col border-b border-border",
-          )}
+          className={cn("relative z-[60] flex min-w-0 shrink-0 flex-col border-b border-border")}
           data-testid="integrated-browser-top-header"
         >
           <div className="flex h-8 min-w-0 items-center gap-1 px-2">
-            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
-              {tabs.map((tab) => {
-                const isActive = tab.tabId === activeTab?.tabId;
-                const tabLabel = tab.navigation.title?.trim() || tab.navigation.url || "New tab";
-                return (
-                  <button
-                    key={tab.tabId}
-                    type="button"
-                    className={cn(
-                      "group flex min-w-0 max-w-[180px] items-center gap-1 rounded border px-2 py-0.5 text-xs",
-                      isActive
-                        ? "border-border bg-muted/70 text-foreground"
-                        : "border-transparent bg-muted/40 text-muted-foreground hover:border-border/70 hover:text-foreground",
-                    )}
-                    onClick={() => activateTab(tab.tabId)}
-                    title={tabLabel}
-                  >
-                    <span className="truncate">{tabLabel}</span>
-                    <span
-                      role="button"
-                      tabIndex={0}
-                      aria-label={`Close tab ${tabLabel}`}
-                      className="rounded p-0.5 opacity-70 hover:bg-background hover:opacity-100"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        closeTab(tab.tabId);
-                      }}
-                      onKeyDown={(event) => {
-                        if (event.key === "Enter" || event.key === " ") {
-                          event.preventDefault();
-                          event.stopPropagation();
-                          closeTab(tab.tabId);
-                        }
-                      }}
-                    >
-                      <XIcon className="size-3" />
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
+            <BrowserTabsStrip
+              tabs={tabs}
+              activeTabId={activeTab?.tabId ?? null}
+              controlsDisabled={controlsDisabled}
+              onActivateTab={activateTab}
+              onCloseTab={closeTab}
+            />
             <Button
               type="button"
               variant="ghost"
@@ -1280,7 +1263,10 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
                 ariaLabel="Browser URL"
               />
             </div>
-            <div className="flex shrink-0 items-center gap-1" data-testid="integrated-browser-header-actions">
+            <div
+              className="flex shrink-0 items-center gap-1"
+              data-testid="integrated-browser-header-actions"
+            >
               <Toggle
                 pressed={activeTab?.inspectMode === true}
                 onPressedChange={(next) => {

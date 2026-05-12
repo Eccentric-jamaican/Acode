@@ -1735,6 +1735,44 @@ describe("ProviderRuntimeIngestion", () => {
     ).toBe(false);
   });
 
+  it("names a child thread from codex thread metadata", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+
+    harness.emit({
+      type: "thread.started",
+      eventId: asEventId("evt-subagent-thread-started-with-name"),
+      provider: "codex",
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      providerRefs: {
+        providerThreadId: "child-provider-named",
+        providerParentThreadId: "parent-provider-1",
+      },
+      payload: {
+        providerThreadId: "child-provider-named",
+        agentId: "agent-named",
+        agentNickname: "Policy Reader",
+        agentRole: "explorer",
+      },
+    } as ProviderRuntimeEvent);
+
+    const readModel = await waitForReadModel(harness.engine, (model) =>
+      model.threads.some(
+        (thread) =>
+          thread.id === ThreadId.makeUnsafe("subagent:thread-1:child-provider-named") &&
+          thread.title === "Policy Reader [explorer]" &&
+          thread.subagentNickname === "Policy Reader" &&
+          thread.subagentRole === "explorer",
+      ),
+    );
+
+    const childThread = readModel.threads.find(
+      (thread) => thread.id === ThreadId.makeUnsafe("subagent:thread-1:child-provider-named"),
+    );
+    expect(childThread?.title).toBe("Policy Reader [explorer]");
+  });
+
   it("promotes a codex child thread's first assistant update into a readable fallback title", async () => {
     const harness = await createHarness();
     const now = new Date().toISOString();
