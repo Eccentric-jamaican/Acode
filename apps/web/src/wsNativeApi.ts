@@ -23,7 +23,9 @@ import { WsTransport } from "./wsTransport";
 let instance: { api: NativeApi; transport: WsTransport } | null = null;
 const welcomeListeners = new Set<(payload: WsWelcomePayload) => void>();
 const serverConfigUpdatedListeners = new Set<(payload: ServerConfigUpdatedPayload) => void>();
-const serverErrorInboxUpdatedListeners = new Set<(payload: ServerErrorInboxUpdatedPayload) => void>();
+const serverErrorInboxUpdatedListeners = new Set<
+  (payload: ServerErrorInboxUpdatedPayload) => void
+>();
 const serverProviderStateUpdatedListeners = new Set<
   (payload: ServerProviderStateUpdatedPayload) => void
 >();
@@ -314,6 +316,11 @@ export function createWsNativeApi(): NativeApi {
       updateSettings: (input) => transport.request(WS_METHODS.serverUpdateSettings, input),
       onErrorInboxUpdated: (callback) => onServerErrorInboxUpdated(callback),
     },
+    computerUse: {
+      listApps: () => transport.request(WS_METHODS.computerUseListApps),
+      getSettings: () => transport.request(WS_METHODS.computerUseGetSettings),
+      updateSettings: (input) => transport.request(WS_METHODS.computerUseUpdateSettings, input),
+    },
     provider: {
       getComposerCapabilities: (input) =>
         transport.request(WS_METHODS.providerGetComposerCapabilities, input),
@@ -324,7 +331,7 @@ export function createWsNativeApi(): NativeApi {
       listModels: (input) => transport.request(WS_METHODS.providerListModels, input),
     },
     orchestration: {
-      getSnapshot: () => transport.request(ORCHESTRATION_WS_METHODS.getSnapshot),
+      getSnapshot: (input) => transport.request(ORCHESTRATION_WS_METHODS.getSnapshot, input),
       dispatchCommand: (command) => dispatchCommandWithReceiptRecovery(transport, command),
       getTurnDiff: (input) => transport.request(ORCHESTRATION_WS_METHODS.getTurnDiff, input),
       getFullThreadDiff: (input) =>

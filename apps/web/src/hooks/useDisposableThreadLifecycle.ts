@@ -87,7 +87,9 @@ export function useDisposableThreadLifecycle(activeThreadId: ThreadId | null): v
                 threadId: disposableThreadId,
               })
               .catch(() => undefined);
-            const snapshot = await api.orchestration.getSnapshot().catch(() => null);
+            const snapshot = await api.orchestration
+              .getSnapshot({ mode: "bootstrap" })
+              .catch(() => null);
             if (snapshot) {
               syncServerReadModel(snapshot);
             }

@@ -76,6 +76,7 @@ import {
   threadTimestamp,
 } from "../sidebarModel";
 import { reorderProjectOrder, useSidebarPreferences } from "../sidebarPreferences";
+import { SETTINGS_SECTION_IDS } from "../settingsSections";
 import { toastManager } from "./ui/toast";
 import {
   getDesktopUpdateActionError,
@@ -100,6 +101,7 @@ import {
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
 import { ScrollArea } from "./ui/scroll-area";
+import { Skeleton } from "./ui/skeleton";
 import {
   SidebarFooter,
   SidebarGroup,
@@ -198,6 +200,29 @@ function ProviderGlyph(props: { provider: ProviderKind; className?: string }) {
       className={cn("size-3 shrink-0 text-muted-foreground/70", props.className)}
       aria-label={`${props.provider} provider`}
     />
+  );
+}
+
+function SidebarHydrationSkeleton() {
+  return (
+    <div
+      className="space-y-3 px-2.5 pt-3"
+      aria-label="Loading workspace navigation"
+      data-testid="sidebar-hydration-skeleton"
+    >
+      {Array.from({ length: 3 }, (_, groupIndex) => (
+        <div className="space-y-1.5" key={groupIndex}>
+          <div className="flex items-center gap-2">
+            <Skeleton className="size-4 shrink-0 rounded" />
+            <Skeleton className="h-3 w-28" />
+          </div>
+          <div className="space-y-1 pl-5">
+            <Skeleton className="h-7 w-full rounded-md" />
+            <Skeleton className="h-7 w-[86%] rounded-md" />
+          </div>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -1244,7 +1269,10 @@ export default function Sidebar() {
   }, []);
   const handleNavigateToSettings = useCallback(() => {
     setSettingsPopoverOpen(false);
-    void navigate({ to: "/settings" });
+    void navigate({
+      to: "/settings",
+      search: { section: SETTINGS_SECTION_IDS.appearance },
+    });
   }, [navigate]);
   const handleContinueProviderLogin = useCallback((authUrl: string) => {
     const api = readNativeApi();
@@ -3814,6 +3842,8 @@ export default function Sidebar() {
                 </div>
               ) : null}
 
+              {!threadsHydrated && !hydrationError ? <SidebarHydrationSkeleton /> : null}
+
               {shouldShowNoRelevantThreadsState ? (
                 <div className="px-2.5 pt-3 text-sm text-muted-foreground/60">
                   No relevant threads to show.
@@ -3874,7 +3904,10 @@ export default function Sidebar() {
         }}
         onAddProjectFromPath={addProjectFromPath}
         onOpenSettings={() => {
-          void navigate({ to: "/settings" });
+          void navigate({
+            to: "/settings",
+            search: { section: SETTINGS_SECTION_IDS.appearance },
+          });
         }}
         onOpenProject={handleOpenProjectFromSearch}
         onOpenThread={(threadId) => {

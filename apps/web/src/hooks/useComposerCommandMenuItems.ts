@@ -1,5 +1,6 @@
 import type {
   ProjectEntry,
+  ComputerUseAppSummary,
   ProviderKind,
   ProviderNativeCommandDescriptor,
   ProviderPluginDescriptor,
@@ -44,6 +45,55 @@ function pluginForSkill(
   return plugins.find((plugin) => skill.path.startsWith(plugin.source.path));
 }
 
+function pluginItemsForComposer(
+  plugins: readonly ProviderPluginDescriptor[],
+  normalizedQuery: string,
+): ComposerCommandItem[] {
+  return plugins
+    .filter((plugin) =>
+      normalizedQuery ? buildPluginSearchBlob(plugin).includes(normalizedQuery) : true,
+    )
+    .map((plugin) => {
+      const iconUrl = pluginComposerIcon(plugin);
+      const item: ComposerCommandItem = {
+        id: `plugin:${plugin.id}`,
+        type: "plugin" as const,
+        plugin,
+        label: plugin.interface?.displayName ?? plugin.name,
+        description:
+          plugin.interface?.shortDescription ??
+          plugin.interface?.longDescription ??
+          plugin.interface?.category ??
+          "Codex plugin",
+      };
+      if (iconUrl) item.iconUrl = iconUrl;
+      return item;
+    });
+}
+
+function skillItemsForComposer(
+  skills: readonly ProviderSkillDescriptor[],
+  plugins: readonly ProviderPluginDescriptor[],
+  normalizedQuery: string,
+): ComposerCommandItem[] {
+  return skills
+    .filter((skill) =>
+      normalizedQuery ? buildSkillSearchBlob(skill).includes(normalizedQuery) : true,
+    )
+    .map((skill) => {
+      const iconUrl = pluginComposerIcon(pluginForSkill(skill, plugins));
+      const item: ComposerCommandItem = {
+        id: `skill:${skill.path}`,
+        type: "skill" as const,
+        skill,
+        label: skill.interface?.displayName ?? skill.name,
+        description: skill.interface?.shortDescription ?? skill.description ?? skill.path,
+      };
+      if (iconUrl) item.iconUrl = iconUrl;
+      return item;
+    });
+}
+
 export function useComposerCommandMenuItems(input: {
   composerTrigger: ComposerTrigger | null;
   provider: ProviderKind;
@@ -55,6 +105,7 @@ export function useComposerCommandMenuItems(input: {
   providerPlugins: readonly ProviderPluginDescriptor[];
   providerSkills: readonly ProviderSkillDescriptor[];
   workspaceEntries: readonly ProjectEntry[];
+  desktopApps: readonly ComputerUseAppSummary[];
   searchableModelOptions: readonly SearchableModelOption[];
   selectedServiceTierSetting: AppServiceTier;
 }): ComposerCommandItem[] {
@@ -69,6 +120,7 @@ export function useComposerCommandMenuItems(input: {
     providerPlugins,
     providerSkills,
     workspaceEntries,
+    desktopApps,
     searchableModelOptions,
     selectedServiceTierSetting,
   } = input;
@@ -76,14 +128,36 @@ export function useComposerCommandMenuItems(input: {
   return useMemo<ComposerCommandItem[]>(() => {
     if (!composerTrigger) return [];
     if (composerTrigger.kind === "path") {
-      return workspaceEntries.map((entry) => ({
+      const normalizedQuery = normalizeProviderDiscoveryText(composerTrigger.query);
+      const pathItems: ComposerCommandItem[] = workspaceEntries.map((entry) => ({
         id: `path:${entry.kind}:${entry.path}`,
-        type: "path",
+        type: "path" as const,
         path: entry.path,
         pathKind: entry.kind,
         label: basenameOfPath(entry.path),
         description: entry.parentPath ?? "",
       }));
+      const appItems: ComposerCommandItem[] = desktopApps
+        .filter((app) => {
+          if (!normalizedQuery) return true;
+          return normalizeProviderDiscoveryText(app.name).includes(normalizedQuery);
+        })
+        .slice(0, 8)
+        .map((app) => ({
+          id: `desktop-app:${app.appId}`,
+          type: "desktop-app" as const,
+          app,
+          label: app.name,
+          description:
+            app.windows.find((window) => window.isFocused || window.isMain)?.title ??
+            (app.isRunning === false
+              ? "Installed app"
+              : `${app.windows.length} window${app.windows.length === 1 ? "" : "s"}`),
+          iconUrl: app.iconUrl,
+        }));
+      const pluginItems = pluginItemsForComposer(providerPlugins, normalizedQuery);
+      const skillItems = skillItemsForComposer(providerSkills, providerPlugins, normalizedQuery);
+      return [...pathItems, ...appItems, ...pluginItems, ...skillItems];
     }
 
     if (composerTrigger.kind === "slash-command") {
@@ -122,83 +196,19 @@ export function useComposerCommandMenuItems(input: {
           label: `/${command.name}`,
           description: command.description ?? `Run ${provider} native command`,
         }));
-      const slashSkillItems: ComposerCommandItem[] = providerSkills
-        .filter((skill) =>
-          normalizedQuery ? buildSkillSearchBlob(skill).includes(normalizedQuery) : true,
-        )
-        .map((skill) => {
-          const iconUrl = pluginComposerIcon(pluginForSkill(skill, providerPlugins));
-          const item: ComposerCommandItem = {
-            id: `skill:${skill.path}`,
-            type: "skill" as const,
-            skill,
-            label: skill.interface?.displayName ?? skill.name,
-            description: skill.interface?.shortDescription ?? skill.description ?? skill.path,
-          };
-          if (iconUrl) item.iconUrl = iconUrl;
-          return item;
-        });
-      const slashPluginItems: ComposerCommandItem[] = providerPlugins
-        .filter((plugin) =>
-          normalizedQuery ? buildPluginSearchBlob(plugin).includes(normalizedQuery) : true,
-        )
-        .map((plugin) => {
-          const iconUrl = pluginComposerIcon(plugin);
-          const item: ComposerCommandItem = {
-            id: `plugin:${plugin.id}`,
-            type: "plugin" as const,
-            plugin,
-            label: plugin.interface?.displayName ?? plugin.name,
-            description:
-              plugin.interface?.shortDescription ??
-              plugin.interface?.longDescription ??
-              plugin.interface?.category ??
-              "Codex plugin",
-          };
-          if (iconUrl) item.iconUrl = iconUrl;
-          return item;
-        });
+      const slashPluginItems = pluginItemsForComposer(providerPlugins, normalizedQuery);
+      const slashSkillItems = skillItemsForComposer(
+        providerSkills,
+        providerPlugins,
+        normalizedQuery,
+      );
       return [...builtInItems, ...providerCommandItems, ...slashPluginItems, ...slashSkillItems];
     }
 
     if (composerTrigger.kind === "skill") {
       const normalizedQuery = normalizeProviderDiscoveryText(composerTrigger.query);
-      const pluginItems: ComposerCommandItem[] = providerPlugins
-        .filter((plugin) =>
-          normalizedQuery ? buildPluginSearchBlob(plugin).includes(normalizedQuery) : true,
-        )
-        .map((plugin) => {
-          const iconUrl = pluginComposerIcon(plugin);
-          const item: ComposerCommandItem = {
-            id: `plugin:${plugin.id}`,
-            type: "plugin" as const,
-            plugin,
-            label: plugin.interface?.displayName ?? plugin.name,
-            description:
-              plugin.interface?.shortDescription ??
-              plugin.interface?.longDescription ??
-              plugin.interface?.category ??
-              "Codex plugin",
-          };
-          if (iconUrl) item.iconUrl = iconUrl;
-          return item;
-        });
-      const skillItems: ComposerCommandItem[] = providerSkills
-        .filter((skill) =>
-          normalizedQuery ? buildSkillSearchBlob(skill).includes(normalizedQuery) : true,
-        )
-        .map((skill) => {
-          const iconUrl = pluginComposerIcon(pluginForSkill(skill, providerPlugins));
-          const item: ComposerCommandItem = {
-            id: `skill:${skill.path}`,
-            type: "skill" as const,
-            skill,
-            label: skill.interface?.displayName ?? skill.name,
-            description: skill.interface?.shortDescription ?? skill.description ?? skill.path,
-          };
-          if (iconUrl) item.iconUrl = iconUrl;
-          return item;
-        });
+      const pluginItems = pluginItemsForComposer(providerPlugins, normalizedQuery);
+      const skillItems = skillItemsForComposer(providerSkills, providerPlugins, normalizedQuery);
       return [...pluginItems, ...skillItems];
     }
 
@@ -232,6 +242,7 @@ export function useComposerCommandMenuItems(input: {
     providerSkills,
     searchableModelOptions,
     selectedServiceTierSetting,
+    desktopApps,
     workspaceEntries,
   ]);
 }

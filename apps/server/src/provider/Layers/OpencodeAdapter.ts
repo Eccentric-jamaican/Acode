@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import * as NodeFS from "node:fs/promises";
+import * as NodePath from "node:path";
 import {
   EventId,
   DEFAULT_SERVER_SETTINGS,
@@ -82,6 +84,7 @@ type RuntimeFactory = (input: {
   readonly port?: number;
   readonly timeoutMs?: number;
   readonly workspaceCwd?: string;
+  readonly stateDir?: string;
 }) => Promise<RuntimeFactoryResult>;
 
 type EventSubscriptionResult = {
@@ -160,6 +163,151 @@ function asArray(value: unknown): ReadonlyArray<unknown> | undefined {
 function isQuestionToolName(toolName: string): boolean {
   const normalized = toolName.toLowerCase().replace(/[^a-z]/g, "");
   return normalized === "question" || normalized === "askuserquestion";
+}
+
+function parseComputerUseTextBridge(output: string | undefined): {
+  readonly output?: string;
+  readonly structuredContent?: unknown;
+} {
+  if (!output) {
+    return {};
+  }
+  const match = output.match(
+    /(?:\r?\n){0,2}<t3_computer_result>([\s\S]*?)<\/t3_computer_result>\s*$/u,
+  );
+  if (!match?.[1]) {
+    return { output };
+  }
+  try {
+    return {
+      output: output.slice(0, match.index).trimEnd(),
+      structuredContent: JSON.parse(match[1]) as unknown,
+    };
+  } catch {
+    return { output };
+  }
+}
+
+function sanitizeAttachmentSegment(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 120) || "unknown";
+}
+
+function attachmentRelativePathFromUrl(url: string): string | null {
+  if (!url.startsWith("/attachments/")) {
+    return null;
+  }
+  return url
+    .slice("/attachments/".length)
+    .split("/")
+    .map((segment) => {
+      try {
+        return decodeURIComponent(segment);
+      } catch {
+        return segment;
+      }
+    })
+    .join("/");
+}
+
+function resolveAttachmentPathFromCapture(input: {
+  readonly stateDir: string;
+  readonly capture: Record<string, unknown>;
+}): string | null {
+  const attachmentsRoot = NodePath.resolve(NodePath.join(input.stateDir, "attachments"));
+  const explicitPath = asString(input.capture.path);
+  if (explicitPath) {
+    const resolved = NodePath.resolve(explicitPath);
+    if (resolved === attachmentsRoot || resolved.startsWith(`${attachmentsRoot}${NodePath.sep}`)) {
+      return resolved;
+    }
+  }
+
+  const url = asString(input.capture.url);
+  const relativePath = url ? attachmentRelativePathFromUrl(url) : null;
+  if (!relativePath) {
+    return null;
+  }
+  const resolved = NodePath.resolve(NodePath.join(attachmentsRoot, relativePath));
+  if (!resolved.startsWith(`${attachmentsRoot}${NodePath.sep}`)) {
+    return null;
+  }
+  return resolved;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await NodeFS.access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function moveFileIfPresent(sourcePath: string, destinationPath: string): Promise<void> {
+  if (sourcePath === destinationPath || (await pathExists(destinationPath))) {
+    return;
+  }
+  if (!(await pathExists(sourcePath))) {
+    return;
+  }
+  await NodeFS.mkdir(NodePath.dirname(destinationPath), { recursive: true });
+  try {
+    await NodeFS.rename(sourcePath, destinationPath);
+  } catch {
+    await NodeFS.copyFile(sourcePath, destinationPath);
+    await NodeFS.unlink(sourcePath).catch(() => undefined);
+  }
+}
+
+async function normalizeOpenCodeComputerCaptureStorage(input: {
+  readonly stateDir: string;
+  readonly threadId: ThreadId;
+  readonly structuredContent: unknown;
+}): Promise<unknown> {
+  const record = asObject(input.structuredContent);
+  if (!record || !Array.isArray(record.captures)) {
+    return input.structuredContent;
+  }
+
+  const attachmentsRoot = NodePath.resolve(NodePath.join(input.stateDir, "attachments"));
+  const threadSegment = sanitizeAttachmentSegment(input.threadId);
+  const captures = await Promise.all(
+    record.captures.map(async (captureValue) => {
+      const capture = asObject(captureValue);
+      if (!capture) {
+        return captureValue;
+      }
+      const captureId =
+        asString(capture.captureId) ||
+        NodePath.basename(asString(capture.path) ?? asString(capture.url) ?? "", ".png") ||
+        randomUUID();
+      const destinationRelativePath = NodePath.posix.join(
+        "computer-use",
+        threadSegment,
+        "captures",
+        `${sanitizeAttachmentSegment(captureId)}.png`,
+      );
+      const destinationPath = NodePath.join(
+        attachmentsRoot,
+        ...destinationRelativePath.split("/"),
+      );
+      const sourcePath = resolveAttachmentPathFromCapture({
+        stateDir: input.stateDir,
+        capture,
+      });
+      if (sourcePath) {
+        await moveFileIfPresent(sourcePath, destinationPath);
+      }
+      return {
+        ...capture,
+        captureId,
+        url: `/attachments/${destinationRelativePath}`,
+        path: destinationPath,
+      };
+    }),
+  );
+
+  return { ...record, captures };
 }
 
 function toMessage(cause: unknown, fallback: string): string {
@@ -524,6 +672,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
                 ...(options?.port ? { port: options.port } : {}),
                 timeoutMs: STARTUP_TIMEOUT_MS,
                 workspaceCwd: serverConfig.cwd,
+                stateDir: serverConfig.stateDir,
               });
             }
             const server = await connectToOpenCodeServer({
@@ -533,6 +682,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
               ...(options?.port ? { port: options.port } : {}),
               timeoutMs: STARTUP_TIMEOUT_MS,
               workspaceCwd: serverConfig.cwd,
+              stateDir: serverConfig.stateDir,
             });
             logger.info("OpenCode runtime connected", {
               threadId,
@@ -951,6 +1101,15 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           const input = asObject(state?.input) ?? {};
           const metadata = asObject(state?.metadata) ?? asObject(part.metadata) ?? {};
           const output = asString(state?.output);
+          const parsedOutput = parseComputerUseTextBridge(output);
+          const structuredContent =
+            parsedOutput.structuredContent !== undefined
+              ? await normalizeOpenCodeComputerCaptureStorage({
+                  stateDir: serverConfig.stateDir,
+                  threadId,
+                  structuredContent: parsedOutput.structuredContent,
+                })
+              : undefined;
           if (isQuestionToolName(toolName)) {
             const questions = toQuestionPayload(input);
             if (questions && (status === "pending" || status === "running")) {
@@ -970,7 +1129,8 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
             toolName,
             input,
             metadata,
-            ...(output ? { output } : {}),
+            ...(parsedOutput.output ? { output: parsedOutput.output } : {}),
+            ...(structuredContent ? { structuredContent } : {}),
           };
           const diffFiles = normalizeInvocationDiffFiles(data);
           if (diffFiles.length > 0) {

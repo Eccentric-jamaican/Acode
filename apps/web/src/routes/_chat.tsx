@@ -11,6 +11,7 @@ import { emitToggleSidebarSearchPalette } from "../lib/sidebarSearchPalette";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { serverConfigQueryOptions } from "../lib/serverReactQuery";
 import { resolveShortcutCommand } from "../keybindings";
+import { SETTINGS_SECTION_IDS } from "../settingsSections";
 import { useSidebar } from "~/components/ui/sidebar";
 import { Sidebar, SidebarProvider } from "~/components/ui/sidebar";
 
@@ -62,7 +63,10 @@ function ChatRouteGlobalShortcuts() {
         return;
       }
       if (action !== "open-settings") return;
-      void navigate({ to: "/settings" });
+      void navigate({
+        to: "/settings",
+        search: { section: SETTINGS_SECTION_IDS.appearance },
+      });
     });
 
     return () => {

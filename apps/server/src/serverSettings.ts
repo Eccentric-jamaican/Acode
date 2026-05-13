@@ -35,20 +35,20 @@ export class ServerSettingsService extends ServiceMap.Service<
   ServerSettingsService,
   ServerSettingsShape
 >()("t3/serverSettings/ServerSettingsService") {
-  static readonly layerTest = (
-    overrides: Partial<ServerSettingsValue> = {},
-  ) =>
+  static readonly layerTest = (overrides: Partial<ServerSettingsValue> = {}) =>
     Layer.effect(
       ServerSettingsService,
       Effect.gen(function* () {
-        const settingsRef = yield* Ref.make(normalizeServerSettings({
-          ...DEFAULT_SERVER_SETTINGS,
-          ...overrides,
-          providers: {
-            ...DEFAULT_SERVER_SETTINGS.providers,
-            ...(overrides.providers ?? {}),
-          },
-        }));
+        const settingsRef = yield* Ref.make(
+          normalizeServerSettings({
+            ...DEFAULT_SERVER_SETTINGS,
+            ...overrides,
+            providers: {
+              ...DEFAULT_SERVER_SETTINGS.providers,
+              ...overrides.providers,
+            },
+          }),
+        );
         return {
           start: Effect.void,
           ready: Effect.void,
@@ -56,7 +56,9 @@ export class ServerSettingsService extends ServiceMap.Service<
           updateSettings: (patch) =>
             Ref.get(settingsRef).pipe(
               Effect.flatMap((current) =>
-                Schema.decodeUnknownEffect(ServerSettings)(applyServerSettingsPatch(current, patch)).pipe(
+                Schema.decodeUnknownEffect(ServerSettings)(
+                  applyServerSettingsPatch(current, patch),
+                ).pipe(
                   Effect.mapError(
                     (cause) =>
                       new ServerSettingsError({
@@ -83,7 +85,9 @@ const makeServerSettings = Effect.gen(function* () {
   const changes = yield* PubSub.unbounded<ServerSettingsValue>();
 
   const decodeSettings = (raw: string) =>
-    Schema.decodeUnknownEffect(ServerSettings)(JSON.parse(raw)).pipe(
+    Schema.decodeUnknownEffect(ServerSettings)(
+      normalizeServerSettings(JSON.parse(raw) as Partial<ServerSettingsValue>),
+    ).pipe(
       Effect.mapError(
         (cause) =>
           new ServerSettingsError({

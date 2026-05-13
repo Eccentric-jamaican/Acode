@@ -1,4 +1,5 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import * as FS from "node:fs";
 import * as Net from "node:net";
 import * as OS from "node:os";
 import * as Path from "node:path";
@@ -30,15 +31,30 @@ const OPENCODE_SERVER_READY_PREFIX = "opencode server listening";
 const PORT_POLL_INTERVAL_MS = 200;
 const DEFAULT_OPENCODE_BINARY_PATH = "opencode";
 
+function resolveSiblingRuntimePath(relativeBaseName: string): string {
+  const builtPath = fileURLToPath(new URL(`../${relativeBaseName}.mjs`, import.meta.url));
+  if (FS.existsSync(builtPath)) {
+    return builtPath;
+  }
+  return fileURLToPath(new URL(`../${relativeBaseName}.ts`, import.meta.url));
+}
+
 function resolveBrowserUseClientPath(): string {
-  return fileURLToPath(new URL("../browserUseClient.mjs", import.meta.url));
+  return resolveSiblingRuntimePath("browserUseClient");
 }
 
 function resolveImagegenMcpServerPath(): string {
-  return fileURLToPath(new URL("../imagegenMcpServer.mjs", import.meta.url));
+  return resolveSiblingRuntimePath("imagegenMcpServer");
 }
 
-function buildOpenCodeInlineConfig(workspaceCwd: string | undefined): Record<string, unknown> {
+function resolveComputerMcpServerPath(): string {
+  return resolveSiblingRuntimePath("computerMcpServer");
+}
+
+function buildOpenCodeInlineConfig(input: {
+  readonly workspaceCwd: string | undefined;
+  readonly stateDir: string | undefined;
+}): Record<string, unknown> {
   return {
     mcp: {
       t3_imagegen: {
@@ -48,7 +64,19 @@ function buildOpenCodeInlineConfig(workspaceCwd: string | undefined): Record<str
         timeout: 120_000,
         environment: {
           CODEX_HOME: process.env.CODEX_HOME ?? Path.join(OS.homedir(), ".codex"),
-          T3_IMAGEGEN_WORKSPACE: workspaceCwd ?? process.cwd(),
+          T3_IMAGEGEN_WORKSPACE: input.workspaceCwd ?? process.cwd(),
+        },
+      },
+      t3_computer: {
+        type: "local",
+        command: [process.execPath, resolveComputerMcpServerPath()],
+        enabled: true,
+        timeout: 120_000,
+        environment: {
+          T3CODE_STATE_DIR: input.stateDir ?? Path.join(OS.homedir(), ".t3", "dev"),
+          T3_COMPUTER_PROJECT_ID: "opencode",
+          T3_COMPUTER_THREAD_ID: "opencode",
+          T3_COMPUTER_TEXT_RESULT_BRIDGE: "1",
         },
       },
     },
@@ -181,6 +209,27 @@ function parseServerUrlFromOutput(output: string): string | null {
     return match?.[1] ?? null;
   }
   return null;
+}
+
+async function waitForOpenCodeHttpReady(input: {
+  readonly url: string;
+  readonly timeoutMs: number;
+  readonly startedAt: number;
+}): Promise<void> {
+  let lastError: unknown;
+  while (Date.now() - input.startedAt < input.timeoutMs) {
+    try {
+      const response = await fetch(new URL("/provider", input.url));
+      if (response.ok) {
+        return;
+      }
+      lastError = new Error(`HTTP ${response.status}: ${await response.text()}`);
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, PORT_POLL_INTERVAL_MS));
+  }
+  throw lastError instanceof Error ? lastError : new Error("OpenCode HTTP API did not become ready.");
 }
 
 function titleCaseSlug(value: string): string {
@@ -342,6 +391,7 @@ export async function startOpenCodeServerProcess(input: {
   readonly hostname?: string;
   readonly timeoutMs?: number;
   readonly workspaceCwd?: string;
+  readonly stateDir?: string;
 }): Promise<OpenCodeServerConnection> {
   const binaryPath = normalizeOpenCodeBinaryCommand(input.binaryPath);
   const hostname = input.hostname ?? DEFAULT_HOSTNAME;
@@ -353,7 +403,12 @@ export async function startOpenCodeServerProcess(input: {
     args: ["serve", `--hostname=${hostname}`, `--port=${port}`],
     env: {
       ...process.env,
-      OPENCODE_CONFIG_CONTENT: JSON.stringify(buildOpenCodeInlineConfig(input.workspaceCwd)),
+      OPENCODE_CONFIG_CONTENT: JSON.stringify(
+        buildOpenCodeInlineConfig({
+          workspaceCwd: input.workspaceCwd,
+          stateDir: input.stateDir,
+        }),
+      ),
       T3CODE_BROWSER_USE_CLIENT_PATH: resolveBrowserUseClientPath(),
     },
   });
@@ -455,6 +510,20 @@ export async function startOpenCodeServerProcess(input: {
     pollPort();
   });
 
+  await waitForOpenCodeHttpReady({ url, timeoutMs, startedAt }).catch((cause) => {
+    child.kill();
+    throw buildOpenCodeStartupError({
+      message: `Timed out waiting for OpenCode HTTP API after ${timeoutMs}ms.`,
+      binaryPath,
+      hostname,
+      port,
+      startedAt,
+      stdout,
+      stderr,
+      cause,
+    });
+  });
+
   let closed = false;
   return {
     url,
@@ -477,6 +546,7 @@ export async function connectToOpenCodeServer(input: {
   readonly hostname?: string;
   readonly timeoutMs?: number;
   readonly workspaceCwd?: string;
+  readonly stateDir?: string;
 }): Promise<OpenCodeServerConnection> {
   const serverUrl = input.serverUrl?.trim();
   if (serverUrl) {

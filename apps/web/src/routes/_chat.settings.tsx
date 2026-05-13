@@ -1,6 +1,8 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { lazy, Suspense } from "react";
 
+import { normalizeSettingsSectionId } from "../settingsSections";
+
 const SettingsRouteView = lazy(() => import("../components/SettingsRouteView"));
 
 function SettingsLoadingFallback() {
@@ -12,6 +14,9 @@ function SettingsLoadingFallback() {
 }
 
 export const Route = createFileRoute("/_chat/settings")({
+  validateSearch: (search) => ({
+    section: normalizeSettingsSectionId(search.section),
+  }),
   component: function SettingsRoute() {
     return (
       <Suspense fallback={<SettingsLoadingFallback />}>

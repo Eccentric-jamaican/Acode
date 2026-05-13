@@ -1312,12 +1312,22 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
       this.attachedTabId = null;
       return;
     }
-    const contentView = (window as BrowserWindow & {
-      contentView: { removeChildView: (view: Electron.WebContentsView) => void };
-    }).contentView;
-    contentView.removeChildView(tab.view);
-    this.attachedProjectId = null;
-    this.attachedTabId = null;
+    try {
+      if (typeof window.isDestroyed === "function" && window.isDestroyed()) {
+        return;
+      }
+      const contentView = (window as BrowserWindow & {
+        contentView: { removeChildView: (view: Electron.WebContentsView) => void };
+      }).contentView;
+      contentView.removeChildView(tab.view);
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("Object has been destroyed")) {
+        throw error;
+      }
+    } finally {
+      this.attachedProjectId = null;
+      this.attachedTabId = null;
+    }
   }
 
   private findTabByWebContentsId(

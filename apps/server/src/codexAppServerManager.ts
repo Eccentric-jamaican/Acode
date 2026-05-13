@@ -698,7 +698,10 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
 
       this.updateSession(context, {
         status: "ready",
-        resumeCursor: { threadId: providerThreadId },
+        resumeCursor: {
+          threadId: providerThreadId,
+          t3ComputerMcp: input.runtimeMode === "full-access",
+        },
       });
       this.emitLifecycleEvent(
         context,
@@ -1252,7 +1255,12 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         this.readString(this.readObject(notification.params)?.thread, "id"),
       );
       if (providerThreadId) {
-        this.updateSession(context, { resumeCursor: { threadId: providerThreadId } });
+        this.updateSession(context, {
+          resumeCursor: {
+            threadId: providerThreadId,
+            t3ComputerMcp: context.session.runtimeMode === "full-access",
+          },
+        });
       }
       return;
     }

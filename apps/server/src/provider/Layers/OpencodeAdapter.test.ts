@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type { createOpencode, OpencodeClient } from "@opencode-ai/sdk";
@@ -196,12 +199,13 @@ async function runWithFixture<A, E>(
   effect: Effect.Effect<A, E, OpencodeAdapter>,
   options?: {
     readonly settingsOverrides?: Parameters<typeof ServerSettingsService.layerTest>[0];
+    readonly stateDir?: string;
   },
 ): Promise<A> {
   const layer = makeOpencodeAdapterLive({
     createRuntime: fixture.createRuntime,
   }).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), options?.stateDir ?? process.cwd())),
     Layer.provideMerge(ServerSettingsService.layerTest(options?.settingsOverrides)),
     Layer.provideMerge(NodeServices.layer),
   );
@@ -554,5 +558,115 @@ describe("OpencodeAdapter native commands", () => {
           event.requestId === "question-request-1",
       ),
     ).toBe(false);
+  });
+
+  it("relocates bridged computer-use captures from shared OpenCode storage to the T3 thread", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "t3-opencode-captures-"));
+    const sharedCapturePath = path.join(
+      stateDir,
+      "attachments",
+      "computer-use",
+      "opencode",
+      "captures",
+      "capture-1.png",
+    );
+    fs.mkdirSync(path.dirname(sharedCapturePath), { recursive: true });
+    fs.writeFileSync(sharedCapturePath, Buffer.from("png"));
+
+    const structuredContent = {
+      tool: "screenshot",
+      captures: [
+        {
+          captureId: "capture-1",
+          mimeType: "image/png",
+          url: "/attachments/computer-use/opencode/captures/capture-1.png",
+          path: sharedCapturePath,
+          width: 100,
+          height: 80,
+        },
+      ],
+    };
+    const fixture = createOpenCodeFixture({
+      events: [
+        {
+          type: "message.part.updated",
+          properties: {
+            sessionID: "session-1",
+            part: {
+              id: "part-computer-1",
+              messageID: "message-1",
+              role: "assistant",
+              type: "tool",
+              tool: "t3_computer_screenshot",
+              callID: "tool-call-1",
+              state: {
+                status: "completed",
+                output: `Captured screenshot.\n\n<t3_computer_result>${JSON.stringify(
+                  structuredContent,
+                )}</t3_computer_result>`,
+              },
+            },
+          },
+        },
+      ],
+    });
+    const events: ProviderRuntimeEvent[] = [];
+    const threadId = asThreadId("thread-computer-captures");
+
+    await runWithFixture(
+      fixture,
+      Effect.gen(function* () {
+        const adapter = yield* OpencodeAdapter;
+        const collector = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            events.push(event);
+          }),
+        ).pipe(Effect.forkChild);
+
+        try {
+          yield* adapter.startSession({
+            threadId,
+            provider: "opencode",
+            cwd: process.cwd(),
+            model: "openai/gpt-4.1",
+            runtimeMode: "full-access",
+          });
+          yield* Effect.promise(async () => {
+            for (let index = 0; index < 40; index += 1) {
+              if (
+                events.some(
+                  (event) => event.type === "item.completed" && event.itemId === "tool-call-1",
+                )
+              ) {
+                return;
+              }
+              await new Promise((resolve) => setTimeout(resolve, 25));
+            }
+          });
+          yield* adapter.stopAll();
+        } finally {
+          yield* Fiber.interrupt(collector);
+        }
+      }),
+      { stateDir },
+    );
+
+    const completed = events.find(
+      (event) => event.type === "item.completed" && event.itemId === "tool-call-1",
+    );
+    const payload = completed?.payload as unknown as
+      | { data?: { structuredContent?: { captures?: Array<{ url?: string; path?: string }> } } }
+      | undefined;
+    const data = payload?.data as
+      | { structuredContent?: { captures?: Array<{ url?: string; path?: string }> } }
+      | undefined;
+    const capture = data?.structuredContent?.captures?.[0];
+    const expectedRelativePath = "computer-use/thread-computer-captures/captures/capture-1.png";
+    const expectedPath = path.join(stateDir, "attachments", ...expectedRelativePath.split("/"));
+
+    expect(capture?.url).toBe(`/attachments/${expectedRelativePath}`);
+    expect(capture?.path).toBe(expectedPath);
+    expect(fs.existsSync(expectedPath)).toBe(true);
+    expect(fs.existsSync(sharedCapturePath)).toBe(false);
   });
 });

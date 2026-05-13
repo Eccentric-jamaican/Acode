@@ -5,6 +5,9 @@ import {
   type EditorId,
   type KeybindingCommand,
   type CodexReasoningEffort,
+  DEFAULT_COMPUTER_USE_APP_CATEGORIES,
+  type ComputerUseAppSummary,
+  type ComputerUseSettings,
   type MessageId,
   type ProjectId,
   type ProjectEntry,
@@ -27,6 +30,7 @@ import {
   RuntimeMode,
   ProviderInteractionMode,
 } from "@t3tools/contracts";
+import { isComputerUseAppAllowed } from "@t3tools/shared/computerUsePermissions";
 import {
   getDefaultModel,
   getDefaultReasoningEffort,
@@ -284,6 +288,15 @@ const EMPTY_PROVIDER_STATUSES: ServerProviderStatus[] = [];
 const EMPTY_PROVIDER_NATIVE_COMMANDS: ProviderNativeCommandDescriptor[] = [];
 const EMPTY_PROVIDER_PLUGINS: ProviderPluginDescriptor[] = [];
 const EMPTY_PROVIDER_SKILLS: ProviderSkillDescriptor[] = [];
+const EMPTY_COMPUTER_USE_APPS: ComputerUseAppSummary[] = [];
+const DEFAULT_COMPUTER_USE_SETTINGS: ComputerUseSettings = {
+  enabled: true,
+  approvalPolicy: "ask",
+  enabledAppCategories: [...DEFAULT_COMPUTER_USE_APP_CATEGORIES],
+  allowedAppIds: [],
+  blockedAppIds: [],
+  captureRetentionDays: 7,
+};
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
 const EMPTY_HANDOFF_TARGET_PROVIDERS: readonly ProviderKind[] = [];
 const HOME_PROJECT_TITLE = "Home";
@@ -327,11 +340,12 @@ function skillMentionPrefix(): string {
 
 type SelectedComposerExtension = {
   id: string;
-  type: "plugin" | "skill";
+  type: "plugin" | "skill" | "desktop-app";
   name: string;
   label: string;
   mentionName: string;
   iconUrl?: string | undefined;
+  desktopApp?: ComputerUseAppSummary | undefined;
 };
 
 function isHomeProject(project: Project, homeDirectory: string | null | undefined): boolean {
@@ -845,6 +859,30 @@ function selectedComposerExtensionFromSkill(input: {
   };
 }
 
+function desktopAppMentionName(app: ComputerUseAppSummary): string {
+  return (
+    app.name
+      .trim()
+      .replace(/\s+/g, "-")
+      .replace(/[^\w.-]+/g, "")
+      .replace(/^-+|-+$/g, "") || "app"
+  );
+}
+
+function selectedComposerExtensionFromDesktopApp(
+  app: ComputerUseAppSummary,
+): SelectedComposerExtension {
+  return {
+    id: `desktop-app:${app.appId}`,
+    type: "desktop-app",
+    name: app.name,
+    label: app.name,
+    mentionName: desktopAppMentionName(app),
+    ...(app.iconUrl ? { iconUrl: app.iconUrl } : {}),
+    desktopApp: app,
+  };
+}
+
 function mergeSelectedComposerExtensions(
   existing: SelectedComposerExtension[],
   additions: SelectedComposerExtension[],
@@ -871,7 +909,7 @@ function stripSelectedComposerExtensionTokens(
   const selectedTokens = selectedComposerExtensionTokens(extensions);
   return prompt
     .replace(
-      /(^|\s)([$/])([^\s]+)(?=\s|$)/g,
+      /(^|\s)([$/@])([^\s]+)(?=\s|$)/g,
       (fullMatch, prefix: string, _marker: string, rawName: string) =>
         selectedTokens.has(rawName.replace(/^\[|\]$/g, "").toLowerCase()) ? prefix : fullMatch,
     )
@@ -885,8 +923,54 @@ function promptWithSelectedComposerExtensions(input: {
 }): string {
   if (input.selectedExtensions.length === 0) return input.prompt;
   const prefix = skillMentionPrefix();
-  const selectedPrompt = input.selectedExtensions
+  const providerExtensions = input.selectedExtensions.filter(
+    (extension) => extension.type === "plugin" || extension.type === "skill",
+  );
+  const desktopApps = input.selectedExtensions.filter(
+    (extension) => extension.type === "desktop-app" && extension.desktopApp,
+  );
+  const selectedPrompt = providerExtensions
     .map((extension) => `${prefix}${extension.mentionName}`)
+    .join(" ");
+  const cleanPrompt = stripSelectedComposerExtensionTokens(
+    input.prompt,
+    input.selectedExtensions,
+  ).trim();
+  const computerUseContext =
+    desktopApps.length > 0
+      ? [
+          "T3 Computer Use app target selected by the user:",
+          ...desktopApps.map((extension) => {
+            const app = extension.desktopApp!;
+            const window = app.windows.find((candidate) => candidate.isFocused || candidate.isMain);
+            const windowText = window?.title ? `, window: ${window.title}` : "";
+            const pidText = app.isRunning !== false && app.pid > 0 ? `, pid: ${app.pid}` : "";
+            const launchText = app.launchId ? `, launchId: ${app.launchId}` : "";
+            const runningText = app.isRunning === false ? ", not running" : "";
+            return `- ${app.name} (appId: ${app.appId}${pidText}${launchText}${windowText}${runningText})`;
+          }),
+          "Infer T3 Computer Use automatically when the task involves this app. Use the t3_computer MCP tools. Prefer observe_app, list_elements, get_visible_text, and activate_element so the app can be controlled through accessibility data without taking over the user's cursor. If the selected app is not running, launch it first with launch_app. Do not use shell commands, PowerShell, or OS scripts to launch, inspect, or control the selected desktop app; if T3 Computer Use cannot complete the action, explain the exact tool or approval gap instead. Only use tools with allowGlobalInput: true after the user explicitly approves real mouse or keyboard fallback.",
+          "",
+        ].join("\n")
+      : "";
+  const visiblePrompt = cleanPrompt
+    ? [selectedPrompt, cleanPrompt].filter(Boolean).join(" ")
+    : selectedPrompt;
+  return `${computerUseContext}${visiblePrompt}`.trim();
+}
+
+function displayPromptWithSelectedComposerExtensions(input: {
+  prompt: string;
+  selectedExtensions: readonly SelectedComposerExtension[];
+}): string {
+  if (input.selectedExtensions.length === 0) return input.prompt;
+  const prefix = skillMentionPrefix();
+  const selectedPrompt = input.selectedExtensions
+    .map((extension) =>
+      extension.type === "desktop-app"
+        ? `@${extension.mentionName}`
+        : `${prefix}${extension.mentionName}`,
+    )
     .join(" ");
   const cleanPrompt = stripSelectedComposerExtensionTokens(
     input.prompt,
@@ -1013,7 +1097,12 @@ const SelectedComposerExtensionIcon = memo(function SelectedComposerExtensionIco
 }) {
   const [failedIconUrl, setFailedIconUrl] = useState<string | null>(null);
   const failed = props.extension.iconUrl !== undefined && failedIconUrl === props.extension.iconUrl;
-  const Icon = props.extension.type === "plugin" ? PlugIcon : BoxIcon;
+  const Icon =
+    props.extension.type === "plugin"
+      ? PlugIcon
+      : props.extension.type === "desktop-app"
+        ? MousePointer2Icon
+        : BoxIcon;
 
   if (props.extension.iconUrl && !failed) {
     return (
@@ -2131,11 +2220,15 @@ export default function ChatView({
     timelineEntries,
   ]);
   const gitCwd = activeThread?.worktreePath ?? activeProject?.cwd ?? null;
+  const composerWorkspaceSearchCwd =
+    activeThread?.worktreePath ?? (!isActiveHomeProject ? (activeProject?.cwd ?? null) : null);
   const composerTriggerKind = composerTrigger?.kind ?? null;
   const pathTriggerQuery = composerTrigger?.kind === "path" ? composerTrigger.query : "";
   const isPathTrigger = composerTriggerKind === "path";
   const skillTriggerQuery =
-    composerTrigger?.kind === "skill" || composerTrigger?.kind === "slash-command"
+    composerTrigger?.kind === "skill" ||
+    composerTrigger?.kind === "slash-command" ||
+    composerTrigger?.kind === "path"
       ? composerTrigger.query
       : "";
   const isSkillTrigger = composerTriggerKind === "skill";
@@ -2191,7 +2284,7 @@ export default function ChatView({
       threadId,
       query: skillTriggerQuery,
       enabled:
-        (isSkillTrigger || composerTriggerKind === "slash-command") &&
+        (isPathTrigger || isSkillTrigger || composerTriggerKind === "slash-command") &&
         supportsSkillDiscovery(providerComposerCapabilitiesQuery.data) &&
         composerDiscoveryCwd !== null,
     }),
@@ -2202,15 +2295,15 @@ export default function ChatView({
       cwd: composerDiscoveryCwd,
       threadId,
       enabled:
-        (isSkillTrigger || composerTriggerKind === "slash-command") &&
+        (isPathTrigger || isSkillTrigger || composerTriggerKind === "slash-command") &&
         supportsPluginDiscovery(providerComposerCapabilitiesQuery.data),
     }),
   );
   const workspaceEntriesQuery = useQuery(
     projectSearchEntriesQueryOptions({
-      cwd: gitCwd,
+      cwd: composerWorkspaceSearchCwd,
       query: effectivePathQuery,
-      enabled: isPathTrigger,
+      enabled: isPathTrigger && composerWorkspaceSearchCwd !== null,
       limit: 80,
     }),
   );
@@ -2251,7 +2344,7 @@ export default function ChatView({
     setComposerTrigger(detectComposerTrigger(nextPrompt, nextCursor));
   }, [composerCursor, prompt, providerPlugins, providerSkills, setPrompt]);
 
-  const userMessageMentionDescriptors = useMemo<UserMessageMentionDescriptor[]>(() => {
+  const providerUserMessageMentionDescriptors = useMemo<UserMessageMentionDescriptor[]>(() => {
     const pluginDescriptors = providerPlugins.map((plugin) => {
       const iconUrl = pluginComposerIcon(plugin);
       const descriptor: UserMessageMentionDescriptor = {
@@ -2275,6 +2368,39 @@ export default function ChatView({
     return [...pluginDescriptors, ...skillDescriptors];
   }, [providerPlugins, providerSkills]);
 
+  const computerUseAppsQuery = useQuery({
+    queryKey: ["computer-use", "apps"],
+    queryFn: async () => {
+      const api = readNativeApi();
+      if (!api) return { apps: [] };
+      return api.computerUse.listApps();
+    },
+    staleTime: 5_000,
+    refetchInterval: 15_000,
+    retry: false,
+  });
+  const computerUseSettings =
+    serverConfigQuery.data?.settings?.computerUse ?? DEFAULT_COMPUTER_USE_SETTINGS;
+  const desktopApps = useMemo(
+    () =>
+      (computerUseAppsQuery.data?.apps ?? EMPTY_COMPUTER_USE_APPS).filter((app) =>
+        isComputerUseAppAllowed(app, computerUseSettings),
+      ),
+    [computerUseAppsQuery.data?.apps, computerUseSettings],
+  );
+  const userMessageMentionDescriptors = useMemo<UserMessageMentionDescriptor[]>(() => {
+    const desktopAppDescriptors = desktopApps.map((app) => {
+      const descriptor: UserMessageMentionDescriptor = {
+        mentionName: desktopAppMentionName(app),
+        label: app.name,
+        type: "desktop-app",
+      };
+      if (app.iconUrl) descriptor.iconUrl = app.iconUrl;
+      return descriptor;
+    });
+    return [...providerUserMessageMentionDescriptors, ...desktopAppDescriptors];
+  }, [desktopApps, providerUserMessageMentionDescriptors]);
+
   const composerMenuItems = useComposerCommandMenuItems({
     composerTrigger,
     provider: selectedProvider,
@@ -2286,6 +2412,7 @@ export default function ChatView({
     providerPlugins,
     providerSkills,
     workspaceEntries,
+    desktopApps,
     searchableModelOptions,
     selectedServiceTierSetting,
   });
@@ -3600,10 +3727,17 @@ export default function ChatView({
     const composerInspectCapturesForSend =
       queuedChatTurn?.inspectCaptures ?? composerInspectCaptures;
     const selectedProviderForSend = queuedChatTurn?.selectedProvider ?? selectedProvider;
+    const rawPromptForSend = queuedChatTurn?.displayText ?? promptRef.current;
     const basePromptForSend =
-      queuedChatTurn?.displayText ??
+      queuedChatTurn?.prompt ??
       promptWithSelectedComposerExtensions({
-        prompt: promptRef.current,
+        prompt: rawPromptForSend,
+        selectedExtensions: selectedComposerExtensions,
+      });
+    const baseDisplayPromptForSend =
+      queuedChatTurn?.displayText ??
+      displayPromptWithSelectedComposerExtensions({
+        prompt: rawPromptForSend,
         selectedExtensions: selectedComposerExtensions,
       });
     const shortcutPromptForSend =
@@ -3625,7 +3759,7 @@ export default function ChatView({
     const shortcutDisplayPromptForSend =
       queuedChatTurn?.displayText ??
       displayPromptWithSelectedComposerShortcuts({
-        prompt: basePromptForSend,
+        prompt: baseDisplayPromptForSend,
         shortcuts: selectedComposerShortcuts,
       });
     const displayPromptForSend =
@@ -3971,11 +4105,13 @@ export default function ChatView({
           const next = existing.filter((message) => message.id !== messageIdForSend);
           return next.length === existing.length ? existing : next;
         });
-        promptRef.current = promptForSend;
-        setPrompt(promptForSend);
-        setComposerCursor(promptForSend.length);
+        promptRef.current = displayPromptForSend;
+        setPrompt(displayPromptForSend);
+        setComposerCursor(displayPromptForSend.length);
         addComposerImagesToDraft(composerImagesSnapshot.map(cloneComposerImageForRetry));
-        setComposerTrigger(detectComposerTrigger(promptForSend, promptForSend.length));
+        setComposerTrigger(
+          detectComposerTrigger(displayPromptForSend, displayPromptForSend.length),
+        );
       }
       setThreadError(
         threadIdForSend,
@@ -4423,7 +4559,7 @@ export default function ChatView({
           createdAt,
         }),
       )
-      .then(() => api.orchestration.getSnapshot())
+      .then(() => api.orchestration.getSnapshot({ mode: "focused", threadId: nextThreadId }))
       .then((snapshot) => {
         syncServerReadModel(snapshot);
         return navigate({
@@ -4440,7 +4576,7 @@ export default function ChatView({
           })
           .catch(() => undefined);
         await api.orchestration
-          .getSnapshot()
+          .getSnapshot({ mode: "bootstrap" })
           .then((snapshot) => {
             syncServerReadModel(snapshot);
           })
@@ -5043,7 +5179,7 @@ export default function ChatView({
         createdAt,
       });
 
-      const snapshot = await api.orchestration.getSnapshot().catch(() => null);
+      const snapshot = await api.orchestration.getSnapshot({ mode: "bootstrap" }).catch(() => null);
       if (snapshot) {
         syncServerReadModel(snapshot);
       }
@@ -5137,6 +5273,20 @@ export default function ChatView({
           { expectedText: expectedToken },
         );
         if (applied) {
+          setComposerHighlightedItemId(null);
+        }
+        return;
+      }
+      if (item.type === "desktop-app") {
+        const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
+          expectedText: expectedToken,
+        });
+        if (applied) {
+          setSelectedComposerExtensions((existing) =>
+            mergeSelectedComposerExtensions(existing, [
+              selectedComposerExtensionFromDesktopApp(item.app),
+            ]),
+          );
           setComposerHighlightedItemId(null);
         }
         return;

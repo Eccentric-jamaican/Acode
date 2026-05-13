@@ -322,6 +322,76 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           },
         },
       ]);
+
+      yield* sql`
+        INSERT INTO projection_threads (
+          thread_id,
+          project_id,
+          title,
+          model,
+          runtime_mode,
+          interaction_mode,
+          branch,
+          worktree_path,
+          is_pinned,
+          archived_at,
+          latest_turn_id,
+          created_at,
+          updated_at,
+          deleted_at
+        )
+        VALUES (
+          'thread-2',
+          'project-1',
+          'Thread 2',
+          'gpt-5-codex',
+          'full-access',
+          'default',
+          NULL,
+          NULL,
+          0,
+          NULL,
+          NULL,
+          '2026-02-24T00:01:02.000Z',
+          '2026-02-24T00:01:03.000Z',
+          NULL
+        )
+      `;
+      yield* sql`
+        INSERT INTO projection_thread_messages (
+          message_id,
+          thread_id,
+          turn_id,
+          role,
+          text,
+          is_streaming,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          'message-2',
+          'thread-2',
+          NULL,
+          'assistant',
+          'heavy inactive thread message',
+          0,
+          '2026-02-24T00:01:04.000Z',
+          '2026-02-24T00:01:05.000Z'
+        )
+      `;
+
+      const focusedSnapshot = yield* snapshotQuery.getSnapshot({
+        mode: "focused",
+        threadId: ThreadId.makeUnsafe("thread-1"),
+      });
+      const focusedThread1 = focusedSnapshot.threads.find((thread) => thread.id === "thread-1");
+      const focusedThread2 = focusedSnapshot.threads.find((thread) => thread.id === "thread-2");
+      assert.equal(focusedThread1?.messages.length, 1);
+      assert.equal(focusedThread2?.messages.length, 0);
+
+      const bootstrapSnapshot = yield* snapshotQuery.getSnapshot({ mode: "bootstrap" });
+      assert.equal(bootstrapSnapshot.threads.find((thread) => thread.id === "thread-1")?.messages.length, 0);
+      assert.equal(bootstrapSnapshot.threads.find((thread) => thread.id === "thread-2")?.messages.length, 0);
     }),
   );
 });

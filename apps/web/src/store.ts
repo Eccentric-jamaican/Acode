@@ -34,6 +34,7 @@ export interface AppState {
   errorInbox: ErrorInboxEntry[];
   threads: Thread[];
   threadsHydrated: boolean;
+  hydrationStatus: "idle" | "loading" | "refreshing" | "ready" | "stale" | "error";
   hydrationError: string | null;
 }
 
@@ -57,6 +58,7 @@ const initialState: AppState = {
   errorInbox: [],
   threads: [],
   threadsHydrated: false,
+  hydrationStatus: "idle",
   hydrationError: null,
 };
 const persistedExpandedProjectCwds = new Set<string>();
@@ -385,7 +387,21 @@ export function syncServerReadModel(state: AppState, readModel: OrchestrationRea
     taskRuntimes,
     threads,
     threadsHydrated: true,
+    hydrationStatus: "ready",
     hydrationError: null,
+  };
+}
+
+export function setHydrationStatus(
+  state: AppState,
+  hydrationStatus: AppState["hydrationStatus"],
+): AppState {
+  if (state.hydrationStatus === hydrationStatus) {
+    return state;
+  }
+  return {
+    ...state,
+    hydrationStatus,
   };
 }
 
@@ -530,6 +546,7 @@ export function setThreadBranch(
 
 interface AppStore extends AppState {
   syncServerReadModel: (readModel: OrchestrationReadModel) => void;
+  setHydrationStatus: (status: AppState["hydrationStatus"]) => void;
   setHydrationError: (error: string | null) => void;
   syncErrorInbox: (entries: ReadonlyArray<ErrorInboxEntry>) => void;
   upsertErrorInboxEntry: (entry: ErrorInboxEntry) => void;
@@ -546,6 +563,7 @@ interface AppStore extends AppState {
 export const useStore = create<AppStore>((set) => ({
   ...readPersistedState(),
   syncServerReadModel: (readModel) => set((state) => syncServerReadModel(state, readModel)),
+  setHydrationStatus: (status) => set((state) => setHydrationStatus(state, status)),
   setHydrationError: (error) => set((state) => setHydrationError(state, error)),
   syncErrorInbox: (entries) => set((state) => syncErrorInbox(state, entries)),
   upsertErrorInboxEntry: (entry) => set((state) => upsertErrorInboxEntry(state, entry)),

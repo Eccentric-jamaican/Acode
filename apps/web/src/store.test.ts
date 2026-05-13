@@ -57,6 +57,7 @@ function makeState(thread: Thread): AppState {
     errorInbox: [],
     threads: [thread],
     threadsHydrated: true,
+    hydrationStatus: "ready",
     hydrationError: null,
   };
 }

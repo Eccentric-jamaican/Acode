@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  inferMarkdownPathKind,
   normalizeMarkdownFileLinkLabel,
+  parseMarkdownGitHubLink,
   parseMarkdownFileLinkLiteral,
   resolveMarkdownFileLinkTarget,
 } from "./markdown-links";
@@ -65,6 +67,28 @@ describe("parseMarkdownFileLinkLiteral", () => {
   });
 });
 
+describe("parseMarkdownGitHubLink", () => {
+  it("formats release tag links with a compact repo and version label", () => {
+    expect(
+      parseMarkdownGitHubLink("https://github.com/Eccentric-jamaican/t3code/releases/tag/v0.2.45"),
+    ).toEqual({
+      href: "https://github.com/Eccentric-jamaican/t3code/releases/tag/v0.2.45",
+      label: "T3 Code v0.2.45",
+    });
+  });
+
+  it("formats repository links as owner and repository", () => {
+    expect(parseMarkdownGitHubLink("https://github.com/Emanuele-web04/dpcode")).toEqual({
+      href: "https://github.com/Emanuele-web04/dpcode",
+      label: "Emanuele-web04/dpcode",
+    });
+  });
+
+  it("ignores non-GitHub urls", () => {
+    expect(parseMarkdownGitHubLink("https://example.com/Eccentric-jamaican/t3code")).toBeNull();
+  });
+});
+
 describe("normalizeMarkdownFileLinkLabel", () => {
   it("collapses path-like labels to the basename", () => {
     expect(
@@ -73,5 +97,19 @@ describe("normalizeMarkdownFileLinkLabel", () => {
         "C:\\Users\\Addis\\source\\repos\\t3code\\apps\\server\\src\\server.ts",
       ),
     ).toBe("server.ts");
+  });
+});
+
+describe("inferMarkdownPathKind", () => {
+  it("treats extension and line-suffixed paths as files", () => {
+    expect(inferMarkdownPathKind("apps/web/src/settingsSections.ts")).toBe("file");
+    expect(inferMarkdownPathKind("apps/web/src/settingsSections.ts:12")).toBe("file");
+    expect(inferMarkdownPathKind("apps/web/src/settingsSections.ts#L12")).toBe("file");
+  });
+
+  it("treats extensionless and slash-suffixed paths as directories", () => {
+    expect(inferMarkdownPathKind("apps/web/src")).toBe("directory");
+    expect(inferMarkdownPathKind("apps/web/src/")).toBe("directory");
+    expect(inferMarkdownPathKind(".github")).toBe("directory");
   });
 });

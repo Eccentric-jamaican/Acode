@@ -1,4 +1,4 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import {
   ArchiveIcon,
   ArrowLeftIcon,
@@ -6,13 +6,19 @@ import {
   KeyboardIcon,
   LockIcon,
   MessageSquareTextIcon,
+  MousePointer2Icon,
   Settings2Icon,
   SlidersHorizontalIcon,
 } from "lucide-react";
-import { useCallback, useState } from "react";
+import { useCallback } from "react";
 
 import { cn } from "../lib/utils";
-import { SETTINGS_SECTION_IDS, SETTINGS_SIDEBAR_SECTIONS, type SettingsSectionId } from "../settingsSections";
+import {
+  normalizeSettingsSectionId,
+  SETTINGS_SECTION_IDS,
+  SETTINGS_SIDEBAR_SECTIONS,
+  type SettingsSectionId,
+} from "../settingsSections";
 import {
   SidebarContent,
   SidebarFooter,
@@ -33,6 +39,8 @@ function settingsSectionIcon(sectionId: SettingsSectionId) {
       return SlidersHorizontalIcon;
     case SETTINGS_SECTION_IDS.responses:
       return MessageSquareTextIcon;
+    case SETTINGS_SECTION_IDS.computerUse:
+      return MousePointer2Icon;
     case SETTINGS_SECTION_IDS.keybindings:
       return KeyboardIcon;
     case SETTINGS_SECTION_IDS.safety:
@@ -45,14 +53,17 @@ function settingsSectionIcon(sectionId: SettingsSectionId) {
 }
 
 export default function SettingsSidebar() {
-  const [activeSection, setActiveSection] = useState<SettingsSectionId>(
-    SETTINGS_SECTION_IDS.appearance,
-  );
+  const navigate = useNavigate();
+  const activeSection = useRouterState({
+    select: (state) => normalizeSettingsSectionId(state.location.search.section),
+  });
 
-  const handleOpenSection = useCallback((sectionId: SettingsSectionId) => {
-    setActiveSection(sectionId);
-    document.getElementById(sectionId)?.scrollIntoView({ behavior: "auto", block: "start" });
-  }, []);
+  const handleOpenSection = useCallback(
+    (sectionId: SettingsSectionId) => {
+      void navigate({ to: "/settings", search: { section: sectionId } });
+    },
+    [navigate],
+  );
 
   return (
     <>
@@ -82,15 +93,12 @@ export default function SettingsSidebar() {
                   <SidebarMenuItem key={section.id}>
                     <SidebarMenuButton
                       render={
-                        <button
-                          type="button"
-                          data-testid={`settings-sidebar-item-${section.id}`}
-                        />
+                        <button type="button" data-testid={`settings-sidebar-item-${section.id}`} />
                       }
                       isActive={activeSection === section.id}
                       className={cn(
                         "h-9 gap-3 rounded-md px-3 text-[13px] font-normal text-foreground/85",
-                        "hover:bg-accent/70 data-[active=true]:bg-accent/70 data-[active=true]:text-foreground",
+                        "hover:bg-accent/70 data-[active=true]:bg-accent data-[active=true]:text-foreground",
                       )}
                       onClick={() => handleOpenSection(section.id)}
                     >

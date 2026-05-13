@@ -125,7 +125,7 @@ const CHAT_SELECTION_IGNORE_SELECTOR =
 const EMPTY_INVOCATION_DIFF_FILES: ReadonlyArray<InvocationDiffFile> = [];
 const INLINE_EDIT_DIFF_MAX_CHANGED_LINES = 300;
 const INLINE_EDIT_DIFF_MAX_CONTENT_CHARS = 120_000;
-const LEADING_PROVIDER_MENTION_PATTERN = /^([$/])([^\s]+)(?=\s|$)/;
+const LEADING_PROVIDER_MENTION_PATTERN = /^([$/@])([^\s]+)(?=\s|$)/;
 
 type AssistantArtifactKind = "document" | "image" | "markdown" | "slides" | "spreadsheet" | "pdf";
 
@@ -194,7 +194,7 @@ export interface MessagesTimelineProps {
 export interface UserMessageMentionDescriptor {
   mentionName: string;
   label: string;
-  type: "plugin" | "skill";
+  type: "plugin" | "skill" | "desktop-app";
   iconUrl?: string | undefined;
 }
 
@@ -305,7 +305,8 @@ function splitUserMessageProviderMentions(
     const match = LEADING_PROVIDER_MENTION_PATTERN.exec(remaining);
     if (!match?.[2]) break;
     const rawName = match[2];
-    const shortcut = match[1] === "/" ? parseLeadingShortcut(rawName) : null;
+    const marker = match[1];
+    const shortcut = marker === "/" ? parseLeadingShortcut(rawName) : null;
     if (shortcut) {
       segments.push({
         type: "shortcut",
@@ -319,11 +320,11 @@ function splitUserMessageProviderMentions(
       remaining = trimmedRemaining;
       continue;
     }
-    const descriptor = descriptorsByName.get(rawName.toLowerCase()) ?? {
-      mentionName: rawName,
-      label: rawName,
-      type: "plugin" as const,
-    };
+    const descriptor =
+      descriptorsByName.get(rawName.toLowerCase()) ??
+      (marker === "@"
+        ? { mentionName: rawName, label: rawName, type: "desktop-app" as const }
+        : { mentionName: rawName, label: rawName, type: "plugin" as const });
     segments.push({
       type: "mention",
       key: `mention:${offset}:${rawName}`,
@@ -347,7 +348,12 @@ const UserMessageMentionChip = memo(function UserMessageMentionChip(props: {
   const [failedIconUrl, setFailedIconUrl] = useState<string | null>(null);
   const failed =
     props.descriptor.iconUrl !== undefined && failedIconUrl === props.descriptor.iconUrl;
-  const Icon = props.descriptor.type === "plugin" ? PlugIcon : BoxIcon;
+  const Icon =
+    props.descriptor.type === "plugin"
+      ? PlugIcon
+      : props.descriptor.type === "desktop-app"
+        ? MousePointer2Icon
+        : BoxIcon;
 
   return (
     <span className="inline-flex align-middle items-center gap-1.5 rounded-md px-0.5 py-0.5 text-sm font-medium text-blue-500 dark:text-blue-400">
@@ -618,6 +624,7 @@ function workToneIcon(tone: TimelineWorkEntry["tone"]): {
 }
 
 function workEntryIcon(workEntry: TimelineWorkEntry): LucideIcon {
+  if (isComputerUseWorkEntry(workEntry)) return MousePointer2Icon;
   if (workEntry.requestKind === "command") return TerminalIcon;
   if (workEntry.requestKind === "file-read") return EyeIcon;
   if (workEntry.requestKind === "file-change") return SquarePenIcon;
@@ -662,6 +669,9 @@ function humanizeToolName(value: string): string {
 }
 
 function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
+  if (isComputerUseWorkEntry(workEntry)) {
+    return computerUseActionLabel(workEntry);
+  }
   if (isCommandWorkEntry(workEntry)) {
     return isActiveWorkEntry(workEntry) ? "Running" : "Ran command";
   }
@@ -679,6 +689,7 @@ function toolWorkEntryHeading(workEntry: TimelineWorkEntry): string {
 }
 
 function workEntryKindLabel(workEntry: TimelineWorkEntry): string | null {
+  if (isComputerUseWorkEntry(workEntry)) return null;
   if (workEntry.requestKind === "command") return "Approval";
   if (workEntry.requestKind === "file-read") return null;
   if (workEntry.requestKind === "file-change") return "Approval";
@@ -777,10 +788,92 @@ function workEntryToolName(workEntry: WorkLogEntry): string | null {
   const payload = workLogRecord(workEntry.payload);
   const data = workEntryDataRecord(workEntry);
   return (
-    workLogString(data?.toolName) ??
-    workLogString(data?.name) ??
-    workLogString(payload?.toolName)
+    workLogString(data?.toolName) ?? workLogString(data?.name) ?? workLogString(payload?.toolName)
   );
+}
+
+function normalizedComputerToolName(workEntry: WorkLogEntry): string | null {
+  const raw = [
+    workEntryToolName(workEntry),
+    workLogString(workEntryDataRecord(workEntry)?.tool),
+    workLogString(workLogRecord(workEntryDataRecord(workEntry)?.details)?.tool),
+    workEntry.toolTitle,
+    workEntry.label,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .join(" ")
+    .toLowerCase();
+  if (!raw.includes("computer") && !raw.includes("screenshot") && !raw.includes("visible_text")) {
+    return null;
+  }
+  const compact = raw.replace(/[^a-z0-9]+/g, "_");
+  const toolNames = [
+    "observe_app",
+    "launch_app",
+    "list_apps",
+    "list_windows",
+    "get_visible_text",
+    "list_elements",
+    "activate_element",
+    "double_click",
+    "move_mouse",
+    "type_text",
+    "screenshot",
+    "keypress",
+    "scroll",
+    "click",
+    "drag",
+    "wait",
+  ];
+  return toolNames.find((name) => compact.includes(name)) ?? null;
+}
+
+function isComputerUseWorkEntry(workEntry: WorkLogEntry): boolean {
+  const data = workEntryDataRecord(workEntry);
+  return (
+    normalizedComputerToolName(workEntry) !== null ||
+    workLogString(data?.providerNeutralType) === "computer_use"
+  );
+}
+
+function computerUseActionLabel(workEntry: WorkLogEntry): string {
+  const active = isActiveWorkEntry(workEntry);
+  switch (normalizedComputerToolName(workEntry)) {
+    case "observe_app":
+      return active ? "Observing app" : "Observed app";
+    case "launch_app":
+      return active ? "Launching app" : "Launched app";
+    case "screenshot":
+      return active ? "Capturing screenshot" : "Captured screenshot";
+    case "list_apps":
+      return active ? "Listing apps" : "Listed apps";
+    case "list_windows":
+      return active ? "Listing windows" : "Listed windows";
+    case "list_elements":
+      return active ? "Inspecting controls" : "Inspected controls";
+    case "get_visible_text":
+      return active ? "Reading visible text" : "Read visible text";
+    case "activate_element":
+      return active ? "Activating element" : "Activated element";
+    case "click":
+      return active ? "Clicking" : "Clicked";
+    case "double_click":
+      return active ? "Double-clicking" : "Double-clicked";
+    case "move_mouse":
+      return active ? "Moving mouse" : "Moved mouse";
+    case "drag":
+      return active ? "Dragging" : "Dragged";
+    case "scroll":
+      return active ? "Scrolling" : "Scrolled";
+    case "type_text":
+      return active ? "Typing text" : "Typed text";
+    case "keypress":
+      return active ? "Pressing keys" : "Pressed keys";
+    case "wait":
+      return active ? "Waiting for app" : "Waited for app";
+    default:
+      return active ? "Using computer" : "Used computer";
+  }
 }
 
 function inputStringForKeys(
@@ -810,6 +903,7 @@ function workEntryInputPath(workEntry: WorkLogEntry): string | null {
 
 function workEntryStatusLabel(workEntry: WorkLogEntry): string {
   if (isActiveWorkEntry(workEntry) && isWebSearchWorkEntry(workEntry)) return "Searching";
+  if (isActiveWorkEntry(workEntry) && isComputerUseWorkEntry(workEntry)) return "Working";
   if (isActiveWorkEntry(workEntry)) return isEditWorkEntry(workEntry) ? "Editing" : "Running";
   return workEntry.tone === "error" ? "Failed" : "Success";
 }
@@ -834,7 +928,102 @@ function commandPreview(command: string): string {
   return `${trimmed.slice(0, 177).trimEnd()}...`;
 }
 
+function computerUsePreview(workEntry: WorkLogEntry): string | null {
+  const data = workEntryDataRecord(workEntry);
+  const details =
+    workLogRecord(data?.details) ?? workLogRecord(workLogRecord(data?.structuredContent)?.details);
+  const target = workLogRecord(details?.target);
+  const app = workLogString(target?.app) ?? workLogString(target?.appName);
+  const windowTitle = workLogString(target?.windowTitle);
+  if (app && windowTitle) return `${app} - ${windowTitle}`;
+  if (app) return app;
+  const input = workEntryInputRecord(workEntry);
+  return inputStringForKeys(input, ["app", "windowTitle", "elementRef", "text"]);
+}
+
+function computerUseDetailsRecord(workEntry: WorkLogEntry): Record<string, unknown> | null {
+  const data = workEntryDataRecord(workEntry);
+  const directDetails = workLogRecord(data?.details);
+  const structuredDetails = workLogRecord(workLogRecord(data?.structuredContent)?.details);
+  return directDetails ?? structuredDetails;
+}
+
+function computerUseSessionRecord(workEntry: WorkLogEntry): Record<string, unknown> | null {
+  return workLogRecord(computerUseDetailsRecord(workEntry)?.session);
+}
+
+function computerUseInputModeLabel(workEntry: WorkLogEntry): string | null {
+  const inputMode = workLogString(computerUseSessionRecord(workEntry)?.inputMode);
+  switch (inputMode) {
+    case "semantic":
+      return "UIA";
+    case "virtual-cursor":
+      return "Virtual cursor";
+    case "global-input":
+      return "Real input";
+    default:
+      return null;
+  }
+}
+
+function computerUseFallbackRequired(workEntry: WorkLogEntry): boolean {
+  return computerUseSessionRecord(workEntry)?.fallbackRequired === true;
+}
+
+function computerUseGhostCursor(workEntry: WorkLogEntry): { x: number; y: number } | null {
+  const cursor = workLogRecord(computerUseDetailsRecord(workEntry)?.ghostCursor);
+  const x = cursor?.x;
+  const y = cursor?.y;
+  if (typeof x !== "number" || typeof y !== "number") return null;
+  return { x, y };
+}
+
+type ComputerUseCapturePreview = {
+  url: string;
+  captureId?: string;
+  width?: number;
+  height?: number;
+};
+
+function collectComputerUseCaptures(
+  value: unknown,
+  captures: ComputerUseCapturePreview[] = [],
+  seen = new Set<unknown>(),
+  depth = 0,
+): ComputerUseCapturePreview[] {
+  if (depth > 6 || value === null || value === undefined || seen.has(value)) return captures;
+  if (typeof value !== "object") return captures;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const entry of value) collectComputerUseCaptures(entry, captures, seen, depth + 1);
+    return captures;
+  }
+  const record = value as Record<string, unknown>;
+  const url = workLogString(record.url) ?? workLogString(record.previewUrl);
+  if (url && url.startsWith("/attachments/")) {
+    const capture: ComputerUseCapturePreview = {
+      url,
+    };
+    const captureId = workLogString(record.captureId);
+    if (captureId) capture.captureId = captureId;
+    if (typeof record.width === "number") capture.width = record.width;
+    if (typeof record.height === "number") capture.height = record.height;
+    captures.push(capture);
+  }
+  for (const child of Object.values(record)) {
+    collectComputerUseCaptures(child, captures, seen, depth + 1);
+  }
+  return captures;
+}
+
+function computerUseCaptures(workEntry: WorkLogEntry): ComputerUseCapturePreview[] {
+  return collectComputerUseCaptures(workEntry.payload);
+}
+
 function workEntryPreview(workEntry: WorkLogEntry): string | null {
+  if (isComputerUseWorkEntry(workEntry)) {
+    return computerUsePreview(workEntry);
+  }
   if (isWebSearchWorkEntry(workEntry)) {
     return (
       workEntry.webSearchQueries?.[0] ??
@@ -1005,6 +1194,10 @@ function workGroupSummary(entries: ReadonlyArray<WorkLogEntry>, fallbackLabel: s
     }
     const count = Math.max(items.length, entries.length);
     return `Searched web ${count} ${count === 1 ? "time" : "times"}`;
+  }
+  if (entries.every(isComputerUseWorkEntry)) {
+    if (entries.some(isActiveWorkEntry)) return "Using computer";
+    return "Used computer";
   }
   if (entries.every(isCommandWorkEntry)) {
     return `Ran ${entries.length} ${entries.length === 1 ? "command" : "commands"}`;
@@ -1857,10 +2050,7 @@ const WorkLogEntryLine = memo(function WorkLogEntryLine(props: {
         </span>
       ) : null}
       {editPath ? (
-        <span
-          className="min-w-0 truncate text-sm text-info-foreground"
-          title={editPath}
-        >
+        <span className="min-w-0 truncate text-sm text-info-foreground" title={editPath}>
           {basenameOfWorkPath(editPath)}
         </span>
       ) : preview ? (
@@ -1932,8 +2122,7 @@ const WorkLogEntryDetail = memo(function WorkLogEntryDetail(props: {
   const checkpointDiffQuery = useQuery(
     checkpointDiffQueryOptions({
       threadId: props.threadId,
-      fromTurnCount:
-        checkpointTurnCount !== null ? Math.max(0, checkpointTurnCount - 1) : null,
+      fromTurnCount: checkpointTurnCount !== null ? Math.max(0, checkpointTurnCount - 1) : null,
       toTurnCount: checkpointTurnCount,
       cacheScope: `work-log:${workEntry.id}`,
       enabled:
@@ -1948,7 +2137,9 @@ const WorkLogEntryDetail = memo(function WorkLogEntryDetail(props: {
       return [];
     }
     const invocationFiles = invocationDiffFiles
-      .map((file) => toRenderableInvocationDiffFile(file, `work-detail:${workEntry.id}:${file.path}`))
+      .map((file) =>
+        toRenderableInvocationDiffFile(file, `work-detail:${workEntry.id}:${file.path}`),
+      )
       .filter((file): file is RenderableInvocationDiffFile => file !== null);
     if (invocationFiles.length > 0) {
       return invocationFiles;
@@ -1978,8 +2169,7 @@ const WorkLogEntryDetail = memo(function WorkLogEntryDetail(props: {
         const normalizedEditPath = normalizeWorkPathForCompare(editPath);
         return (
           normalizedFilePath === normalizedEditPath ||
-          basenameOfWorkPath(file.path).toLowerCase() ===
-            basenameOfWorkPath(editPath).toLowerCase()
+          basenameOfWorkPath(file.path).toLowerCase() === basenameOfWorkPath(editPath).toLowerCase()
         );
       });
   }, [
@@ -2009,10 +2199,7 @@ const WorkLogEntryDetail = memo(function WorkLogEntryDetail(props: {
         ...renderableDiffFiles.map((file) => [file.path, file] as const),
         ...(workEntry.changedFiles ?? []).map(
           (path) =>
-            [
-              path,
-              { path, additions: 0, deletions: 0 } satisfies InvocationDiffFile,
-            ] as const,
+            [path, { path, additions: 0, deletions: 0 } satisfies InvocationDiffFile] as const,
         ),
       ].map(([path, file]) => [path, file] as const),
     ).values(),
@@ -2037,6 +2224,83 @@ const WorkLogEntryDetail = memo(function WorkLogEntryDetail(props: {
         homeDirectory={props.homeDirectory}
         workspaceRoot={props.workspaceRoot}
       />
+    );
+  }
+
+  if (isComputerUseWorkEntry(workEntry)) {
+    const captures = computerUseCaptures(workEntry);
+    const preview = computerUsePreview(workEntry);
+    const firstCapture = captures[0];
+    const inputMode = computerUseInputModeLabel(workEntry);
+    const fallbackRequired = computerUseFallbackRequired(workEntry);
+    const ghostCursor = computerUseGhostCursor(workEntry);
+    return (
+      <div className="overflow-hidden rounded-lg border border-border/50 bg-card/45">
+        <div className="flex min-w-0 items-center justify-between gap-2 px-3 py-2">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="min-w-0 truncate text-sm text-foreground/86">
+              {preview ?? computerUseActionLabel(workEntry)}
+            </span>
+            {inputMode ? (
+              <span className="shrink-0 rounded border border-border/45 px-1.5 py-0.5 text-[11px] leading-none text-muted-foreground/80">
+                {inputMode}
+              </span>
+            ) : null}
+            {fallbackRequired ? (
+              <span className="shrink-0 rounded border border-amber-400/30 bg-amber-400/10 px-1.5 py-0.5 text-[11px] leading-none text-amber-300">
+                Needs approval
+              </span>
+            ) : null}
+          </div>
+          <span className={cn("shrink-0 text-sm", workEntryStatusClass(workEntry))}>
+            {workEntryStatusLabel(workEntry)}
+          </span>
+        </div>
+        {firstCapture ? (
+          <button
+            type="button"
+            className="relative block w-full border-t border-border/45 bg-background/35 p-2 text-left"
+            onClick={() => {
+              const captureId = firstCapture.captureId ?? firstCapture.url;
+              const previewModel = buildExpandedImagePreview(
+                [
+                  {
+                    id: captureId,
+                    name: "T3 Computer Use screenshot",
+                    previewUrl: firstCapture.url,
+                  },
+                ],
+                captureId,
+              );
+              if (previewModel) props.onImageExpand(previewModel);
+            }}
+          >
+            <img
+              src={firstCapture.url}
+              alt="T3 Computer Use screenshot"
+              className="max-h-[360px] w-full rounded-md object-contain"
+              loading="lazy"
+              onLoad={props.onImageLoad}
+            />
+            {ghostCursor && firstCapture.width && firstCapture.height ? (
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute size-4 -translate-x-1 -translate-y-1 rotate-[-18deg] text-sky-300 drop-shadow-[0_1px_4px_rgba(0,0,0,0.9)]"
+                style={{
+                  left: `${Math.max(0, Math.min(100, (ghostCursor.x / firstCapture.width) * 100))}%`,
+                  top: `${Math.max(0, Math.min(100, (ghostCursor.y / firstCapture.height) * 100))}%`,
+                }}
+              >
+                <MousePointer2Icon className="size-4 fill-sky-300/50" />
+              </span>
+            ) : null}
+          </button>
+        ) : workEntry.detail ? (
+          <pre className="max-h-[320px] overflow-auto border-t border-border/45 px-3 py-2 font-mono text-[12px] leading-5 text-foreground/86">
+            {workEntry.detail}
+          </pre>
+        ) : null}
+      </div>
     );
   }
 
@@ -2724,12 +2988,12 @@ const GeneratedImageWorkPreview = memo(function GeneratedImageWorkPreview(props:
 
 export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTimelineProps) {
   const {
-  isFocusedPane = true,
-  hasMessages,
-  isWorking,
-  activeTurnInProgress,
-  threadId,
-  activeTurnStartedAt,
+    isFocusedPane = true,
+    hasMessages,
+    isWorking,
+    activeTurnInProgress,
+    threadId,
+    activeTurnStartedAt,
     scrollContainer,
     timelineEntries,
     completionDividerBeforeEntryId,

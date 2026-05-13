@@ -70,7 +70,10 @@ export function useThreadHandoff() {
         createdAt,
       });
 
-      const snapshot = await api.orchestration.getSnapshot();
+      const snapshot = await api.orchestration.getSnapshot({
+        mode: "focused",
+        threadId: nextThreadId,
+      });
       syncServerReadModel(snapshot);
       await navigate({
         to: "/$threadId",

@@ -25,6 +25,9 @@ export const ORCHESTRATION_WS_METHODS = {
   replayEvents: "orchestration.replayEvents",
 } as const;
 
+export const OrchestrationSnapshotMode = Schema.Literals(["full", "focused", "bootstrap"]);
+export type OrchestrationSnapshotMode = typeof OrchestrationSnapshotMode.Type;
+
 export const ORCHESTRATION_WS_CHANNELS = {
   domainEvent: "orchestration.domainEvent",
 } as const;
@@ -1542,7 +1545,10 @@ export const DispatchResult = Schema.Struct({
 });
 export type DispatchResult = typeof DispatchResult.Type;
 
-export const OrchestrationGetSnapshotInput = Schema.Struct({});
+export const OrchestrationGetSnapshotInput = Schema.Struct({
+  mode: Schema.optional(OrchestrationSnapshotMode),
+  threadId: Schema.optional(ThreadId),
+});
 export type OrchestrationGetSnapshotInput = typeof OrchestrationGetSnapshotInput.Type;
 const OrchestrationGetSnapshotResult = OrchestrationReadModel;
 export type OrchestrationGetSnapshotResult = typeof OrchestrationGetSnapshotResult.Type;

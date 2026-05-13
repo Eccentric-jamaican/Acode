@@ -27,6 +27,7 @@ import {
   ThreadId,
   TerminalEvent,
   type UploadChatAttachment,
+  type ComputerUseSettingsPatch,
   WS_CHANNELS,
   WS_METHODS,
   WebSocketRequest,
@@ -99,6 +100,11 @@ import { ServerRuntimeStartup } from "./serverRuntimeStartup";
 import { suggestNewThreadTasks } from "./newThreadSuggestions";
 import { CodexAdapter } from "./provider/Services/CodexAdapter.ts";
 import { ServerSettingsService } from "./serverSettings";
+import {
+  COMPUTER_USE_APP_ICON_ROUTE_PATH,
+  listComputerUseApps,
+  resolveComputerUseAppIcon,
+} from "./computerUseService";
 
 /**
  * ServerShape - Service API for server lifecycle control.
@@ -573,6 +579,31 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
           return;
         }
 
+        if (url.pathname === COMPUTER_USE_APP_ICON_ROUTE_PATH) {
+          const pidParam = url.searchParams.get("pid");
+          const pid = pidParam ? Number(pidParam) : undefined;
+          const iconBytes = yield* Effect.promise(() =>
+            resolveComputerUseAppIcon({
+              name: url.searchParams.get("name") ?? undefined,
+              launchId: url.searchParams.get("launchId") ?? undefined,
+              ...(pid !== undefined && Number.isFinite(pid) ? { pid } : {}),
+            }).catch(() => null),
+          );
+          if (!iconBytes) {
+            respond(404, { "Content-Type": "text/plain" }, "Not Found");
+            return;
+          }
+          respond(
+            200,
+            {
+              "Content-Type": "image/png",
+              "Cache-Control": "public, max-age=86400",
+            },
+            iconBytes,
+          );
+          return;
+        }
+
         if (url.pathname.startsWith(ATTACHMENTS_ROUTE_PREFIX)) {
           const rawRelativePath = url.pathname.slice(ATTACHMENTS_ROUTE_PREFIX.length);
           const normalizedRelativePath = normalizeAttachmentRelativePath(rawRelativePath);
@@ -993,7 +1024,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const routeRequest = Effect.fnUntraced(function* (request: WebSocketRequest) {
     switch (request.body._tag) {
       case ORCHESTRATION_WS_METHODS.getSnapshot:
-        return yield* projectionReadModelQuery.getSnapshot();
+        return yield* projectionReadModelQuery.getSnapshot(stripRequestTag(request.body));
 
       case ORCHESTRATION_WS_METHODS.dispatchCommand: {
         const { command } = request.body;
@@ -1434,6 +1465,38 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         const settings = yield* serverSettings.updateSettings(body);
         yield* providerRegistry.refresh("opencode").pipe(Effect.ignore);
         return settings;
+      }
+
+      case WS_METHODS.computerUseListApps: {
+        const settings = yield* serverSettings.getSettings;
+        if (!settings.computerUse.enabled) {
+          return {
+            apps: [],
+            status: {
+              available: false,
+              reason: "disabled",
+              detail: "T3 Computer Use is disabled in settings.",
+            },
+          };
+        }
+        return yield* Effect.tryPromise({
+          try: () => listComputerUseApps({ iconBaseUrl: `http://localhost:${port}` }),
+          catch: (cause) =>
+            new RouteRequestError({
+              message: `Failed to list desktop apps for T3 Computer Use: ${String(cause)}`,
+            }),
+        });
+      }
+
+      case WS_METHODS.computerUseGetSettings: {
+        const settings = yield* serverSettings.getSettings;
+        return settings.computerUse;
+      }
+
+      case WS_METHODS.computerUseUpdateSettings: {
+        const body = stripRequestTag(request.body) as ComputerUseSettingsPatch;
+        const settings = yield* serverSettings.updateSettings({ computerUse: body });
+        return settings.computerUse;
       }
 
       case WS_METHODS.providerGetComposerCapabilities: {

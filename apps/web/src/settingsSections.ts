@@ -4,13 +4,20 @@ export const SETTINGS_SECTION_IDS = {
   models: "models",
   responses: "responses",
   browserUse: "browser-use",
+  computerUse: "computer-use",
   keybindings: "keybindings",
   safety: "safety",
   archived: "archived",
 } as const;
 
-export type SettingsSectionId =
-  (typeof SETTINGS_SECTION_IDS)[keyof typeof SETTINGS_SECTION_IDS];
+export type SettingsSectionId = (typeof SETTINGS_SECTION_IDS)[keyof typeof SETTINGS_SECTION_IDS];
+
+export function normalizeSettingsSectionId(value: unknown): SettingsSectionId {
+  return typeof value === "string" &&
+    (Object.values(SETTINGS_SECTION_IDS) as string[]).includes(value)
+    ? (value as SettingsSectionId)
+    : SETTINGS_SECTION_IDS.appearance;
+}
 
 export const SETTINGS_SIDEBAR_SECTIONS: ReadonlyArray<{
   id: SettingsSectionId;
@@ -21,6 +28,7 @@ export const SETTINGS_SIDEBAR_SECTIONS: ReadonlyArray<{
   { id: SETTINGS_SECTION_IDS.models, label: "Models" },
   { id: SETTINGS_SECTION_IDS.responses, label: "Responses" },
   { id: SETTINGS_SECTION_IDS.browserUse, label: "Browser use" },
+  { id: SETTINGS_SECTION_IDS.computerUse, label: "Computer use" },
   { id: SETTINGS_SECTION_IDS.keybindings, label: "Keybindings" },
   { id: SETTINGS_SECTION_IDS.safety, label: "Safety" },
   { id: SETTINGS_SECTION_IDS.archived, label: "Archived" },

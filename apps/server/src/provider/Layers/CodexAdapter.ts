@@ -18,6 +18,7 @@ import {
   RuntimeTaskId,
   ProviderApprovalDecision,
   ProviderItemId,
+  ProjectId,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
@@ -40,6 +41,7 @@ import {
   CodexAppServerManager,
   type CodexAppServerStartSessionInput,
 } from "../../codexAppServerManager.ts";
+import { createCodexHomeOverlay } from "../../codexHomeOverlay.ts";
 import { isNonFatalCodexErrorMessage } from "../../codexErrorClassification.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
@@ -49,6 +51,7 @@ import { discoverPlugins, readDiscoveredPlugin } from "./PluginDiscovery.ts";
 import { discoverSkillsForCwd } from "./SkillDiscovery.ts";
 
 const PROVIDER = "codex" as const;
+const T3_COMPUTER_OVERLAY_PROJECT_ID = ProjectId.makeUnsafe("t3-computer");
 
 export interface CodexAdapterLiveOptions {
   readonly manager?: CodexAppServerManager;
@@ -1411,12 +1414,34 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         );
       }
 
+      const overlayHomePath = createCodexHomeOverlay({
+        threadId: input.threadId,
+        projectId: T3_COMPUTER_OVERLAY_PROJECT_ID,
+        runtimeMode: input.runtimeMode,
+        stateDir: serverConfig.stateDir,
+        preferredHomePath: input.providerOptions?.codex?.homePath,
+      });
+      const codexProviderOptions =
+        input.providerOptions?.codex || overlayHomePath
+          ? {
+              ...input.providerOptions?.codex,
+              ...(overlayHomePath ? { homePath: overlayHomePath } : {}),
+            }
+          : undefined;
+
       const managerInput: CodexAppServerStartSessionInput = {
         threadId: input.threadId,
         provider: "codex",
         ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
         ...(input.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
-        ...(input.providerOptions !== undefined ? { providerOptions: input.providerOptions } : {}),
+        ...(input.providerOptions !== undefined || codexProviderOptions !== undefined
+          ? {
+              providerOptions: {
+                ...input.providerOptions,
+                ...(codexProviderOptions ? { codex: codexProviderOptions } : {}),
+              },
+            }
+          : {}),
         runtimeMode: input.runtimeMode,
         ...(input.model !== undefined ? { model: input.model } : {}),
         ...(input.modelOptions?.codex?.fastMode ? { serviceTier: "fast" } : {}),

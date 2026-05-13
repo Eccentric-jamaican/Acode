@@ -8,7 +8,10 @@ const RELATIVE_FILE_PATH_PATTERN = /^[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+(?::\d
 const RELATIVE_FILE_NAME_PATTERN = /^[A-Za-z0-9._-]+\.[A-Za-z0-9_-]+(?::\d+){0,2}$/;
 const POSITION_SUFFIX_PATTERN = /:\d+(?::\d+)?$/;
 const POSITION_ONLY_PATTERN = /^\d+(?::\d+)?$/;
+const TRAILING_PATH_SEPARATOR_PATTERN = /[\\/]$/;
+const TRAILING_URL_PUNCTUATION_PATTERN = /[),.;!?]+$/;
 const MARKDOWN_LINK_LITERAL_PATTERN = /^\[([^\]]+)\]\(([^)]+)\)$/;
+export type MarkdownPathKind = "file" | "directory";
 const POSIX_FILE_ROOT_PREFIXES = [
   "/Users/",
   "/home/",
@@ -103,15 +106,46 @@ function stripEditorPositionSuffix(path: string): string {
   return path.replace(POSITION_SUFFIX_PATTERN, "");
 }
 
+function stripTrailingUrlPunctuation(value: string): string {
+  let output = value.trim();
+  while (TRAILING_URL_PUNCTUATION_PATTERN.test(output)) {
+    const nextOutput = output.replace(TRAILING_URL_PUNCTUATION_PATTERN, "");
+    if (nextOutput.length === output.length) break;
+    output = nextOutput;
+  }
+  return output;
+}
+
+function wordsFromSlug(value: string): string {
+  const withoutGitSuffix = value.replace(/\.git$/i, "");
+  const spaced = withoutGitSuffix
+    .replace(/[-_.]+/g, " ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/(\d)([A-Za-z])/g, "$1 $2")
+    .trim();
+
+  if (spaced.length === 0) return withoutGitSuffix;
+  return spaced.replace(/\b([a-z])/g, (match) => match.toUpperCase());
+}
+
 function basenameOfPath(path: string): string {
   const withoutPosition = stripEditorPositionSuffix(path).replaceAll("\\", "/");
   const segments = withoutPosition.split("/").filter(Boolean);
   return segments.at(-1) ?? withoutPosition;
 }
 
+function basenameLooksLikeFile(path: string): boolean {
+  const basename = basenameOfPath(path);
+  if (basename.length === 0) return false;
+  if (basename.startsWith(".") && !basename.slice(1).includes(".")) return false;
+  return /\.[A-Za-z0-9_-]+$/.test(basename);
+}
+
 function normalizeForPathComparison(path: string): string {
   const normalized = path.replaceAll("\\", "/").replace(/\/+$/, "");
-  return /^[A-Za-z]:/.test(normalized) ? normalized[0]!.toLowerCase() + normalized.slice(1) : normalized;
+  return /^[A-Za-z]:/.test(normalized)
+    ? normalized[0]!.toLowerCase() + normalized.slice(1)
+    : normalized;
 }
 
 export function parseMarkdownFileLinkLiteral(
@@ -127,6 +161,42 @@ export function parseMarkdownFileLinkLiteral(
   };
 }
 
+export function parseMarkdownGitHubLink(
+  value: string | undefined,
+): { href: string; label: string } | null {
+  if (!value) return null;
+  const href = stripTrailingUrlPunctuation(value);
+  let url: URL;
+  try {
+    url = new URL(href);
+  } catch {
+    return null;
+  }
+
+  const hostname = url.hostname.toLowerCase();
+  if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+  if (hostname !== "github.com" && hostname !== "www.github.com") return null;
+
+  const segments = url.pathname.split("/").filter(Boolean).map(safeDecode);
+  const [owner, repo, section, ...rest] = segments;
+  if (!owner || !repo) return null;
+
+  const repoLabel = wordsFromSlug(repo);
+  if (section === "releases" && rest[0] === "tag" && rest[1]) {
+    return { href, label: `${repoLabel} ${rest[1]}` };
+  }
+  if ((section === "pull" || section === "issues") && rest[0]) {
+    return { href, label: `${repoLabel} #${rest[0]}` };
+  }
+  if (section === "commit" && rest[0]) {
+    return { href, label: `${repoLabel} ${rest[0].slice(0, 7)}` };
+  }
+  if ((section === "tree" || section === "blob") && rest[0]) {
+    return { href, label: `${repoLabel} ${rest[0]}` };
+  }
+  return { href, label: `${owner}/${repo.replace(/\.git$/i, "")}` };
+}
+
 export function normalizeMarkdownFileLinkLabel(
   label: string | undefined,
   targetPath: string,
@@ -138,6 +208,15 @@ export function normalizeMarkdownFileLinkLabel(
   return normalizedLabel && normalizedLabel.length > 0
     ? normalizedLabel
     : basenameOfPath(targetPath);
+}
+
+export function inferMarkdownPathKind(path: string | undefined): MarkdownPathKind {
+  const rawPath = path?.trim() ?? "";
+  const trimmedPath = stripSearchAndHash(rawPath).path.trim();
+  if (trimmedPath.length === 0) return "file";
+  if (POSITION_SUFFIX_PATTERN.test(trimmedPath)) return "file";
+  if (TRAILING_PATH_SEPARATOR_PATTERN.test(trimmedPath)) return "directory";
+  return basenameLooksLikeFile(trimmedPath) ? "file" : "directory";
 }
 
 export function resolveMarkdownFileLinkTarget(

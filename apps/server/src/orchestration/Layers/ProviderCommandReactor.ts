@@ -78,6 +78,7 @@ const PROVIDER_TURN_START_TIMEOUT = Duration.minutes(2);
 const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 const WORKTREE_BRANCH_PREFIX = "t3code";
 const TEMP_WORKTREE_BRANCH_PATTERN = new RegExp(`^${WORKTREE_BRANCH_PREFIX}\\/[0-9a-f]{8}$`);
+const COMPUTER_USE_APP_TARGET_MARKER = "T3 Computer Use app target selected by the user:";
 
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim().length > 0) {
@@ -107,6 +108,19 @@ function isUnknownPendingApprovalRequestError(error: unknown): boolean {
 
 function isTemporaryWorktreeBranch(branch: string): boolean {
   return TEMP_WORKTREE_BRANCH_PATTERN.test(branch.trim().toLowerCase());
+}
+
+function isComputerUseAppTargetMessage(messageText: string): boolean {
+  return messageText.includes(COMPUTER_USE_APP_TARGET_MARKER);
+}
+
+function hasT3ComputerMcpResumeCursor(resumeCursor: unknown): boolean {
+  return (
+    Boolean(resumeCursor) &&
+    typeof resumeCursor === "object" &&
+    !Array.isArray(resumeCursor) &&
+    (resumeCursor as { readonly t3ComputerMcp?: unknown }).t3ComputerMcp === true
+  );
 }
 
 function buildGeneratedWorktreeBranchName(raw: string): string {
@@ -210,6 +224,7 @@ const make = Effect.gen(function* () {
       readonly model?: string;
       readonly modelOptions?: ProviderModelOptions;
       readonly serviceTier?: ProviderServiceTier | null;
+      readonly requiresComputerUseTools?: boolean;
     },
   ) {
     const readModel = yield* orchestrationEngine.getReadModel();
@@ -287,8 +302,18 @@ const make = Effect.gen(function* () {
         options?.model !== undefined && options.model !== activeSession?.model;
       const shouldRestartForModelChange =
         modelChanged && sessionModelSwitch === "restart-session";
+      const shouldRestartForComputerUseTools =
+        options?.requiresComputerUseTools === true &&
+        (preferredProvider ?? currentProvider) === "codex" &&
+        activeSession !== undefined &&
+        !hasT3ComputerMcpResumeCursor(activeSession.resumeCursor);
 
-      if (!runtimeModeChanged && !providerChanged && !shouldRestartForModelChange) {
+      if (
+        !runtimeModeChanged &&
+        !providerChanged &&
+        !shouldRestartForModelChange &&
+        !shouldRestartForComputerUseTools
+      ) {
         return existingSessionThreadId;
       }
 
@@ -296,6 +321,9 @@ const make = Effect.gen(function* () {
         providerChanged || shouldRestartForModelChange
           ? undefined
           : (activeSession?.resumeCursor ?? undefined);
+      if (shouldRestartForComputerUseTools && activeSession) {
+        yield* providerService.stopSession({ threadId });
+      }
       yield* Effect.logInfo("provider command reactor restarting provider session", {
         threadId,
         existingSessionThreadId,
@@ -307,6 +335,7 @@ const make = Effect.gen(function* () {
         providerChanged,
         modelChanged,
         shouldRestartForModelChange,
+        shouldRestartForComputerUseTools,
         hasResumeCursor: resumeCursor !== undefined,
       });
       const restartedSession = yield* startProviderSession({
@@ -351,6 +380,9 @@ const make = Effect.gen(function* () {
       ...(input.model !== undefined ? { model: input.model } : {}),
       ...(input.serviceTier !== undefined ? { serviceTier: input.serviceTier } : {}),
       ...(input.modelOptions !== undefined ? { modelOptions: input.modelOptions } : {}),
+      ...(isComputerUseAppTargetMessage(input.messageText)
+        ? { requiresComputerUseTools: true }
+        : {}),
     });
     const normalizedInput = toNonEmptyProviderInput(input.messageText);
     const normalizedAttachments = input.attachments ?? [];

@@ -5,6 +5,7 @@ export default defineConfig({
     "src/index.ts",
     "src/browserMcpServer.ts",
     "src/browserUseClient.mjs",
+    "src/computerMcpServer.ts",
     "src/imagegenMcpServer.ts",
   ],
   format: ["esm", "cjs"],

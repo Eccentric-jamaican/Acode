@@ -53,6 +53,13 @@
       "import": "./src/serverSettings.ts",
       "default": "./src/serverSettings.ts"
     },
+    "./computerUsePermissions": {
+      "types": "./src/computerUsePermissions.ts",
+      "development": "./src/computerUsePermissions.ts",
+      "browser": "./src/computerUsePermissions.ts",
+      "import": "./src/computerUsePermissions.ts",
+      "default": "./src/computerUsePermissions.ts"
+    },
     "./subagents": {
       "types": "./src/subagents.ts",
       "development": "./src/subagents.ts",

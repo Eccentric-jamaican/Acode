@@ -345,6 +345,29 @@ describe("BrowserRuntimeRegistry", () => {
     expect(tab.view.webContents.setZoomFactorCalls).toHaveLength(0);
   });
 
+  it("clears attachment state if the window is already destroyed while detaching", async () => {
+    const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
+    const removeChildView = vi.fn(() => {
+      throw new Error("Object has been destroyed");
+    });
+    const window = {
+      isDestroyed: () => false,
+      contentView: {
+        addChildView: vi.fn(),
+        removeChildView,
+      },
+    };
+    const projectId = ProjectId.makeUnsafe("project-destroyed-window");
+
+    registry.setWindow(window as never);
+    await registry.open(projectId, { x: 10, y: 20, width: 420, height: 320 });
+
+    expect(() => registry.setWindow(null)).not.toThrow();
+    expect(removeChildView).toHaveBeenCalledTimes(1);
+    expect((registry as any).attachedProjectId).toBeNull();
+    expect((registry as any).attachedTabId).toBeNull();
+  });
+
   it("applies requested pane bounds directly to the native view", async () => {
     const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
     const window = {

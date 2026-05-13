@@ -68,6 +68,7 @@ import {
   ServerSuggestNewThreadTasksInput,
   ServerUpdateSettingsInput,
 } from "./server";
+import { ComputerUseListAppsInput, ComputerUseSettingsPatch } from "./computerUse";
 
 // ── WebSocket RPC Method Names ───────────────────────────────────────
 
@@ -125,6 +126,11 @@ export const WS_METHODS = {
   serverLogoutProvider: "server.logoutProvider",
   serverSuggestNewThreadTasks: "server.suggestNewThreadTasks",
   serverUpdateSettings: "server.updateSettings",
+
+  // Computer Use
+  computerUseListApps: "computerUse.listApps",
+  computerUseGetSettings: "computerUse.getSettings",
+  computerUseUpdateSettings: "computerUse.updateSettings",
 
   // Provider discovery
   providerGetComposerCapabilities: "provider.getComposerCapabilities",
@@ -225,6 +231,11 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.serverLogoutProvider, ServerLogoutProviderInput),
   tagRequestBody(WS_METHODS.serverSuggestNewThreadTasks, ServerSuggestNewThreadTasksInput),
   tagRequestBody(WS_METHODS.serverUpdateSettings, ServerUpdateSettingsInput),
+
+  // Computer Use
+  tagRequestBody(WS_METHODS.computerUseListApps, ComputerUseListAppsInput),
+  tagRequestBody(WS_METHODS.computerUseGetSettings, Schema.Struct({})),
+  tagRequestBody(WS_METHODS.computerUseUpdateSettings, ComputerUseSettingsPatch),
 
   // Provider discovery
   tagRequestBody(WS_METHODS.providerGetComposerCapabilities, ProviderGetComposerCapabilitiesInput),

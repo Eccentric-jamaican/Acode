@@ -1,4 +1,5 @@
 import { Option, Schema } from "effect";
+import { ComputerUseSettings, ComputerUseSettingsPatch } from "./computerUse";
 
 export const OpenCodeSettings = Schema.Struct({
   enabled: Schema.Boolean.pipe(Schema.withConstructorDefault(() => Option.some(true))),
@@ -21,6 +22,7 @@ export const ServerSettings = Schema.Struct({
       }),
     ),
   ),
+  computerUse: ComputerUseSettings.pipe(Schema.withConstructorDefault(() => Option.some({}))),
 });
 export type ServerSettings = typeof ServerSettings.Type;
 
@@ -40,6 +42,7 @@ export const ServerSettingsPatch = Schema.Struct({
       ),
     }),
   ),
+  computerUse: Schema.optional(ComputerUseSettingsPatch),
 });
 export type ServerSettingsPatch = typeof ServerSettingsPatch.Type;
 

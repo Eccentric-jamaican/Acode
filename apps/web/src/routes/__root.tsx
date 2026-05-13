@@ -1,4 +1,4 @@
-import { ThreadId } from "@t3tools/contracts";
+import { ThreadId, type OrchestrationGetSnapshotInput } from "@t3tools/contracts";
 import {
   Outlet,
   createRootRouteWithContext,
@@ -139,8 +139,26 @@ function errorDetails(error: unknown): string {
   }
 }
 
+function activeThreadIdFromPathname(pathname: string): ThreadId | undefined {
+  const firstSegment = pathname.split("/").find(Boolean);
+  if (!firstSegment || firstSegment === "settings") {
+    return undefined;
+  }
+  return ThreadId.makeUnsafe(decodeURIComponent(firstSegment));
+}
+
+function snapshotInputForLocation(pathname: string): OrchestrationGetSnapshotInput {
+  const search = typeof window === "undefined" ? "" : window.location.search;
+  if (new URLSearchParams(search).has("splitViewId")) {
+    return { mode: "full" };
+  }
+  const activeThreadId = activeThreadIdFromPathname(pathname);
+  return activeThreadId ? { mode: "focused", threadId: activeThreadId } : { mode: "bootstrap" };
+}
+
 function EventRouter() {
   const syncServerReadModel = useStore((store) => store.syncServerReadModel);
+  const setHydrationStatus = useStore((store) => store.setHydrationStatus);
   const setHydrationError = useStore((store) => store.setHydrationError);
   const syncErrorInbox = useStore((store) => store.syncErrorInbox);
   const upsertErrorInboxEntry = useStore((store) => store.upsertErrorInboxEntry);
@@ -170,7 +188,9 @@ function EventRouter() {
     let pending = false;
 
     const flushSnapshotSync = async (): Promise<void> => {
-      const snapshot = await api.orchestration.getSnapshot();
+      const snapshot = await api.orchestration.getSnapshot(
+        snapshotInputForLocation(pathnameRef.current),
+      );
       if (disposed) return;
       latestSequence = Math.max(latestSequence, snapshot.snapshotSequence);
       syncServerReadModel(snapshot);
@@ -195,8 +215,10 @@ function EventRouter() {
       }
       syncing = true;
       pending = false;
+      setHydrationStatus(useStore.getState().threadsHydrated ? "refreshing" : "loading");
       try {
         await flushSnapshotSync();
+        setHydrationStatus("ready");
         setHydrationError(null);
       } catch (error) {
         const detail =
@@ -204,6 +226,7 @@ function EventRouter() {
             ? error.message
             : "Unable to restore the orchestration snapshot from the server.";
         setHydrationError(detail);
+        setHydrationStatus(useStore.getState().threadsHydrated ? "stale" : "error");
         reportClientDiagnostic({
           source: "websocket",
           category: "websocket",
@@ -378,11 +401,13 @@ function EventRouter() {
     };
   }, [
     navigate,
+    pathname,
     queryClient,
     removeOrphanedTerminalStates,
     setProjectExpanded,
     syncErrorInbox,
     syncServerReadModel,
+    setHydrationStatus,
     setHydrationError,
     upsertErrorInboxEntry,
   ]);

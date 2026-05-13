@@ -19,8 +19,20 @@ function escapeTomlString(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
+function resolveSiblingRuntimePath(baseName: string): string {
+  const builtPath = fileURLToPath(new URL(`./${baseName}.mjs`, import.meta.url));
+  if (FS.existsSync(builtPath)) {
+    return builtPath;
+  }
+  return fileURLToPath(new URL(`./${baseName}.ts`, import.meta.url));
+}
+
 function resolveBrowserMcpServerPath(): string {
-  return fileURLToPath(new URL("./browserMcpServer.mjs", import.meta.url));
+  return resolveSiblingRuntimePath("browserMcpServer");
+}
+
+function resolveComputerMcpServerPath(): string {
+  return resolveSiblingRuntimePath("computerMcpServer");
 }
 
 function resolveBaseCodexHome(preferredHomePath?: string): string {
@@ -33,6 +45,125 @@ function resolveBaseCodexHome(preferredHomePath?: string): string {
     return envHome;
   }
   return Path.join(OS.homedir(), ".codex");
+}
+
+function isInsideCodexPluginCacheLatest(srcPath: string, baseHomePath: string): boolean {
+  const relativePath = Path.relative(baseHomePath, srcPath);
+  if (
+    !relativePath ||
+    relativePath === ".." ||
+    relativePath.startsWith(`..${Path.sep}`) ||
+    relativePath.startsWith("../") ||
+    relativePath.startsWith("..\\") ||
+    Path.isAbsolute(relativePath)
+  ) {
+    return false;
+  }
+  const segments = relativePath.split(/[\\/]+/).map((segment) => segment.toLowerCase());
+  return (
+    segments.length >= 4 &&
+    segments[0] === "plugins" &&
+    segments[1] === "cache" &&
+    segments[segments.length - 1] === "latest"
+  );
+}
+
+const CODEX_HOME_VOLATILE_ROOT_ENTRIES = new Set([
+  ".sandbox",
+  ".sandbox-bin",
+  ".sandbox-secrets",
+  ".tmp",
+  "archived_sessions",
+  "browser",
+  "cache",
+  "chats",
+  "generated_images",
+  "log",
+  "logs",
+  "memories",
+  "node_repl",
+  "pets",
+  "sessions",
+  "sqlite",
+  "tmp",
+  "vendor_imports",
+  "worktrees",
+]);
+
+const CODEX_HOME_VOLATILE_ROOT_FILE_PATTERNS = [
+  /^\.*codex-global-state\.json(?:\..*)?$/i,
+  /^cap_sid$/i,
+  /^history\.jsonl$/i,
+  /^installation_id$/i,
+  /^logs(?:_\d+)?\.sqlite(?:-(?:shm|wal))?$/i,
+  /^models_cache\.json$/i,
+  /^sandbox\.log$/i,
+  /^session_index\.jsonl$/i,
+  /^state(?:_\d+)?\.sqlite(?:-(?:shm|wal))?$/i,
+  /^transcription-history\.jsonl$/i,
+  /^version\.json$/i,
+];
+
+function isVolatileCodexHomeEntry(srcPath: string, baseHomePath: string): boolean {
+  const relativePath = Path.relative(baseHomePath, srcPath);
+  if (
+    !relativePath ||
+    relativePath === ".." ||
+    relativePath.startsWith(`..${Path.sep}`) ||
+    relativePath.startsWith("../") ||
+    relativePath.startsWith("..\\") ||
+    Path.isAbsolute(relativePath)
+  ) {
+    return false;
+  }
+  const segments = relativePath.split(/[\\/]+/);
+  const rootSegment = segments[0]?.toLowerCase();
+  if (!rootSegment) {
+    return false;
+  }
+  if (CODEX_HOME_VOLATILE_ROOT_ENTRIES.has(rootSegment)) {
+    return true;
+  }
+  if (segments.length === 1) {
+    return CODEX_HOME_VOLATILE_ROOT_FILE_PATTERNS.some((pattern) => pattern.test(segments[0]!));
+  }
+  return false;
+}
+
+export function shouldCopyCodexHomeEntry(srcPath: string, baseHomePath: string): boolean {
+  if (isVolatileCodexHomeEntry(srcPath, baseHomePath)) {
+    return false;
+  }
+  if (isInsideCodexPluginCacheLatest(srcPath, baseHomePath)) {
+    return false;
+  }
+  try {
+    return !FS.lstatSync(srcPath).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function copyCodexHomeEntry(srcPath: string, destPath: string, baseHomePath: string): void {
+  if (!shouldCopyCodexHomeEntry(srcPath, baseHomePath)) {
+    return;
+  }
+
+  const stat = FS.lstatSync(srcPath);
+  if (stat.isDirectory()) {
+    FS.mkdirSync(destPath, { recursive: true });
+    for (const entry of FS.readdirSync(srcPath)) {
+      copyCodexHomeEntry(Path.join(srcPath, entry), Path.join(destPath, entry), baseHomePath);
+    }
+    return;
+  }
+
+  if (!stat.isFile()) {
+    return;
+  }
+
+  FS.mkdirSync(Path.dirname(destPath), { recursive: true });
+  FS.copyFileSync(srcPath, destPath);
 }
 
 function buildBrowserMcpBlock(input: {
@@ -57,6 +188,26 @@ function buildBrowserMcpBlock(input: {
   ].join("\n");
 }
 
+function buildComputerMcpBlock(input: {
+  projectId: ProjectId;
+  threadId: ThreadId;
+  stateDir: string;
+}): string {
+  return [
+    "",
+    "[mcp_servers.t3_computer]",
+    `command = "${escapeTomlString(process.execPath)}"`,
+    `args = ["${escapeTomlString(resolveComputerMcpServerPath())}"]`,
+    "startup_timeout_sec = 20",
+    "tool_timeout_sec = 120",
+    "[mcp_servers.t3_computer.env]",
+    `T3CODE_STATE_DIR = "${escapeTomlString(input.stateDir)}"`,
+    `T3_COMPUTER_PROJECT_ID = "${escapeTomlString(String(input.projectId))}"`,
+    `T3_COMPUTER_THREAD_ID = "${escapeTomlString(String(input.threadId))}"`,
+    "",
+  ].join("\n");
+}
+
 export interface CodexHomeOverlayInput {
   threadId: ThreadId;
   projectId: ProjectId;
@@ -73,9 +224,7 @@ export function createCodexHomeOverlay(input: CodexHomeOverlayInput): string | u
   }
   const bridgeUrl = input.bridgeUrl?.trim();
   const bridgeToken = input.bridgeToken?.trim();
-  if (!bridgeUrl || !bridgeToken) {
-    return input.preferredHomePath;
-  }
+  const includeBrowserMcp = Boolean(bridgeUrl && bridgeToken);
 
   const baseHomePath = resolveBaseCodexHome(input.preferredHomePath);
   const overlayDir = Path.join(
@@ -86,20 +235,24 @@ export function createCodexHomeOverlay(input: CodexHomeOverlayInput): string | u
   FS.mkdirSync(overlayDir, { recursive: true });
 
   if (FS.existsSync(baseHomePath)) {
-    FS.cpSync(baseHomePath, overlayDir, {
-      recursive: true,
-      force: true,
-      errorOnExist: false,
-    });
+    copyCodexHomeEntry(baseHomePath, overlayDir, baseHomePath);
   }
 
   const configPath = Path.join(overlayDir, "config.toml");
   const existingConfig = FS.existsSync(configPath) ? FS.readFileSync(configPath, "utf8") : "";
-  const nextConfig = `${existingConfig.trimEnd()}${buildBrowserMcpBlock({
-    bridgeUrl,
-    bridgeToken,
+  const nextConfig = `${existingConfig.trimEnd()}${
+    includeBrowserMcp
+      ? buildBrowserMcpBlock({
+          bridgeUrl: bridgeUrl!,
+          bridgeToken: bridgeToken!,
+          projectId: input.projectId,
+          threadId: input.threadId,
+        })
+      : ""
+  }${buildComputerMcpBlock({
     projectId: input.projectId,
     threadId: input.threadId,
+    stateDir: input.stateDir,
   })}`;
   FS.writeFileSync(configPath, nextConfig, "utf8");
   return overlayDir;

@@ -3,7 +3,7 @@ import {
   type DiffsHighlighter,
   type SupportedLanguages,
 } from "@pierre/diffs";
-import { CheckIcon, CopyIcon, FileIcon } from "lucide-react";
+import { CheckIcon, CopyIcon, FileIcon, FolderIcon } from "lucide-react";
 import {
   Children,
   Suspense,
@@ -28,13 +28,17 @@ import { useTheme } from "../hooks/useTheme";
 import {
   normalizeMarkdownFileLinkLabel,
   parseMarkdownFileLinkLiteral,
+  inferMarkdownPathKind,
+  parseMarkdownGitHubLink,
   resolveMarkdownFileLinkTarget,
   resolveMarkdownFileViewerPath,
+  type MarkdownPathKind,
 } from "../markdown-links";
 import { readNativeApi } from "../nativeApi";
 import { preferredTerminalEditor } from "../terminal-links";
 import { cn } from "../lib/utils";
 import { getVscodeIconUrlForEntry } from "../vscode-icons";
+import { GitHubIcon } from "./Icons";
 
 interface ChatMarkdownProps {
   text: string;
@@ -190,14 +194,20 @@ function MarkdownCodeBlock({ code, children }: { code: string; children: ReactNo
 
 const MarkdownFileLinkIcon = memo(function MarkdownFileLinkIcon(props: {
   targetPath: string;
+  kind: MarkdownPathKind;
   theme: "light" | "dark";
 }) {
   const pathValue = fileIconPathValue(props.targetPath);
   const [failedIconUrl, setFailedIconUrl] = useState<string | null>(null);
   const iconUrl = useMemo(
-    () => getVscodeIconUrlForEntry(pathValue, "file", props.theme),
-    [pathValue, props.theme],
+    () =>
+      props.kind === "directory" ? null : getVscodeIconUrlForEntry(pathValue, "file", props.theme),
+    [pathValue, props.kind, props.theme],
   );
+
+  if (props.kind === "directory" || iconUrl === null) {
+    return <FolderIcon aria-hidden="true" className="chat-markdown-file-link-icon" />;
+  }
 
   if (failedIconUrl === iconUrl) {
     return <FileIcon aria-hidden="true" className="chat-markdown-file-link-icon" />;
@@ -219,6 +229,7 @@ function MarkdownFileLink(props: {
   href: string | undefined;
   label: string | undefined;
   targetPath: string;
+  kind: MarkdownPathKind;
   viewerPath: string | null;
   theme: "light" | "dark";
   className?: string | undefined;
@@ -246,8 +257,27 @@ function MarkdownFileLink(props: {
         }
       }}
     >
-      <MarkdownFileLinkIcon targetPath={props.targetPath} theme={props.theme} />
+      <MarkdownFileLinkIcon targetPath={props.targetPath} kind={props.kind} theme={props.theme} />
       <span className="truncate">{displayLabel}</span>
+    </a>
+  );
+}
+
+function MarkdownGitHubLink(props: {
+  href: string;
+  label: string;
+  className?: string | undefined;
+}) {
+  return (
+    <a
+      href={props.href}
+      className={cn("chat-markdown-file-link chat-markdown-github-link", props.className)}
+      title={props.href}
+      target="_blank"
+      rel="noreferrer"
+    >
+      <GitHubIcon aria-hidden="true" className="chat-markdown-file-link-icon" />
+      <span className="truncate">{props.label}</span>
     </a>
   );
 }
@@ -311,6 +341,18 @@ function ChatMarkdown({
   const markdownComponents = useMemo<Components>(
     () => ({
       a({ node: _node, href, ...props }) {
+        const githubLink = parseMarkdownGitHubLink(href);
+        if (githubLink) {
+          const label = nodeToPlainText(props.children).trim();
+          return (
+            <MarkdownGitHubLink
+              href={githubLink.href}
+              label={label.length > 0 && label !== href ? label : githubLink.label}
+              className={props.className}
+            />
+          );
+        }
+
         const targetPath = resolveMarkdownFileLinkTarget(href, cwd);
         if (!targetPath) {
           return <a {...props} href={href} target="_blank" rel="noreferrer" />;
@@ -323,6 +365,7 @@ function ChatMarkdown({
             href={href}
             label={label}
             targetPath={targetPath}
+            kind={inferMarkdownPathKind(targetPath)}
             viewerPath={viewerPath}
             theme={resolvedTheme}
             className={props.className}
@@ -335,6 +378,16 @@ function ChatMarkdown({
         if (!className) {
           const literalLink = parseMarkdownFileLinkLiteral(codeText);
           if (literalLink) {
+            const githubLink = parseMarkdownGitHubLink(literalLink.href);
+            if (githubLink) {
+              return (
+                <MarkdownGitHubLink
+                  href={githubLink.href}
+                  label={literalLink.label.length > 0 ? literalLink.label : githubLink.label}
+                />
+              );
+            }
+
             const targetPath = resolveMarkdownFileLinkTarget(literalLink.href, cwd);
             if (targetPath) {
               return (
@@ -342,12 +395,33 @@ function ChatMarkdown({
                   href={literalLink.href}
                   label={literalLink.label}
                   targetPath={targetPath}
+                  kind={inferMarkdownPathKind(targetPath)}
                   viewerPath={resolveMarkdownFileViewerPath(literalLink.href, cwd)}
                   theme={resolvedTheme}
                   onOpenFilePath={onOpenFilePath}
                 />
               );
             }
+          }
+
+          const githubLink = parseMarkdownGitHubLink(codeText);
+          if (githubLink) {
+            return <MarkdownGitHubLink href={githubLink.href} label={githubLink.label} />;
+          }
+
+          const inlinePathTarget = resolveMarkdownFileLinkTarget(codeText, cwd);
+          if (inlinePathTarget) {
+            return (
+              <MarkdownFileLink
+                href={codeText}
+                label={codeText}
+                targetPath={inlinePathTarget}
+                kind={inferMarkdownPathKind(inlinePathTarget)}
+                viewerPath={resolveMarkdownFileViewerPath(codeText, cwd)}
+                theme={resolvedTheme}
+                onOpenFilePath={onOpenFilePath}
+              />
+            );
           }
         }
 

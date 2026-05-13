@@ -38,6 +38,11 @@ import type {
   BrowserUseSettingsPatch,
 } from "./browser";
 import type {
+  ComputerUseListAppsResult,
+  ComputerUseSettings,
+  ComputerUseSettingsPatch,
+} from "./computerUse";
+import type {
   ProjectListDirectoryInput,
   ProjectListDirectoryResult,
   ProjectListTreeInput,
@@ -93,6 +98,7 @@ import type {
   ClientOrchestrationCommand,
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetFullThreadDiffResult,
+  OrchestrationGetSnapshotInput,
   OrchestrationGetTurnDiffInput,
   OrchestrationGetTurnDiffResult,
   OrchestrationEvent,
@@ -176,26 +182,22 @@ export interface DesktopNotificationQuestionOption {
   description: string;
 }
 
-export interface DesktopNotificationQuestion
-  extends Omit<UserInputQuestion, "options"> {
+export interface DesktopNotificationQuestion extends Omit<UserInputQuestion, "options"> {
   options: ReadonlyArray<DesktopNotificationQuestionOption>;
 }
 
-export interface DesktopTurnCompletedNotificationInput
-  extends DesktopNotificationInput {
+export interface DesktopTurnCompletedNotificationInput extends DesktopNotificationInput {
   kind: "turn_completed";
 }
 
-export interface DesktopApprovalRequiredNotificationInput
-  extends DesktopNotificationInput {
+export interface DesktopApprovalRequiredNotificationInput extends DesktopNotificationInput {
   kind: "approval_required";
   requestId: ApprovalRequestId;
   requestKind: "command" | "file-read" | "file-change";
   detail?: string;
 }
 
-export interface DesktopUserInputRequiredNotificationInput
-  extends DesktopNotificationInput {
+export interface DesktopUserInputRequiredNotificationInput extends DesktopNotificationInput {
   kind: "user_input_required";
   requestId: ApprovalRequestId;
   questions: ReadonlyArray<DesktopNotificationQuestion>;
@@ -305,9 +307,7 @@ export interface NativeApi {
     fileMetadata: (input: ProjectFileMetadataInput) => Promise<ProjectFileMetadataResult>;
     readFile: (input: ProjectReadFileInput) => Promise<ProjectReadFileResult>;
     writeFile: (input: ProjectWriteFileInput) => Promise<ProjectWriteFileResult>;
-    createDirectory: (
-      input: ProjectCreateDirectoryInput,
-    ) => Promise<ProjectCreateDirectoryResult>;
+    createDirectory: (input: ProjectCreateDirectoryInput) => Promise<ProjectCreateDirectoryResult>;
     renameEntry: (input: ProjectRenameEntryInput) => Promise<ProjectRenameEntryResult>;
     deleteEntry: (input: ProjectDeleteEntryInput) => Promise<ProjectDeleteEntryResult>;
   };
@@ -363,7 +363,14 @@ export interface NativeApi {
       input: ServerSuggestNewThreadTasksInput,
     ) => Promise<ServerSuggestNewThreadTasksResult>;
     updateSettings: (input: ServerUpdateSettingsInput) => Promise<ServerUpdateSettingsResult>;
-    onErrorInboxUpdated: (callback: (payload: ServerErrorInboxUpdatedPayload) => void) => () => void;
+    onErrorInboxUpdated: (
+      callback: (payload: ServerErrorInboxUpdatedPayload) => void,
+    ) => () => void;
+  };
+  computerUse: {
+    listApps: () => Promise<ComputerUseListAppsResult>;
+    getSettings: () => Promise<ComputerUseSettings>;
+    updateSettings: (input: ComputerUseSettingsPatch) => Promise<ComputerUseSettings>;
   };
   provider: {
     getComposerCapabilities: (
@@ -376,7 +383,7 @@ export interface NativeApi {
     listModels: (input: ProviderListModelsInput) => Promise<ProviderListModelsResult>;
   };
   orchestration: {
-    getSnapshot: () => Promise<OrchestrationReadModel>;
+    getSnapshot: (input?: OrchestrationGetSnapshotInput) => Promise<OrchestrationReadModel>;
     dispatchCommand: (command: ClientOrchestrationCommand) => Promise<{ sequence: number }>;
     getTurnDiff: (input: OrchestrationGetTurnDiffInput) => Promise<OrchestrationGetTurnDiffResult>;
     getFullThreadDiff: (

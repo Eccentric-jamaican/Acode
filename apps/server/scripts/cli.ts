@@ -6,7 +6,10 @@ import { Data, Effect, FileSystem, Logger, Option, Path } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
-import { DEVELOPMENT_ICON_OVERRIDES, PUBLISH_ICON_OVERRIDES } from "../../../scripts/lib/brand-assets.ts";
+import {
+  DEVELOPMENT_ICON_OVERRIDES,
+  PUBLISH_ICON_OVERRIDES,
+} from "../../../scripts/lib/brand-assets.ts";
 import { resolveCatalogDependencies } from "../../../scripts/lib/resolve-catalog.ts";
 import rootPackageJson from "../../../package.json" with { type: "json" };
 import serverPackageJson from "../package.json" with { type: "json" };
@@ -46,7 +49,11 @@ const runBunCommand = Effect.fn("runBunCommand")(function* (input: {
   if (process.platform === "win32") {
     // Bun is frequently installed as bun.cmd on Windows; cmd.exe resolves that reliably.
     yield* runCommand(
-      ChildProcess.make("cmd.exe", ["/d", "/s", "/c", ["bun", ...input.args].join(" ")], processOptions),
+      ChildProcess.make(
+        "cmd.exe",
+        ["/d", "/s", "/c", ["bun", ...input.args].join(" ")],
+        processOptions,
+      ),
     );
     return;
   }
@@ -165,6 +172,13 @@ const buildCmd = Command.make(
       } else {
         yield* Effect.logWarning("[cli] Web dist not found — skipping client bundle.");
       }
+
+      const computerUsePrebuilt = path.join(serverDir, "computer-use");
+      const computerUseTarget = path.join(serverDir, "dist/computer-use");
+      if (yield* fs.exists(computerUsePrebuilt)) {
+        yield* fs.copy(computerUsePrebuilt, computerUseTarget);
+        yield* Effect.log("[cli] Bundled T3 Computer Use helpers into dist/computer-use");
+      }
     }),
 ).pipe(Command.withDescription("Build the server package (tsdown + bundle web client)."));
 
@@ -253,9 +267,7 @@ const publishCmd = Command.make(
           Effect.gen(function* () {
             yield* restorePublishIconOverrides(resource.iconBackups).pipe(
               Effect.catch((error) =>
-                Effect.logError(
-                  `[cli] Failed to restore publish icon overrides: ${String(error)}`,
-                ),
+                Effect.logError(`[cli] Failed to restore publish icon overrides: ${String(error)}`),
               ),
             );
             yield* fs.rename(backupPath, packageJsonPath);

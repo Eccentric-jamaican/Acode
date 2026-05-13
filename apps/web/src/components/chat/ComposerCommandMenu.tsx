@@ -1,5 +1,6 @@
 import type {
   ModelSlug,
+  ComputerUseAppSummary,
   ProjectEntry,
   ProviderKind,
   ProviderNativeCommandDescriptor,
@@ -20,14 +21,12 @@ import {
   KanbanSquareIcon,
   MessageSquareIcon,
   BoxIcon,
+  MonitorIcon,
   PlugIcon,
   Terminal,
   ZapIcon,
 } from "lucide-react";
-import {
-  type ComposerTriggerKind,
-  type ComposerSlashCommand,
-} from "../../composer-logic";
+import { type ComposerTriggerKind, type ComposerSlashCommand } from "../../composer-logic";
 import { cn } from "~/lib/utils";
 import { Badge } from "../ui/badge";
 import {
@@ -48,6 +47,14 @@ export type ComposerCommandItem =
       pathKind: ProjectEntry["kind"];
       label: string;
       description: string;
+    }
+  | {
+      id: string;
+      type: "desktop-app";
+      app: ComputerUseAppSummary;
+      label: string;
+      description: string;
+      iconUrl?: string | null | undefined;
     }
   | {
       id: string;
@@ -187,6 +194,27 @@ function groupComposerCommandItems(
   items: ComposerCommandItem[],
   triggerKind: ComposerTriggerKind | null,
 ): ComposerCommandGroupModel[] {
+  if (triggerKind === "path") {
+    const pathItems = items.filter((item) => item.type === "path");
+    const appItems = items.filter((item) => item.type === "desktop-app");
+    const pluginItems = items.filter((item) => item.type === "plugin");
+    const skillItems = items.filter((item) => item.type === "skill");
+    const groups: ComposerCommandGroupModel[] = [];
+    if (pathItems.length > 0) {
+      groups.push({ id: "paths", label: "Files and folders", items: pathItems });
+    }
+    if (appItems.length > 0) {
+      groups.push({ id: "desktop-apps", label: "Desktop apps", items: appItems });
+    }
+    if (pluginItems.length > 0) {
+      groups.push({ id: "plugins", label: "Plugins", items: pluginItems });
+    }
+    if (skillItems.length > 0) {
+      groups.push({ id: "skills", label: "Skills", items: skillItems });
+    }
+    return groups;
+  }
+
   if (triggerKind !== "slash-command") {
     return [{ id: "default", label: null, items }];
   }
@@ -288,6 +316,19 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
             className="size-4 text-muted-foreground"
           />
         );
+      case "desktop-app":
+        return props.item.iconUrl ? (
+          <img
+            src={props.item.iconUrl}
+            alt=""
+            aria-hidden="true"
+            className="size-4 shrink-0 rounded-sm object-contain"
+            loading="lazy"
+            draggable={false}
+          />
+        ) : (
+          <MonitorIcon className="size-4 text-muted-foreground" />
+        );
       case "slash-command":
       case "provider-native-command":
         return resolveSlashLikeCommandIcon(props.item.command);
@@ -323,9 +364,7 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
         props.onSelect(props.item);
       }}
     >
-      <span className="flex shrink-0 text-muted-foreground/60">
-        {icon}
-      </span>
+      <span className="flex shrink-0 text-muted-foreground/60">{icon}</span>
 
       <div className="min-w-0 flex flex-1 items-center gap-2">
         <div className="min-w-0 flex flex-1 items-center gap-1.5 overflow-hidden">
@@ -427,10 +466,10 @@ export const ComposerCommandMenu = memo(function ComposerCommandMenu(props: {
           <p className="px-2.5 py-1.5 text-[11px] text-muted-foreground/50">
             {props.isLoading
               ? props.triggerKind === "path"
-                ? "Searching workspace files..."
+                ? "Searching mentions..."
                 : "Loading commands..."
               : props.triggerKind === "path"
-                ? "No matching files or folders."
+                ? "No matching files, apps, plugins, or skills."
                 : props.triggerKind === "skill"
                   ? "No matching skill."
                   : "No matching command."}
