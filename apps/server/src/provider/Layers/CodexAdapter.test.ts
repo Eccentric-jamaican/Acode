@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   ApprovalRequestId,
   EventId,
@@ -31,6 +34,11 @@ const asThreadId = (value: string): ThreadId => ThreadId.makeUnsafe(value);
 const asTurnId = (value: string): TurnId => TurnId.makeUnsafe(value);
 const asEventId = (value: string): EventId => EventId.makeUnsafe(value);
 const asItemId = (value: string): ProviderItemId => ProviderItemId.makeUnsafe(value);
+const testStateDir = mkdtempSync(join(tmpdir(), "t3-codex-adapter-test-"));
+
+afterAll(() => {
+  rmSync(testStateDir, { recursive: true, force: true });
+});
 
 class FakeCodexManager extends CodexAppServerManager {
   public startSessionImpl = vi.fn(
@@ -160,7 +168,7 @@ const providerSessionDirectoryTestLayer = Layer.succeed(ProviderSessionDirectory
 const validationManager = new FakeCodexManager();
 const validationLayer = it.layer(
   makeCodexAdapterLive({ manager: validationManager }).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), testStateDir)),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(ErrorInboxServiceNoop),
     Layer.provideMerge(NodeServices.layer),
@@ -189,31 +197,42 @@ validationLayer("CodexAdapterLive validation", (it) => {
     }),
   );
 
-  it.effect("maps codex model options before starting a session", () =>
-    Effect.gen(function* () {
-      validationManager.startSessionImpl.mockClear();
-      const adapter = yield* CodexAdapter;
+  it.effect(
+    "maps codex model options before starting a session",
+    () =>
+      Effect.gen(function* () {
+        validationManager.startSessionImpl.mockClear();
+        const adapter = yield* CodexAdapter;
 
-      yield* adapter.startSession({
-        provider: "codex",
-        threadId: asThreadId("thread-1"),
-        model: "gpt-5.3-codex",
-        modelOptions: {
-          codex: {
-            fastMode: true,
+        yield* adapter.startSession({
+          provider: "codex",
+          threadId: asThreadId("thread-1"),
+          model: "gpt-5.3-codex",
+          modelOptions: {
+            codex: {
+              fastMode: true,
+            },
           },
-        },
-        runtimeMode: "full-access",
-      });
+          runtimeMode: "full-access",
+        });
 
-      assert.deepStrictEqual(validationManager.startSessionImpl.mock.calls[0]?.[0], {
-        provider: "codex",
-        threadId: asThreadId("thread-1"),
-        model: "gpt-5.3-codex",
-        serviceTier: "fast",
-        runtimeMode: "full-access",
-      });
-    }),
+        const startSessionInput = validationManager.startSessionImpl.mock.calls[0]?.[0];
+        assert.deepStrictEqual(startSessionInput, {
+          provider: "codex",
+          threadId: asThreadId("thread-1"),
+          model: "gpt-5.3-codex",
+          serviceTier: "fast",
+          runtimeMode: "full-access",
+          providerOptions: {
+            codex: {
+              homePath: startSessionInput?.providerOptions?.codex?.homePath,
+            },
+          },
+        });
+        assert.equal(typeof startSessionInput?.providerOptions?.codex?.homePath, "string");
+        assert.match(startSessionInput?.providerOptions?.codex?.homePath ?? "", /codex-home-overlays/);
+      }),
+    15_000,
   );
 });
 
@@ -223,7 +242,7 @@ sessionErrorManager.sendTurnImpl.mockImplementation(async () => {
 });
 const sessionErrorLayer = it.layer(
   makeCodexAdapterLive({ manager: sessionErrorManager }).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), testStateDir)),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(ErrorInboxServiceNoop),
     Layer.provideMerge(NodeServices.layer),
@@ -291,7 +310,7 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
 const lifecycleManager = new FakeCodexManager();
 const lifecycleLayer = it.layer(
   makeCodexAdapterLive({ manager: lifecycleManager }).pipe(
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), testStateDir)),
     Layer.provideMerge(providerSessionDirectoryTestLayer),
     Layer.provideMerge(ErrorInboxServiceNoop),
     Layer.provideMerge(NodeServices.layer),
