@@ -32,6 +32,16 @@ function withProjectId(projectId, params = {}) {
   return { ...params, projectId };
 }
 
+function withThreadId(threadId, params = {}) {
+  if (typeof params.threadId === "string" && params.threadId.trim().length > 0) {
+    return params;
+  }
+  if (typeof threadId !== "string" || threadId.trim().length === 0) {
+    return params;
+  }
+  return { ...params, threadId };
+}
+
 async function readJsonResponse(response) {
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -49,16 +59,18 @@ export class T3BrowserUse {
     this.bridgeUrl = bridgeUrl;
     this.authToken = authToken;
     this.projectId = options.projectId || readEnv("T3_BROWSER_PROJECT_ID");
+    this.threadId = options.threadId || readEnv("T3_BROWSER_THREAD_ID");
   }
 
   async call(method, params = {}) {
+    const scopedParams = withThreadId(this.threadId, withProjectId(this.projectId, params));
     const response = await fetch(this.bridgeUrl, {
       method: "POST",
       headers: {
         "content-type": "application/json",
         "x-t3-browser-token": this.authToken,
       },
-      body: JSON.stringify({ method, params: withProjectId(this.projectId, params) }),
+      body: JSON.stringify({ method, params: scopedParams }),
     });
     return readJsonResponse(response);
   }

@@ -100,7 +100,11 @@ import {
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { toastManager } from "../ui/toast";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
-import { normalizeCompactToolLabel } from "./MessagesTimeline.logic";
+import {
+  collectComputerUseCaptures,
+  normalizeCompactToolLabel,
+  type ComputerUseCapturePreview,
+} from "./MessagesTimeline.logic";
 
 const MAX_VISIBLE_WORK_LOG_ENTRIES = 6;
 const ALWAYS_UNVIRTUALIZED_TAIL_ROWS = 8;
@@ -125,7 +129,7 @@ const CHAT_SELECTION_IGNORE_SELECTOR =
 const EMPTY_INVOCATION_DIFF_FILES: ReadonlyArray<InvocationDiffFile> = [];
 const INLINE_EDIT_DIFF_MAX_CHANGED_LINES = 300;
 const INLINE_EDIT_DIFF_MAX_CONTENT_CHARS = 120_000;
-const LEADING_PROVIDER_MENTION_PATTERN = /^([$/@])([^\s]+)(?=\s|$)/;
+const USER_MESSAGE_MENTION_PATTERN = /(^|\s)([$/@])([^\s]+)(?=\s|$)/g;
 
 type AssistantArtifactKind = "document" | "image" | "markdown" | "slides" | "spreadsheet" | "pdf";
 
@@ -298,46 +302,47 @@ function splitUserMessageProviderMentions(
     descriptors.map((descriptor) => [descriptor.mentionName.toLowerCase(), descriptor]),
   );
   const segments: UserMessageTextSegment[] = [];
-  let remaining = text;
-  let offset = 0;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
 
-  while (remaining.length > 0) {
-    const match = LEADING_PROVIDER_MENTION_PATTERN.exec(remaining);
-    if (!match?.[2]) break;
-    const rawName = match[2];
-    const marker = match[1];
+  while ((match = USER_MESSAGE_MENTION_PATTERN.exec(text)) !== null) {
+    const rawName = match[3];
+    const marker = match[2];
+    const prefix = match[1] ?? "";
+    if (!rawName || !marker) continue;
+    const tokenStart = (match.index ?? 0) + prefix.length;
+    const tokenEnd = tokenStart + match[0].length - prefix.length;
     const shortcut = marker === "/" ? parseLeadingShortcut(rawName) : null;
     if (shortcut) {
+      if (tokenStart > cursor) {
+        segments.push({ type: "text", key: `text:${cursor}`, text: text.slice(cursor, tokenStart) });
+      }
       segments.push({
         type: "shortcut",
-        key: `shortcut:${offset}:${rawName}`,
+        key: `shortcut:${tokenStart}:${rawName}`,
         command: shortcut.command,
         args: "",
       });
-      const nextRemaining = remaining.slice(match[0].length);
-      const trimmedRemaining = nextRemaining.trimStart();
-      offset += match[0].length + nextRemaining.length - trimmedRemaining.length;
-      remaining = trimmedRemaining;
+      cursor = tokenEnd;
       continue;
     }
-    const descriptor =
-      descriptorsByName.get(rawName.toLowerCase()) ??
-      (marker === "@"
-        ? { mentionName: rawName, label: rawName, type: "desktop-app" as const }
-        : { mentionName: rawName, label: rawName, type: "plugin" as const });
+    const descriptor = descriptorsByName.get(rawName.replace(/^\[|\]$/g, "").toLowerCase());
+    if (!descriptor) {
+      continue;
+    }
+    if (tokenStart > cursor) {
+      segments.push({ type: "text", key: `text:${cursor}`, text: text.slice(cursor, tokenStart) });
+    }
     segments.push({
       type: "mention",
-      key: `mention:${offset}:${rawName}`,
+      key: `mention:${tokenStart}:${rawName}`,
       descriptor,
     });
-    const nextRemaining = remaining.slice(match[0].length);
-    const trimmedRemaining = nextRemaining.trimStart();
-    offset += match[0].length + nextRemaining.length - trimmedRemaining.length;
-    remaining = trimmedRemaining;
+    cursor = tokenEnd;
   }
 
-  if (remaining.length > 0) {
-    segments.push({ type: "text", key: `text:${offset}`, text: remaining });
+  if (cursor < text.length) {
+    segments.push({ type: "text", key: `text:${cursor}`, text: text.slice(cursor) });
   }
   return segments.length > 0 ? segments : [{ type: "text", key: "text:0", text }];
 }
@@ -810,6 +815,13 @@ function normalizedComputerToolName(workEntry: WorkLogEntry): string | null {
   const toolNames = [
     "observe_app",
     "launch_app",
+    "attach_app",
+    "focus_app",
+    "move_window",
+    "resize_window",
+    "close_window",
+    "active_window",
+    "window_bounds",
     "list_apps",
     "list_windows",
     "get_visible_text",
@@ -825,6 +837,14 @@ function normalizedComputerToolName(workEntry: WorkLogEntry): string | null {
     "drag",
     "wait",
   ];
+  if (
+    !raw.includes("computer") &&
+    !raw.includes("screenshot") &&
+    !raw.includes("visible_text") &&
+    !toolNames.some((name) => raw.includes(name))
+  ) {
+    return null;
+  }
   return toolNames.find((name) => compact.includes(name)) ?? null;
 }
 
@@ -843,6 +863,20 @@ function computerUseActionLabel(workEntry: WorkLogEntry): string {
       return active ? "Observing app" : "Observed app";
     case "launch_app":
       return active ? "Launching app" : "Launched app";
+    case "attach_app":
+      return active ? "Attaching to app" : "Attached to app";
+    case "focus_app":
+      return active ? "Focusing app" : "Focused app";
+    case "move_window":
+      return active ? "Moving window" : "Moved window";
+    case "resize_window":
+      return active ? "Resizing window" : "Resized window";
+    case "close_window":
+      return active ? "Closing window" : "Closed window";
+    case "active_window":
+      return active ? "Inspecting active window" : "Inspected active window";
+    case "window_bounds":
+      return active ? "Reading window bounds" : "Read window bounds";
     case "screenshot":
       return active ? "Capturing screenshot" : "Captured screenshot";
     case "list_apps":
@@ -976,44 +1010,6 @@ function computerUseGhostCursor(workEntry: WorkLogEntry): { x: number; y: number
   const y = cursor?.y;
   if (typeof x !== "number" || typeof y !== "number") return null;
   return { x, y };
-}
-
-type ComputerUseCapturePreview = {
-  url: string;
-  captureId?: string;
-  width?: number;
-  height?: number;
-};
-
-function collectComputerUseCaptures(
-  value: unknown,
-  captures: ComputerUseCapturePreview[] = [],
-  seen = new Set<unknown>(),
-  depth = 0,
-): ComputerUseCapturePreview[] {
-  if (depth > 6 || value === null || value === undefined || seen.has(value)) return captures;
-  if (typeof value !== "object") return captures;
-  seen.add(value);
-  if (Array.isArray(value)) {
-    for (const entry of value) collectComputerUseCaptures(entry, captures, seen, depth + 1);
-    return captures;
-  }
-  const record = value as Record<string, unknown>;
-  const url = workLogString(record.url) ?? workLogString(record.previewUrl);
-  if (url && url.startsWith("/attachments/")) {
-    const capture: ComputerUseCapturePreview = {
-      url,
-    };
-    const captureId = workLogString(record.captureId);
-    if (captureId) capture.captureId = captureId;
-    if (typeof record.width === "number") capture.width = record.width;
-    if (typeof record.height === "number") capture.height = record.height;
-    captures.push(capture);
-  }
-  for (const child of Object.values(record)) {
-    collectComputerUseCaptures(child, captures, seen, depth + 1);
-  }
-  return captures;
 }
 
 function computerUseCaptures(workEntry: WorkLogEntry): ComputerUseCapturePreview[] {
@@ -2234,12 +2230,15 @@ const WorkLogEntryDetail = memo(function WorkLogEntryDetail(props: {
     const inputMode = computerUseInputModeLabel(workEntry);
     const fallbackRequired = computerUseFallbackRequired(workEntry);
     const ghostCursor = computerUseGhostCursor(workEntry);
+    const fallbackCaptureLabel = computerUseActionLabel(workEntry);
+    const captureLabel = preview ?? fallbackCaptureLabel;
+    const imageLabel = `${captureLabel} capture`;
     return (
       <div className="overflow-hidden rounded-lg border border-border/50 bg-card/45">
         <div className="flex min-w-0 items-center justify-between gap-2 px-3 py-2">
           <div className="flex min-w-0 items-center gap-2">
             <span className="min-w-0 truncate text-sm text-foreground/86">
-              {preview ?? computerUseActionLabel(workEntry)}
+              {captureLabel ?? "T3 Computer Use"}
             </span>
             {inputMode ? (
               <span className="shrink-0 rounded border border-border/45 px-1.5 py-0.5 text-[11px] leading-none text-muted-foreground/80">
@@ -2264,11 +2263,7 @@ const WorkLogEntryDetail = memo(function WorkLogEntryDetail(props: {
               const captureId = firstCapture.captureId ?? firstCapture.url;
               const previewModel = buildExpandedImagePreview(
                 [
-                  {
-                    id: captureId,
-                    name: "T3 Computer Use screenshot",
-                    previewUrl: firstCapture.url,
-                  },
+                  { id: captureId, name: imageLabel, previewUrl: firstCapture.url },
                 ],
                 captureId,
               );
@@ -2277,7 +2272,7 @@ const WorkLogEntryDetail = memo(function WorkLogEntryDetail(props: {
           >
             <img
               src={firstCapture.url}
-              alt="T3 Computer Use screenshot"
+              alt={imageLabel}
               className="max-h-[360px] w-full rounded-md object-contain"
               loading="lazy"
               onLoad={props.onImageLoad}

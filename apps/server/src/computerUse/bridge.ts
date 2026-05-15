@@ -15,6 +15,9 @@ import { ensurePermissions, type PermissionStatus } from "./permissions.js";
 
 export interface ScreenshotParams {
   app?: string;
+  launchId?: string;
+  pid?: number;
+  windowId?: number;
   windowTitle?: string;
 }
 
@@ -257,6 +260,20 @@ export interface ListElementsDetails {
   count: number;
   actionableOnly: boolean;
   elements: SemanticElementInfo[];
+  session?: {
+    sessionId: string;
+    inputMode: "semantic" | "virtual-cursor" | "global-input";
+    fallbackRequired: boolean;
+    appScoped: boolean;
+  };
+  capture?: {
+    captureId: string;
+    width: number;
+    height: number;
+    scaleFactor: number;
+    timestamp: number;
+    coordinateSpace: "window-relative-screenshot-pixels";
+  };
 }
 
 export interface VisibleTextDetails {
@@ -265,6 +282,20 @@ export interface VisibleTextDetails {
   count: number;
   text: string;
   items: VisibleTextItem[];
+  session?: {
+    sessionId: string;
+    inputMode: "semantic" | "virtual-cursor" | "global-input";
+    fallbackRequired: boolean;
+    appScoped: boolean;
+  };
+  capture?: {
+    captureId: string;
+    width: number;
+    height: number;
+    scaleFactor: number;
+    timestamp: number;
+    coordinateSpace: "window-relative-screenshot-pixels";
+  };
 }
 
 interface ResolvedTarget extends CurrentTarget {
@@ -303,11 +334,22 @@ interface RuntimeState {
 }
 
 const TOOL_NAMES = new Set([
+  "launch_app",
   "screenshot",
+  "observe_app",
+  "attach_app",
+  "focus_app",
+  "move_window",
+  "resize_window",
+  "close_window",
+  "active_window",
+  "window_bounds",
   "click",
+  "list_elements",
   "double_click",
   "move_mouse",
   "drag",
+  "get_visible_text",
   "scroll",
   "type_text",
   "activate_element",
@@ -335,6 +377,8 @@ const RECOVERABLE_SCREENSHOT_ERROR_CODES = new Set(["screenshot_timeout", "windo
 const HELPER_FILE_NAME = process.platform === "win32" ? "bridge.exe" : "bridge";
 const DEFAULT_T3_STATE_DIR = path.join(os.homedir(), ".t3", "dev");
 const T3_STATE_DIR = process.env.T3CODE_STATE_DIR?.trim() || DEFAULT_T3_STATE_DIR;
+const DESKTOP_BRIDGE_URL = process.env.T3CODE_DESKTOP_BROWSER_BRIDGE_URL?.trim() || "";
+const DESKTOP_BRIDGE_TOKEN = process.env.T3CODE_DESKTOP_BROWSER_BRIDGE_TOKEN?.trim() || "";
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -501,6 +545,7 @@ function requireGlobalInputAllowed(params: { allowGlobalInput?: boolean } | unde
     runtimeState.fallbackRequired = true;
     throw new Error(GLOBAL_INPUT_REQUIRED_ERROR);
   }
+  runtimeState.fallbackRequired = false;
 }
 
 function sessionIdForTarget(target: CurrentTarget): string {
@@ -531,6 +576,7 @@ function updateGhostCursor(position: MousePositionResult): void {
     y: Math.max(0, Math.round(position.y)),
   };
   runtimeState.sessionInputMode = "virtual-cursor";
+  runtimeState.fallbackRequired = false;
 }
 
 function validateCaptureId(captureId?: string): CurrentCapture {
@@ -964,6 +1010,24 @@ function chooseWindowByTitle(
   );
 }
 
+function chooseAppByLaunchId(apps: HelperApp[], launchId: string): HelperApp | undefined {
+  const query = normalizeText(launchId);
+  if (!query) return undefined;
+
+  const candidates = apps.filter((app) => {
+    const appBundle = normalizeText(app.bundleId);
+    const appName = normalizeText(app.appName);
+    return (
+      (appBundle.length > 0 && (appBundle.includes(query) || query.includes(appBundle))) ||
+      (appName.length > 0 && (appName.includes(query) || query.includes(appName)))
+    );
+  });
+
+  if (candidates.length === 0) return undefined;
+  if (candidates.length === 1) return candidates[0];
+  return candidates.find((app) => app.isFrontmost) ?? candidates[0];
+}
+
 function toResolvedTarget(app: HelperApp, window: HelperWindow): ResolvedTarget {
   return {
     appName: app.appName,
@@ -1070,9 +1134,66 @@ async function resolveTargetForScreenshot(
   signal?: AbortSignal,
 ): Promise<ResolvedTarget> {
   const appQuery = trimOrUndefined(selection.app);
+  const launchId = trimOrUndefined(selection.launchId);
   const windowTitleQuery = trimOrUndefined(selection.windowTitle);
+  const pidQueryRaw =
+    typeof selection.pid === "number" && Number.isFinite(selection.pid) ? Math.trunc(selection.pid) : NaN;
+  const windowIdQueryRaw =
+    typeof selection.windowId === "number" && Number.isFinite(selection.windowId)
+      ? Math.trunc(selection.windowId)
+      : NaN;
+  const pidQuery = pidQueryRaw > 0 ? pidQueryRaw : undefined;
+  const windowIdQuery = windowIdQueryRaw > 0 ? windowIdQueryRaw : undefined;
+
+  if (pidQuery) {
+    const apps = await listApps(signal);
+    const appFromPid = apps.find((candidate) => candidate.pid === pidQuery);
+    const app = appFromPid ?? {
+      appName: appQuery ?? runtimeState.currentTarget?.appName ?? "Unknown App",
+      pid: pidQuery,
+    };
+    const windows = await listWindows(pidQuery, signal);
+    if (!windows.length) {
+      throw new Error(`No controllable window was found for pid '${pidQuery}'.`);
+    }
+
+    const preferredByWindowId =
+      windowIdQuery !== undefined
+        ? windows.find((window) => window.windowId !== undefined && window.windowId === windowIdQuery)
+        : undefined;
+    if (preferredByWindowId) {
+      const resolved = toResolvedTarget(app, preferredByWindowId);
+      setCurrentTarget(resolved);
+      return resolved;
+    }
+
+    if (windowTitleQuery) {
+      const preferredByTitle = chooseWindowByTitle(windows, windowTitleQuery, app.appName);
+      const resolved = toResolvedTarget(app, preferredByTitle);
+      setCurrentTarget(resolved);
+      return resolved;
+    }
+
+    const preferredWindow = choosePreferredWindow(windows, app.appName);
+    const resolved = toResolvedTarget(app, preferredWindow);
+    setCurrentTarget(resolved);
+    return resolved;
+  }
 
   if (!appQuery && !windowTitleQuery) {
+    if (launchId) {
+      const apps = await listApps(signal);
+      const app = chooseAppByLaunchId(apps, launchId);
+      if (app) {
+        const windows = await listWindows(app.pid, signal);
+        if (windows.length) {
+          const preferredWindow = choosePreferredWindow(windows, app.appName);
+          const resolved = toResolvedTarget(app, preferredWindow);
+          setCurrentTarget(resolved);
+          return resolved;
+        }
+      }
+    }
     if (runtimeState.currentTarget) {
       return await resolveCurrentTarget(signal);
     }
@@ -1082,7 +1203,9 @@ async function resolveTargetForScreenshot(
   const apps = await listApps(signal);
 
   if (appQuery) {
-    const app = chooseAppByQuery(apps, appQuery);
+    const app = launchId
+      ? chooseAppByLaunchId(apps, launchId) ?? chooseAppByQuery(apps, appQuery)
+      : chooseAppByQuery(apps, appQuery);
     const windows = await listWindows(app.pid, signal);
     if (!windows.length) {
       throw new Error(`No controllable window was found in app '${app.appName}'.`);
@@ -1098,6 +1221,22 @@ async function resolveTargetForScreenshot(
   }
 
   const query = windowTitleQuery!;
+  if (launchId) {
+    const app = chooseAppByLaunchId(apps, launchId);
+    if (!app) {
+      throw new Error(`No running app matched launchId '${launchId}'.`);
+    }
+    const windows = await listWindows(app.pid, signal);
+    if (!windows.length) {
+      throw new Error(`No controllable window was found for launchId '${launchId}'.`);
+    }
+
+    const window = chooseWindowByTitle(windows, query, app.appName);
+    const resolved = toResolvedTarget(app, window);
+    setCurrentTarget(resolved);
+    return resolved;
+  }
+
   const exactMatches: Array<{ app: HelperApp; window: HelperWindow }> = [];
   const partialMatches: Array<{ app: HelperApp; window: HelperWindow }> = [];
 
@@ -1232,6 +1371,62 @@ interface CaptureResult {
   activation: ActivationFlags;
 }
 
+async function callDesktopBridge(method: string, params: Record<string, unknown>): Promise<void> {
+  if (!DESKTOP_BRIDGE_URL || !DESKTOP_BRIDGE_TOKEN) {
+    return;
+  }
+
+  await fetch(DESKTOP_BRIDGE_URL, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-t3-browser-token": DESKTOP_BRIDGE_TOKEN,
+    },
+    body: JSON.stringify({ method, params }),
+  }).catch(() => undefined);
+}
+
+function overlayCursorPosition(
+  result: CaptureResult,
+  ghostCursor: MousePositionResult | undefined,
+): { x: number; y: number; visible?: boolean; intent?: "move" | "click" } | undefined {
+  if (!ghostCursor) {
+    return undefined;
+  }
+
+  return {
+    x: ghostCursor.x / result.capture.scaleFactor,
+    y: ghostCursor.y / result.capture.scaleFactor,
+  };
+}
+
+function overlayLabel(tool: string, result: CaptureResult): string {
+  return `${tool.replaceAll("_", " ")} • ${result.target.appName} — ${result.target.windowTitle}`;
+}
+
+function publishDesktopOverlay(
+  tool: string,
+  result: CaptureResult,
+  ghostCursor: MousePositionResult | undefined,
+): void {
+  void callDesktopBridge("computer.show_overlay", {
+    bounds: {
+      x: result.target.framePoints.x,
+      y: result.target.framePoints.y,
+      width: result.target.framePoints.w,
+      height: result.target.framePoints.h,
+    },
+    cursor: overlayCursorPosition(result, ghostCursor)
+      ? {
+          ...overlayCursorPosition(result, ghostCursor),
+          visible: true,
+          intent: tool === "click" || tool === "double_click" ? "click" : "move",
+        }
+      : { visible: false },
+    label: overlayLabel(tool, result),
+  });
+}
+
 async function captureCurrentTarget(
   signal?: AbortSignal,
   priorActivation = emptyActivation(),
@@ -1278,6 +1473,7 @@ function buildToolResult(
   summary: string,
   result: CaptureResult,
 ): AgentToolResult<ComputerUseDetails> {
+  publishDesktopOverlay(tool, result, runtimeState.ghostCursor);
   const details: ComputerUseDetails = {
     tool,
     session: {
@@ -1328,6 +1524,35 @@ function buildSemanticTargetInfo(target: ResolvedTarget): SemanticWindowTargetIn
     pid: target.pid,
     windowTitle: target.windowTitle,
     windowId: target.windowId,
+  };
+}
+
+function currentSessionStateForRuntime(): ComputerUseDetails["session"] | null {
+  if (!runtimeState.currentTarget || !runtimeState.currentSessionId) {
+    return null;
+  }
+  return {
+    sessionId: runtimeState.currentSessionId,
+    inputMode: runtimeState.sessionInputMode ?? "semantic",
+    fallbackRequired: runtimeState.fallbackRequired,
+    appScoped: true,
+  };
+}
+
+function currentCaptureStateForRuntime(): Pick<
+  ComputerUseDetails["capture"],
+  "captureId" | "width" | "height" | "scaleFactor" | "timestamp" | "coordinateSpace"
+> | null {
+  if (!runtimeState.currentCapture) {
+    return null;
+  }
+  return {
+    captureId: runtimeState.currentCapture.captureId,
+    width: runtimeState.currentCapture.width,
+    height: runtimeState.currentCapture.height,
+    scaleFactor: runtimeState.currentCapture.scaleFactor,
+    timestamp: runtimeState.currentCapture.timestamp,
+    coordinateSpace: "window-relative-screenshot-pixels",
   };
 }
 
@@ -1396,7 +1621,10 @@ async function performScreenshot(
   signal?: AbortSignal,
 ): Promise<AgentToolResult<ComputerUseDetails>> {
   const selection = {
+    pid: Math.trunc(toFiniteNumber(params.pid, Number.NaN)),
+    windowId: Math.trunc(toFiniteNumber(params.windowId, Number.NaN)),
     app: trimOrUndefined(params.app),
+    launchId: trimOrUndefined(params.launchId),
     windowTitle: trimOrUndefined(params.windowTitle),
   };
 
@@ -1770,6 +1998,7 @@ async function performTypeText(
             { signal, timeoutMs: COMMAND_TIMEOUT_MS },
           );
           runtimeState.sessionInputMode = "semantic";
+          runtimeState.fallbackRequired = false;
           typed = true;
         } catch {
           typed = false;
@@ -1877,6 +2106,7 @@ async function performListElements(
     { signal, timeoutMs: COMMAND_TIMEOUT_MS },
   );
   runtimeState.sessionInputMode = "semantic";
+  runtimeState.fallbackRequired = false;
 
   const elements = Array.isArray(result?.elements)
     ? (result.elements as SemanticElementInfo[])
@@ -1894,6 +2124,12 @@ async function performListElements(
       count,
       actionableOnly,
       elements,
+      ...(currentSessionStateForRuntime()
+        ? {
+            session: currentSessionStateForRuntime()!,
+            capture: currentCaptureStateForRuntime() ?? undefined,
+          }
+        : {}),
     },
   };
 }
@@ -1913,6 +2149,7 @@ async function performGetVisibleText(
     { signal, timeoutMs: COMMAND_TIMEOUT_MS },
   );
   runtimeState.sessionInputMode = "semantic";
+  runtimeState.fallbackRequired = false;
 
   const text = typeof result?.text === "string" ? result.text : "";
   const items = Array.isArray(result?.items) ? (result.items as VisibleTextItem[]) : [];
@@ -1926,6 +2163,12 @@ async function performGetVisibleText(
       count,
       text,
       items,
+      ...(currentSessionStateForRuntime()
+        ? {
+            session: currentSessionStateForRuntime()!,
+            capture: currentCaptureStateForRuntime() ?? undefined,
+          }
+        : {}),
     },
   };
 }
@@ -1961,6 +2204,7 @@ async function performActivateElement(
     );
 
     runtimeState.sessionInputMode = "semantic";
+    runtimeState.fallbackRequired = false;
     stateMayHaveChanged = true;
     await sleep(ACTION_SETTLE_MS, signal);
     const captureResult = await captureCurrentTarget(signal, activation);
@@ -2089,6 +2333,7 @@ async function performWait(
 
   const ms = Math.min(60_000, Math.round(msRaw));
   await sleep(ms, signal);
+  runtimeState.fallbackRequired = false;
   const captureResult = await captureCurrentTarget(signal);
   const summary = `Waited ${ms}ms in ${captureResult.target.appName} — ${captureResult.target.windowTitle}. Returned updated screenshot.`;
   return buildToolResult("wait", summary, captureResult);
@@ -2341,6 +2586,7 @@ export function reconstructStateFromBranch(ctx: ExtensionContextLike): void {
 
 export function stopBridge(): void {
   rejectAllPending(new HelperTransportError("Computer-use helper stopped."));
+  void callDesktopBridge("computer.hide_overlay", {});
 
   const helper = runtimeState.helper;
   runtimeState.helper = undefined;

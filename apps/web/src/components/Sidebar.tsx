@@ -135,6 +135,7 @@ import {
 } from "../lib/threadHandoff";
 import { onToggleSidebarSearchPalette } from "../lib/sidebarSearchPalette";
 import { resolveSubagentPresentationForThread } from "../lib/subagentPresentation";
+import { CHATS_PROJECT_TITLE, isChatsProject } from "../lib/chatProject";
 
 function getProviderFromModel(model: string): ProviderKind {
   return inferProviderFromModel(model);
@@ -148,7 +149,6 @@ const PROVIDER_ICON_BY_PROVIDER: Record<ProviderKind, React.FC<React.SVGProps<SV
 
 const EMPTY_KEYBINDINGS: ResolvedKeybindingsConfig = [];
 const THREAD_PREVIEW_LIMIT = 6;
-const HOME_PROJECT_TITLE = "Home";
 
 function getErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message.trim().length > 0 ? error.message : fallback;
@@ -861,20 +861,6 @@ function buildOrchestrateSearch(input: { projectId?: string | null; taskId?: str
   };
 }
 
-function isHomeProject(project: Project, homeDirectory: string | null | undefined): boolean {
-  return (
-    homeDirectory !== null &&
-    homeDirectory !== undefined &&
-    project.cwd === homeDirectory &&
-    project.name === HOME_PROJECT_TITLE
-  );
-}
-
-function joinClientPath(root: string, child: string): string {
-  const separator = root.includes("\\") ? "\\" : "/";
-  return `${root.replace(/[\\/]+$/, "")}${separator}${child}`;
-}
-
 export default function Sidebar() {
   const projects = useStore((store) => store.projects);
   const threads = useStore((store) => store.threads);
@@ -1078,12 +1064,12 @@ export default function Sidebar() {
   }, [threadGitStatusCwds, threadGitStatusQueries, threadGitTargets]);
   const homeProject = useMemo(
     () =>
-      projects.find((project) => isHomeProject(project, chatWorkspaceRoot ?? homeDirectory)) ??
+      projects.find((project) => isChatsProject(project, chatWorkspaceRoot ?? homeDirectory)) ??
       null,
     [chatWorkspaceRoot, homeDirectory, projects],
   );
   const workspaceProjects = useMemo(
-    () => projects.filter((project) => !isHomeProject(project, chatWorkspaceRoot ?? homeDirectory)),
+    () => projects.filter((project) => !isChatsProject(project, chatWorkspaceRoot ?? homeDirectory)),
     [chatWorkspaceRoot, homeDirectory, projects],
   );
   const projectById = useMemo(
@@ -1364,16 +1350,6 @@ export default function Sidebar() {
       const createdAt = new Date().toISOString();
       return (async () => {
         let worktreePath = options?.worktreePath ?? null;
-        if (projectId === homeProjectId && worktreePath === null && chatWorkspaceRoot) {
-          const api = readNativeApi();
-          await api?.projects
-            .createDirectory({
-              cwd: chatWorkspaceRoot,
-              relativePath: threadId,
-            })
-            .catch(() => undefined);
-          worktreePath = joinClientPath(chatWorkspaceRoot, threadId);
-        }
         setProjectDraftThreadId(projectId, threadId, {
           createdAt,
           branch: options?.branch ?? null,
@@ -1395,8 +1371,6 @@ export default function Sidebar() {
     [
       clearProjectDraftThreadId,
       getDraftThreadByProjectId,
-      chatWorkspaceRoot,
-      homeProjectId,
       navigate,
       getDraftThread,
       routeThreadId,
@@ -1542,7 +1516,7 @@ export default function Sidebar() {
       type: "project.create",
       commandId: newCommandId(),
       projectId,
-      title: HOME_PROJECT_TITLE,
+      title: CHATS_PROJECT_TITLE,
       workspaceRoot,
       defaultModel: DEFAULT_MODEL_BY_PROVIDER.codex,
       createdAt,
@@ -2219,6 +2193,7 @@ export default function Sidebar() {
           projectId,
           deleteThreads: true,
         });
+        await api.browser.kill({ projectId }).catch(() => undefined);
         if (shouldNavigateToFallback) {
           if (fallbackThreadId) {
             void navigate({

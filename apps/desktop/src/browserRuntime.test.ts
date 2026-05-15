@@ -1,4 +1,4 @@
-import { ProjectId } from "@t3tools/contracts";
+import { ProjectId, ThreadId } from "@t3tools/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 declare global {
@@ -33,6 +33,8 @@ vi.mock("electron", () => {
     setZoomFactorCalls: number[] = [];
     executeJavaScriptCalls: string[] = [];
     ownerView: MockWebContentsView | null = null;
+    closeCalls = 0;
+    closed = false;
     readonly navigationHistory = {
       canGoBack: () => false,
       canGoForward: () => false,
@@ -78,7 +80,15 @@ vi.mock("electron", () => {
 
     reload(): void {}
 
-    close(): void {}
+    close(): void {
+      this.closeCalls += 1;
+      this.closed = true;
+      this.emit("destroyed");
+    }
+
+    isDestroyed(): boolean {
+      return this.closed;
+    }
 
     sendInputEvent(): void {}
 
@@ -131,13 +141,18 @@ vi.mock("electron", () => {
   };
 });
 
-import { BROWSER_STORAGE_PARTITION, BrowserRuntimeRegistry } from "./browserRuntime";
+import {
+  BROWSER_HIDDEN_RUNTIME_IDLE_TTL_MS,
+  BROWSER_STORAGE_PARTITION,
+  BrowserRuntimeRegistry,
+} from "./browserRuntime";
 
 interface TestWebContents {
   currentUrl: string;
   loadURL: (url: string) => Promise<void>;
   setZoomFactorCalls: number[];
   executeJavaScriptCalls: string[];
+  closeCalls: number;
 }
 
 interface TestView {
@@ -160,6 +175,10 @@ function getProjectRuntime(registry: BrowserRuntimeRegistry, projectId: ProjectI
   const runtime = ((registry as any).runtimes as Map<ProjectId, TestProjectRuntime>).get(projectId);
   expect(runtime).toBeDefined();
   return runtime!;
+}
+
+function hasProjectRuntime(registry: BrowserRuntimeRegistry, projectId: ProjectId): boolean {
+  return ((registry as any).runtimes as Map<ProjectId, TestProjectRuntime>).has(projectId);
 }
 
 function getActiveTabRuntime(registry: BrowserRuntimeRegistry, projectId: ProjectId): TestTabRuntime {
@@ -229,6 +248,24 @@ describe("BrowserRuntimeRegistry", () => {
     const otherTab = getActiveTabRuntime(registry, otherProjectId);
     expect(tab.view.partition).toBe(BROWSER_STORAGE_PARTITION);
     expect(otherTab.view.partition).toBe(BROWSER_STORAGE_PARTITION);
+  });
+
+  it("emits pane requests with the owning thread", async () => {
+    const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
+    const projectId = ProjectId.makeUnsafe("project-browser-request");
+    const threadId = ThreadId.makeUnsafe("thread-browser-request");
+    const events: unknown[] = [];
+
+    registry.on("event", (event) => events.push(event));
+    await registry.requestPane(projectId, threadId);
+
+    expect(events).toEqual([
+      {
+        type: "pane.requested",
+        projectId,
+        threadId,
+      },
+    ]);
   });
 
   it("enforces browser approval and history policies", async () => {
@@ -531,13 +568,116 @@ describe("BrowserRuntimeRegistry", () => {
     resolveViewportMeasurement({ x: 25, y: 35, width: 480, height: 360 });
 
     await openPromise;
-    vi.runAllTimers();
+    vi.advanceTimersByTime(500);
     await Promise.resolve();
     const tab = getActiveTabRuntime(registry, projectId);
     expect(tab.view.setBoundsCalls).toHaveLength(0);
     expect((registry as any).paneOpen).toBe(false);
     expect((registry as any).paneBounds).toBeNull();
     expect((registry as any).attachedProjectId).toBeNull();
+  });
+
+  it("reaps hidden project runtimes after an idle grace period", async () => {
+    const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
+    const window = {
+      contentView: {
+        addChildView: vi.fn(),
+        removeChildView: vi.fn(),
+      },
+    };
+    const projectId = ProjectId.makeUnsafe("project-hidden-idle");
+
+    registry.setWindow(window as never);
+    await registry.open(projectId, { x: 10, y: 20, width: 320, height: 240 });
+    const tab = getActiveTabRuntime(registry, projectId);
+
+    await registry.closePane();
+
+    expect(hasProjectRuntime(registry, projectId)).toBe(true);
+    vi.advanceTimersByTime(BROWSER_HIDDEN_RUNTIME_IDLE_TTL_MS - 1);
+    expect(hasProjectRuntime(registry, projectId)).toBe(true);
+
+    vi.advanceTimersByTime(1);
+
+    expect(hasProjectRuntime(registry, projectId)).toBe(false);
+    expect(tab.view.webContents.closeCalls).toBe(1);
+  });
+
+  it("keeps a hidden project runtime when the pane is reopened before idle cleanup", async () => {
+    const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
+    const window = {
+      contentView: {
+        addChildView: vi.fn(),
+        removeChildView: vi.fn(),
+      },
+    };
+    const projectId = ProjectId.makeUnsafe("project-hidden-reopened");
+
+    registry.setWindow(window as never);
+    await registry.open(projectId, { x: 10, y: 20, width: 320, height: 240 });
+    const tab = getActiveTabRuntime(registry, projectId);
+
+    await registry.closePane();
+    await registry.open(projectId, { x: 15, y: 25, width: 330, height: 250 });
+    vi.advanceTimersByTime(BROWSER_HIDDEN_RUNTIME_IDLE_TTL_MS);
+
+    expect(hasProjectRuntime(registry, projectId)).toBe(true);
+    expect(tab.view.webContents.closeCalls).toBe(0);
+  });
+
+  it("reaps the previously attached project when switching browser projects", async () => {
+    const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
+    const window = {
+      contentView: {
+        addChildView: vi.fn(),
+        removeChildView: vi.fn(),
+      },
+    };
+    const firstProjectId = ProjectId.makeUnsafe("project-hidden-switch-a");
+    const secondProjectId = ProjectId.makeUnsafe("project-hidden-switch-b");
+
+    registry.setWindow(window as never);
+    await registry.open(firstProjectId, { x: 10, y: 20, width: 320, height: 240 });
+    const firstTab = getActiveTabRuntime(registry, firstProjectId);
+    await registry.open(secondProjectId, { x: 10, y: 20, width: 320, height: 240 });
+
+    vi.advanceTimersByTime(BROWSER_HIDDEN_RUNTIME_IDLE_TTL_MS);
+
+    expect(hasProjectRuntime(registry, firstProjectId)).toBe(false);
+    expect(hasProjectRuntime(registry, secondProjectId)).toBe(true);
+    expect(firstTab.view.webContents.closeCalls).toBe(1);
+  });
+
+  it("kills live runtimes when the owning window is cleared", async () => {
+    const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
+    const window = {
+      contentView: {
+        addChildView: vi.fn(),
+        removeChildView: vi.fn(),
+      },
+    };
+    const projectId = ProjectId.makeUnsafe("project-window-closed");
+
+    registry.setWindow(window as never);
+    await registry.open(projectId, { x: 10, y: 20, width: 320, height: 240 });
+    const tab = getActiveTabRuntime(registry, projectId);
+
+    registry.setWindow(null);
+
+    expect(hasProjectRuntime(registry, projectId)).toBe(false);
+    expect(tab.view.webContents.closeCalls).toBe(1);
+  });
+
+  it("does not clear persistent browser storage when killing a runtime", async () => {
+    const electron = await import("electron");
+    const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
+    const projectId = ProjectId.makeUnsafe("project-storage-kept");
+
+    vi.mocked(electron.session.fromPartition).mockClear();
+    await registry.ensure(projectId);
+    await registry.kill(projectId);
+
+    expect(electron.session.fromPartition).not.toHaveBeenCalled();
   });
 
   it("creates, activates, and closes tabs while tracking the active tab", async () => {

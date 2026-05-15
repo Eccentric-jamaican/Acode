@@ -38,6 +38,7 @@ export interface SqliteClientConfig {
   readonly filename: string;
   readonly readonly?: boolean | undefined;
   readonly allowExtension?: boolean | undefined;
+  readonly timeout?: number | undefined;
   readonly prepareCacheSize?: number | undefined;
   readonly prepareCacheTTL?: Duration.Input | undefined;
   readonly spanAttributes?: Record<string, unknown> | undefined;
@@ -227,6 +228,7 @@ const make = (
       new DatabaseSync(options.filename, {
         readOnly: options.readonly ?? false,
         allowExtension: options.allowExtension ?? false,
+        timeout: options.timeout ?? 5_000,
       }),
   );
 
@@ -242,6 +244,7 @@ const makeMemory = (
     () => {
       const database = new DatabaseSync(":memory:", {
         allowExtension: config.allowExtension ?? false,
+        timeout: config.timeout ?? 5_000,
       });
       return database;
     },

@@ -91,20 +91,29 @@ describe("createCodexHomeOverlay", () => {
     expect(shouldCopyCodexHomeEntry(tmpPluginPath, baseHomePath)).toBe(false);
   });
 
-  it("returns the preferred home unchanged outside full-access mode", () => {
-    const preferredHomePath = "C:/codex-home";
+  it("creates a T3 Computer Use overlay outside full-access mode without browser MCP", () => {
+    const stateDir = trackTempDir(makeTempDir("t3-codex-overlay-state-"));
+    const preferredHomePath = trackTempDir(makeTempDir("t3-codex-overlay-home-"));
 
-    expect(
-      createCodexHomeOverlay({
-        threadId: ThreadId.makeUnsafe("thread-1"),
-        projectId: ProjectId.makeUnsafe("project-1"),
-        runtimeMode: "approval-required",
-        stateDir: "C:/state",
-        preferredHomePath,
-        bridgeUrl: "http://127.0.0.1:4123/rpc",
-        bridgeToken: "secret",
-      }),
-    ).toBe(preferredHomePath);
+    const overlayPath = createCodexHomeOverlay({
+      threadId: ThreadId.makeUnsafe("thread-1"),
+      projectId: ProjectId.makeUnsafe("project-1"),
+      runtimeMode: "approval-required",
+      stateDir,
+      preferredHomePath,
+      bridgeUrl: "http://127.0.0.1:4123/rpc",
+      bridgeToken: "secret",
+    });
+
+    expect(overlayPath).toBeTruthy();
+    expect(overlayPath).not.toBe(preferredHomePath);
+    const configToml = readFileSync(path.join(overlayPath!, "config.toml"), "utf8");
+    expect(configToml).toContain("[mcp_servers.t3_computer]");
+    expect(configToml).not.toContain("[mcp_servers.t3_browser]");
+    expect(configToml).toContain('ELECTRON_RUN_AS_NODE = "1"');
+    expect(configToml).toContain(`cwd = "${process.cwd().replace(/\\/g, "\\\\")}"`);
+    expect(configToml).toContain("required = true");
+    expect(configToml).toContain(`T3CODE_STATE_DIR = "${stateDir.replace(/\\/g, "\\\\")}"`);
   });
 
   it("still creates a T3 Computer Use overlay when the browser bridge is unavailable", () => {
@@ -124,6 +133,7 @@ describe("createCodexHomeOverlay", () => {
     const configToml = readFileSync(path.join(overlayPath!, "config.toml"), "utf8");
     expect(configToml).not.toContain("[mcp_servers.t3_browser]");
     expect(configToml).toContain("[mcp_servers.t3_computer]");
+    expect(configToml).toContain('ELECTRON_RUN_AS_NODE = "1"');
     expect(configToml).toContain(`T3CODE_STATE_DIR = "${stateDir.replace(/\\/g, "\\\\")}"`);
   });
 
@@ -157,6 +167,9 @@ describe("createCodexHomeOverlay", () => {
     expect(configToml).toContain("[mcp_servers.t3_computer]");
     expect(configToml).toContain('command = "');
     expect(configToml).toContain('args = ["');
+    expect(configToml).toContain(`cwd = "${process.cwd().replace(/\\/g, "\\\\")}"`);
+    expect(configToml).toContain("required = true");
+    expect(configToml).toContain('ELECTRON_RUN_AS_NODE = "1"');
     expect(configToml).toContain('T3_BROWSER_BRIDGE_URL = "http://127.0.0.1:4123/rpc"');
     expect(configToml).toContain('T3_BROWSER_BRIDGE_TOKEN = "secret-token"');
     expect(configToml).toContain('T3_BROWSER_PROJECT_ID = "project-1"');

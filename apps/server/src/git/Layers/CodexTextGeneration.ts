@@ -501,7 +501,10 @@ const makeCodexTextGeneration = Effect.gen(function* () {
 
       const generated = yield* runCodexJson({
         operation: "generateThreadTitle",
-        cwd: input.cwd,
+        // Thread title generation only depends on prompt text and attachments.
+        // Use the stable server cwd so ad hoc chat directories do not need to be
+        // individually trusted by the local Codex CLI installation.
+        cwd: serverConfig.cwd,
         prompt: promptSections.join("\n"),
         outputSchemaJson: Schema.Struct({
           title: Schema.String,

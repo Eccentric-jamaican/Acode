@@ -255,6 +255,71 @@ interface StagePackageJson {
   };
 }
 
+function resolveComputerUseHelperRelativePaths(
+  platform: typeof BuildPlatform.Type,
+  arch: typeof BuildArch.Type,
+): ReadonlyArray<string> {
+  if (platform === "linux") {
+    return [];
+  }
+
+  const platformDir = platform === "win" ? "windows" : "darwin";
+  const helperFileName = platform === "win" ? "bridge.exe" : "bridge";
+  if (arch === "universal") {
+    return ["x64", "arm64"].map((candidateArch) =>
+      join("computer-use", "prebuilt", platformDir, candidateArch, helperFileName),
+    );
+  }
+
+  return [join("computer-use", "prebuilt", platformDir, arch, helperFileName)];
+}
+
+const stageComputerUseHelpers = Effect.fn("stageComputerUseHelpers")(function* (input: {
+  readonly repoRoot: string;
+  readonly stageAppDir: string;
+  readonly platform: typeof BuildPlatform.Type;
+  readonly arch: typeof BuildArch.Type;
+}) {
+  const path = yield* Path.Path;
+  const fs = yield* FileSystem.FileSystem;
+
+  const helperRelativePaths = resolveComputerUseHelperRelativePaths(input.platform, input.arch);
+  if (helperRelativePaths.length === 0) {
+    return;
+  }
+
+  const stagedServerDistDir = path.join(input.stageAppDir, "apps/server/dist");
+  const stagedComputerUseDir = path.join(stagedServerDistDir, "computer-use");
+  const sourceComputerUseDir = path.join(input.repoRoot, "apps/server/computer-use");
+
+  if (!(yield* fs.exists(stagedComputerUseDir))) {
+    if (!(yield* fs.exists(sourceComputerUseDir))) {
+      return yield* new BuildScriptError({
+        message: `Computer-use helpers were not found in ${stagedComputerUseDir} and no source helpers exist at ${sourceComputerUseDir}.`,
+      });
+    }
+
+    yield* fs.copy(sourceComputerUseDir, stagedComputerUseDir);
+    yield* Effect.log(
+      "[desktop-artifact] Staged computer-use helpers from apps/server/computer-use fallback.",
+    );
+  }
+
+  const missingHelpers: string[] = [];
+  for (const helperRelativePath of helperRelativePaths) {
+    const stagedHelperPath = path.join(stagedServerDistDir, helperRelativePath);
+    if (!(yield* fs.exists(stagedHelperPath))) {
+      missingHelpers.push(stagedHelperPath);
+    }
+  }
+
+  if (missingHelpers.length > 0) {
+    return yield* new BuildScriptError({
+      message: `Missing staged T3 Computer Use helper(s) for ${input.platform}/${input.arch}: ${missingHelpers.join(", ")}.`,
+    });
+  }
+});
+
 const AzureTrustedSigningOptionsConfig = Config.all({
   publisherName: Config.string("AZURE_TRUSTED_SIGNING_PUBLISHER_NAME"),
   endpoint: Config.string("AZURE_TRUSTED_SIGNING_ENDPOINT"),
@@ -693,6 +758,12 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   yield* fs.copy(distDirs.desktopDist, path.join(stageAppDir, "apps/desktop/dist-electron"));
   yield* fs.copy(distDirs.desktopResources, stageResourcesDir);
   yield* fs.copy(distDirs.serverDist, path.join(stageAppDir, "apps/server/dist"));
+  yield* stageComputerUseHelpers({
+    repoRoot,
+    stageAppDir,
+    platform: options.platform,
+    arch: options.arch,
+  });
 
   yield* assertPlatformBuildResources(options.platform, stageResourcesDir, options.verbose);
 

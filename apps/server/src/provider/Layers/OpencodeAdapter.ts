@@ -1137,10 +1137,10 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
             data.diff = { files: diffFiles };
           }
           const itemType = canonicalItemTypeFromToolName(toolName);
-          const title = asString(state?.title) ?? toolName;
+          const rawTitle = asString(state?.title)?.trim();
+          const title = rawTitle && rawTitle.length > 0 ? rawTitle : toolName;
           const previous = toolPartStatusById.get(partId);
-          const shouldEmitStarted =
-            !previous || (previous.sessionId === sessionId && previous.status !== status);
+          const shouldEmitStarted = !previous || previous.sessionId !== sessionId;
 
           if (shouldEmitStarted && (status === "pending" || status === "running")) {
             await emitAsync(

@@ -83,6 +83,26 @@ type SidebarInstanceContextProps = {
 const SidebarContext = React.createContext<SidebarContextProps | null>(null);
 const SidebarInstanceContext = React.createContext<SidebarInstanceContextProps | null>(null);
 
+async function persistSidebarState(open: boolean): Promise<void> {
+  try {
+    await cookieStore.set({
+      expires: Date.now() + SIDEBAR_COOKIE_MAX_AGE * 1000,
+      name: SIDEBAR_COOKIE_NAME,
+      path: "/",
+      value: String(open),
+    });
+    return;
+  } catch {
+    // Some Electron/custom-protocol runtimes reject CookieStore writes.
+  }
+
+  try {
+    window.localStorage.setItem(SIDEBAR_COOKIE_NAME, String(open));
+  } catch {
+    // Persistence is best-effort only.
+  }
+}
+
 function useSidebar() {
   const context = React.useContext(SidebarContext);
   if (!context) {
@@ -121,13 +141,7 @@ function SidebarProvider({
         _setOpen(openState);
       }
 
-      // This sets the cookie to keep the sidebar state.
-      await cookieStore.set({
-        expires: Date.now() + SIDEBAR_COOKIE_MAX_AGE * 1000,
-        name: SIDEBAR_COOKIE_NAME,
-        path: "/",
-        value: String(openState),
-      });
+      await persistSidebarState(openState);
     },
     [setOpenProp, open],
   );

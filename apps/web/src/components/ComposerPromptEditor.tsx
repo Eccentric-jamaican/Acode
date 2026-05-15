@@ -57,6 +57,23 @@ import { basenameOfPath, getVscodeIconUrlForEntry } from "~/vscode-icons";
 
 const COMPOSER_EDITOR_HMR_KEY = `composer-editor-${Math.random().toString(36).slice(2)}`;
 
+export interface ComposerMentionDescriptor {
+  mentionName: string;
+  label: string;
+  type: "plugin" | "skill" | "desktop-app";
+  iconUrl?: string | undefined;
+}
+
+let composerMentionDescriptorByName = new Map<string, ComposerMentionDescriptor>();
+
+function setComposerMentionDescriptors(
+  descriptors: readonly ComposerMentionDescriptor[] | undefined,
+): void {
+  composerMentionDescriptorByName = new Map(
+    (descriptors ?? []).map((descriptor) => [descriptor.mentionName.toLowerCase(), descriptor]),
+  );
+}
+
 type SerializedComposerMentionNode = Spread<
   {
     path: string;
@@ -82,9 +99,10 @@ class ComposerMentionNode extends TextNode {
   }
 
   constructor(path: string, key?: NodeKey) {
-    const normalizedPath = path.startsWith("@") ? path.slice(1) : path;
-    super(`@${normalizedPath}`, key);
-    this.__path = normalizedPath;
+    const marker = path.startsWith("$") ? "$" : "@";
+    const normalizedPath = path.startsWith("@") || path.startsWith("$") ? path.slice(1) : path;
+    super(`${marker}${normalizedPath}`, key);
+    this.__path = `${marker}${normalizedPath}`;
   }
 
   override exportJSON(): SerializedComposerMentionNode {
@@ -159,17 +177,38 @@ function renderMentionChipDom(container: HTMLElement, pathValue: string): void {
   container.style.setProperty("user-select", "none");
   container.style.setProperty("-webkit-user-select", "none");
 
+  const marker = pathValue.startsWith("$") ? "$" : "@";
+  const mentionName =
+    pathValue.startsWith("@") || pathValue.startsWith("$") ? pathValue.slice(1) : pathValue;
+  const descriptor = composerMentionDescriptorByName.get(mentionName.toLowerCase());
+  const labelText = descriptor?.label ?? basenameOfPath(mentionName);
+
   const theme = resolvedThemeFromDocument();
-  const icon = document.createElement("img");
-  icon.alt = "";
-  icon.ariaHidden = "true";
-  icon.className = "size-3.5 shrink-0 opacity-85";
-  icon.loading = "lazy";
-  icon.src = getVscodeIconUrlForEntry(pathValue, inferMentionPathKind(pathValue), theme);
+  const icon = document.createElement("span");
+  icon.className = "inline-flex size-3.5 shrink-0 items-center justify-center overflow-hidden";
+  const iconUrl =
+    descriptor?.iconUrl ??
+    (descriptor
+      ? null
+      : getVscodeIconUrlForEntry(mentionName, inferMentionPathKind(mentionName), theme));
+
+  if (iconUrl) {
+    const image = document.createElement("img");
+    image.alt = "";
+    image.ariaHidden = "true";
+    image.className = "size-3.5 shrink-0 object-contain opacity-90";
+    image.loading = "lazy";
+    image.src = iconUrl;
+    icon.append(image);
+  } else {
+    icon.textContent = marker;
+    icon.className =
+      "inline-flex size-3.5 shrink-0 items-center justify-center rounded-[3px] bg-foreground/10 text-[10px] font-semibold leading-none opacity-80";
+  }
 
   const label = document.createElement("span");
   label.className = "truncate select-none leading-tight";
-  label.textContent = basenameOfPath(pathValue);
+  label.textContent = labelText;
 
   container.append(icon, label);
 }
@@ -180,9 +219,6 @@ function clampCursor(value: string, cursor: number): number {
 }
 
 function getComposerNodeTextLength(node: LexicalNode): number {
-  if (node instanceof ComposerMentionNode) {
-    return 1;
-  }
   if ($isTextNode(node)) {
     return node.getTextContentSize();
   }
@@ -215,9 +251,6 @@ function getAbsoluteOffsetForPoint(node: LexicalNode, pointOffset: number): numb
   }
 
   if ($isTextNode(node)) {
-    if (node instanceof ComposerMentionNode) {
-      return offset + (pointOffset > 0 ? 1 : 0);
-    }
     return offset + Math.min(pointOffset, node.getTextContentSize());
   }
 
@@ -247,6 +280,7 @@ function findSelectionPointAtOffset(
     const parent = node.getParent();
     if (!parent || !$isElementNode(parent)) return null;
     const index = node.getIndexWithinParent();
+    const size = node.getTextContentSize();
     if (remainingRef.value === 0) {
       return {
         key: parent.getKey(),
@@ -254,14 +288,14 @@ function findSelectionPointAtOffset(
         type: "element",
       };
     }
-    if (remainingRef.value === 1) {
+    if (remainingRef.value <= size) {
       return {
         key: parent.getKey(),
         offset: index + 1,
         type: "element",
       };
     }
-    remainingRef.value -= 1;
+    remainingRef.value -= size;
     return null;
   }
 
@@ -376,7 +410,7 @@ function $setComposerEditorPrompt(prompt: string): void {
   const segments = splitPromptIntoComposerSegments(prompt);
   for (const segment of segments) {
     if (segment.type === "mention") {
-      paragraph.append($createComposerMentionNode(segment.path));
+      paragraph.append($createComposerMentionNode(segment.token));
       continue;
     }
     $appendTextWithLineBreaks(paragraph, segment.text);
@@ -395,6 +429,7 @@ interface ComposerPromptEditorProps {
   cursor: number;
   disabled: boolean;
   placeholder: string;
+  mentionDescriptors?: readonly ComposerMentionDescriptor[];
   className?: string;
   onChange: (nextValue: string, nextCursor: number, cursorAdjacentToMention: boolean) => void;
   onCommandKeyDown?: (
@@ -549,7 +584,7 @@ function ComposerMentionSelectionNormalizePlugin() {
         if (!(anchorNode instanceof ComposerMentionNode)) return;
         if (selection.anchor.offset === 0) return;
         const beforeOffset = getAbsoluteOffsetForPoint(anchorNode, 0);
-        afterOffset = beforeOffset + 1;
+        afterOffset = beforeOffset + anchorNode.getTextContentSize();
       });
       if (afterOffset !== null) {
         queueMicrotask(() => {
@@ -630,6 +665,7 @@ function ComposerPromptEditorInner({
   cursor,
   disabled,
   placeholder,
+  mentionDescriptors,
   className,
   onChange,
   onCommandKeyDown,
@@ -639,6 +675,10 @@ function ComposerPromptEditorInner({
   const [editor] = useLexicalComposerContext();
   const onChangeRef = useRef(onChange);
   const snapshotRef = useRef({ value, cursor: clampCursor(value, cursor) });
+
+  useLayoutEffect(() => {
+    setComposerMentionDescriptors(mentionDescriptors);
+  }, [mentionDescriptors]);
 
   useEffect(() => {
     onChangeRef.current = onChange;
@@ -779,9 +819,20 @@ function ComposerPromptEditorInner({
 
 export const ComposerPromptEditor = forwardRef<ComposerPromptEditorHandle, ComposerPromptEditorProps>(
   function ComposerPromptEditor(
-    { value, cursor, disabled, placeholder, className, onChange, onCommandKeyDown, onPaste },
+    {
+      value,
+      cursor,
+      disabled,
+      placeholder,
+      mentionDescriptors,
+      className,
+      onChange,
+      onCommandKeyDown,
+      onPaste,
+    },
     ref,
   ) {
+    setComposerMentionDescriptors(mentionDescriptors);
     const initialValueRef = useRef(value);
     const initialConfig = useMemo<InitialConfigType>(
       () => ({
@@ -808,6 +859,7 @@ export const ComposerPromptEditor = forwardRef<ComposerPromptEditorHandle, Compo
           onChange={onChange}
           onPaste={onPaste}
           editorRef={ref}
+          {...(mentionDescriptors ? { mentionDescriptors } : {})}
           {...(onCommandKeyDown ? { onCommandKeyDown } : {})}
           {...(className ? { className } : {})}
         />

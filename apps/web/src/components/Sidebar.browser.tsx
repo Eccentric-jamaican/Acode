@@ -1662,7 +1662,7 @@ describe("Sidebar browser", () => {
     await remounted.cleanup();
   });
 
-  it.skip("creates a Home-backed chat when New chat is clicked without an active thread", async () => {
+  it.skip("creates a chats-backed chat when New chat is clicked without an active thread", async () => {
     const projectAlpha = "project-alpha" as ProjectId;
     const projectBeta = "project-beta" as ProjectId;
     fixture = {
@@ -1675,6 +1675,7 @@ describe("Sidebar browser", () => {
       serverConfig: {
         ...fixture.serverConfig,
         homeDirectory: "C:\\Users\\Addis",
+        chatWorkspaceRoot: "C:\\Users\\Addis\\Documents\\A Code\\Chats",
       },
       welcome: {
         cwd: "C:\\Users\\Addis\\source\\repos\\t3code-main",
@@ -1693,7 +1694,9 @@ describe("Sidebar browser", () => {
         const homeProject = useStore
           .getState()
           .projects.find(
-            (project) => project.cwd === "C:\\Users\\Addis" && project.name === "Home",
+            (project) =>
+              project.cwd === "C:\\Users\\Addis\\Documents\\A Code\\Chats" &&
+              project.name === "chats",
           );
         return homeProject ? (draftMap[homeProject.id] ?? null) : null;
       })

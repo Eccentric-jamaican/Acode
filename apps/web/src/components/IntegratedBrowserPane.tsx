@@ -551,7 +551,6 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
     activeThreadId,
     open,
     layout = "aside",
-    onRequestOpen,
     onRequestClose,
   } = props;
   const usesAsideLayout = layout === "aside";
@@ -698,9 +697,6 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
       return;
     }
     const unsubscribe = api.browser.onEvent((event) => {
-      if (event.type === "pane.requested") {
-        onRequestOpen();
-      }
       if (!activeProjectId || event.projectId !== activeProjectId) {
         return;
       }
@@ -714,7 +710,7 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
       }
     });
     return unsubscribe;
-  }, [activeProjectId, activeThreadId, api, drainCaptureQueue, onRequestOpen]);
+  }, [activeProjectId, activeThreadId, api, drainCaptureQueue]);
 
   useEffect(() => {
     if (!api?.browser || !activeProjectId) {

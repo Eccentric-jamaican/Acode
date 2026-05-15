@@ -150,6 +150,7 @@ const RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS = [
 const CODEX_DEFAULT_MODEL = "gpt-5.4";
 const CODEX_SPARK_MODEL = "gpt-5.3-codex-spark";
 const CODEX_SPARK_DISABLED_PLAN_TYPES = new Set<CodexPlanType>(["free", "go", "plus"]);
+const CODEX_THREAD_OPEN_TIMEOUT_MS = 90_000;
 
 function resolveBrowserUseClientPath(): string {
   return fileURLToPath(new URL("./browserUseClient.mjs", import.meta.url));
@@ -646,10 +647,15 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       if (resumeThreadId) {
         try {
           threadOpenMethod = "thread/resume";
-          threadOpenResponse = await this.sendRequest(context, "thread/resume", {
-            ...sessionOverrides,
-            threadId: resumeThreadId,
-          });
+          threadOpenResponse = await this.sendRequest(
+            context,
+            "thread/resume",
+            {
+              ...sessionOverrides,
+              threadId: resumeThreadId,
+            },
+            CODEX_THREAD_OPEN_TIMEOUT_MS,
+          );
         } catch (error) {
           if (!isRecoverableThreadResumeError(error)) {
             this.emitErrorEvent(
@@ -680,11 +686,21 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
             recoverable: true,
             cause: error instanceof Error ? error.message : String(error),
           }).pipe(this.runPromise);
-          threadOpenResponse = await this.sendRequest(context, "thread/start", threadStartParams);
+          threadOpenResponse = await this.sendRequest(
+            context,
+            "thread/start",
+            threadStartParams,
+            CODEX_THREAD_OPEN_TIMEOUT_MS,
+          );
         }
       } else {
         threadOpenMethod = "thread/start";
-        threadOpenResponse = await this.sendRequest(context, "thread/start", threadStartParams);
+        threadOpenResponse = await this.sendRequest(
+          context,
+          "thread/start",
+          threadStartParams,
+          CODEX_THREAD_OPEN_TIMEOUT_MS,
+        );
       }
 
       const threadOpenRecord = this.readObject(threadOpenResponse);
@@ -700,7 +716,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         status: "ready",
         resumeCursor: {
           threadId: providerThreadId,
-          t3ComputerMcp: input.runtimeMode === "full-access",
+          t3ComputerMcp: Boolean(codexOptions.homePath),
         },
       });
       this.emitLifecycleEvent(
@@ -1258,7 +1274,7 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         this.updateSession(context, {
           resumeCursor: {
             threadId: providerThreadId,
-            t3ComputerMcp: context.session.runtimeMode === "full-access",
+            t3ComputerMcp: true,
           },
         });
       }

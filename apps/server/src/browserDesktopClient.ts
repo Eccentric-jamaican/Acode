@@ -1,20 +1,23 @@
-import type { ProjectId } from "@t3tools/contracts";
+import type { ProjectId, ThreadId } from "@t3tools/contracts";
 
 export interface DesktopBrowserClientOptions {
   bridgeUrl: string;
   authToken: string;
   defaultProjectId?: ProjectId | undefined;
+  defaultThreadId?: ThreadId | undefined;
 }
 
 export class DesktopBrowserClient {
   private readonly bridgeUrl: string;
   private readonly authToken: string;
   private readonly defaultProjectId: ProjectId | undefined;
+  private readonly defaultThreadId: ThreadId | undefined;
 
   constructor(options: DesktopBrowserClientOptions) {
     this.bridgeUrl = options.bridgeUrl;
     this.authToken = options.authToken;
     this.defaultProjectId = options.defaultProjectId;
+    this.defaultThreadId = options.defaultThreadId;
   }
 
   async call<T>(method: string, params?: Record<string, unknown>): Promise<T> {
@@ -22,10 +25,19 @@ export class DesktopBrowserClient {
       typeof params?.projectId === "string" && params.projectId.length > 0
         ? (params.projectId as ProjectId)
         : this.defaultProjectId;
-    const payload =
+    const payloadWithProject =
       projectId && (params?.projectId === undefined || params.projectId === null)
         ? { ...params, projectId }
         : (params ?? {});
+    const threadId =
+      typeof payloadWithProject.threadId === "string" && payloadWithProject.threadId.length > 0
+        ? (payloadWithProject.threadId as ThreadId)
+        : this.defaultThreadId;
+    const payload =
+      threadId &&
+      (payloadWithProject.threadId === undefined || payloadWithProject.threadId === null)
+        ? { ...payloadWithProject, threadId }
+        : payloadWithProject;
     const response = await fetch(this.bridgeUrl, {
       method: "POST",
       headers: {
