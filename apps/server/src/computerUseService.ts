@@ -33,9 +33,171 @@ interface InstalledWindowsApp {
   readonly appId: string;
 }
 
+interface LaunchedComputerUseApp {
+  readonly appName: string;
+  readonly launchId: string;
+  readonly attached: boolean;
+  readonly pid?: number;
+  readonly windowId?: number;
+  readonly windowTitle?: string;
+}
+
+interface ComputerUseWindowQuery {
+  readonly appName?: string;
+  readonly launchId?: string;
+  readonly pid?: number;
+  readonly windowId?: number;
+  readonly windowTitle?: string;
+}
+
+interface BoundedComputerUseWindow {
+  readonly appName: string;
+  readonly launchId: string;
+  readonly pid: number;
+  readonly windowId: number;
+  readonly windowTitle: string;
+  readonly isFocused: boolean;
+  readonly isMinimized: boolean;
+  readonly isOnscreen: boolean;
+  readonly isMain: boolean;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+interface ManagedComputerUseWindowResult {
+  readonly appName: string;
+  readonly launchId: string;
+  readonly pid: number;
+  readonly windowId: number;
+  readonly windowTitle: string;
+  readonly focused: boolean;
+}
+
+interface TopLevelWindowCandidate {
+  readonly pid: number;
+  readonly processName: string;
+  readonly title: string;
+  readonly processPath?: string;
+  readonly windowId?: number;
+}
+
 export const COMPUTER_USE_APP_ICON_ROUTE_PATH = "/computer-use/app-icon";
 
 const appIconCache = new Map<string, Buffer | null>();
+const recentComputerUseLaunches = new Map<string, number>();
+const COMPUTER_USE_LAUNCH_COOLDOWN_MS = 8_000;
+
+async function focusAndResizeComputerUseWindow(input: {
+  readonly pid: number;
+  readonly windowId?: number | undefined;
+  readonly width?: number | undefined;
+  readonly height?: number | undefined;
+  readonly x?: number | undefined;
+  readonly y?: number | undefined;
+  readonly focus?: boolean | undefined;
+}): Promise<void> {
+  if (process.platform !== "win32" || !Number.isFinite(input.pid) || input.pid <= 0) {
+    return;
+  }
+
+  const width =
+    typeof input.width === "number" && Number.isFinite(input.width) && input.width > 0
+      ? Math.round(input.width)
+      : null;
+  const height =
+    typeof input.height === "number" && Number.isFinite(input.height) && input.height > 0
+      ? Math.round(input.height)
+      : null;
+  const x =
+    typeof input.x === "number" && Number.isFinite(input.x)
+      ? Math.round(input.x)
+      : null;
+  const y =
+    typeof input.y === "number" && Number.isFinite(input.y)
+      ? Math.round(input.y)
+      : null;
+  const focus = input.focus !== false;
+  const windowId =
+    typeof input.windowId === "number" && Number.isFinite(input.windowId) && input.windowId > 0
+      ? Math.trunc(input.windowId)
+      : null;
+
+  const payload = Buffer.from(
+    JSON.stringify({ pid: input.pid, windowId, x, y, width, height, focus }),
+    "utf8",
+  ).toString("base64");
+  await runPowerShellJson(
+    `
+$ErrorActionPreference = 'SilentlyContinue'
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class T3WindowOps {
+  [StructLayout(LayoutKind.Sequential)]
+  public struct RECT {
+    public int Left;
+    public int Top;
+    public int Right;
+    public int Bottom;
+  }
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+  [DllImport("user32.dll")] public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
+}
+"@
+$payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(${powershellStringLiteral(payload)})) | ConvertFrom-Json
+$proc = Get-Process -Id ([int]$payload.pid) -ErrorAction Stop | Select-Object -First 1
+$hwnd = [IntPtr]::Zero
+if ($payload.windowId -ne $null) {
+  $candidateHwnd = [IntPtr]([int64]$payload.windowId)
+  if ([T3WindowOps]::IsWindow($candidateHwnd)) {
+    $hwnd = $candidateHwnd
+  }
+}
+if ($hwnd -eq [IntPtr]::Zero) {
+  $hwnd = [IntPtr]$proc.MainWindowHandle
+}
+if ($hwnd -eq [IntPtr]::Zero) {
+  return @{ focused = $false; resized = $false; reason = 'no_main_window' } | ConvertTo-Json -Compress
+}
+$focused = $false
+$moved = $false
+$resized = $false
+$focusRequested = [bool]$payload.focus
+if ($focusRequested) {
+  [void][T3WindowOps]::ShowWindowAsync($hwnd, 9)
+  Start-Sleep -Milliseconds 120
+  $shell = New-Object -ComObject WScript.Shell
+  [void]$shell.AppActivate([int]$proc.Id)
+  Start-Sleep -Milliseconds 120
+  $focused = [T3WindowOps]::SetForegroundWindow($hwnd)
+}
+if ($payload.x -ne $null -or $payload.y -ne $null -or $payload.width -ne $null -or $payload.height -ne $null) {
+  [void][T3WindowOps]::ShowWindowAsync($hwnd, 9)
+  $rect = New-Object T3WindowOps+RECT
+  [void][T3WindowOps]::GetWindowRect($hwnd, [ref]$rect)
+  $nextX = if ($payload.x -ne $null) { [int]$payload.x } else { [int]$rect.Left }
+  $nextY = if ($payload.y -ne $null) { [int]$payload.y } else { [int]$rect.Top }
+  $nextWidth = if ($payload.width -ne $null) { [int]$payload.width } else { [int]($rect.Right - $rect.Left) }
+  $nextHeight = if ($payload.height -ne $null) { [int]$payload.height } else { [int]($rect.Bottom - $rect.Top) }
+  $moved = [T3WindowOps]::MoveWindow($hwnd, $nextX, $nextY, $nextWidth, $nextHeight, $true)
+  if ($payload.width -ne $null -or $payload.height -ne $null) {
+    $resized = $true
+  }
+}
+@{
+  focused = [bool]$focused
+  moved = [bool]$moved
+  resized = [bool]$resized
+} | ConvertTo-Json -Compress
+`,
+    5_000,
+  ).catch(() => undefined);
+}
 
 function normalizeAppName(value: string): string {
   return value
@@ -423,30 +585,515 @@ async function listInstalledWindowsApps(): Promise<InstalledWindowsApp[]> {
 export async function launchComputerUseApp(input: {
   readonly appName?: string | undefined;
   readonly launchId?: string | undefined;
-}): Promise<void> {
+  readonly width?: number | undefined;
+  readonly height?: number | undefined;
+}): Promise<LaunchedComputerUseApp> {
   if (process.platform !== "win32") {
     throw new Error("Launching installed apps is currently implemented for Windows only.");
   }
-  const launchId =
-    input.launchId?.trim() ||
-    (await listInstalledWindowsApps()).find(
-      (app) => normalizeAppName(app.name) === normalizeAppName(input.appName ?? ""),
-    )?.appId;
+  const installedApps = await listInstalledWindowsApps();
+  const installedApp =
+    installedApps.find((app) => app.appId === input.launchId?.trim()) ??
+    installedApps.find((app) => normalizeAppName(app.name) === normalizeAppName(input.appName ?? ""));
+  const launchId = input.launchId?.trim() || installedApp?.appId;
   if (!launchId) {
     throw new Error(`Unable to find installed app '${input.appName ?? ""}'.`);
   }
-  await new Promise<void>((resolve, reject) => {
-    const child = execFile(
-      "explorer.exe",
-      [`shell:AppsFolder\\${launchId}`],
-      { windowsHide: true },
-      (error) => {
-        if (error) reject(error);
-      },
+  const appName = installedApp?.name ?? input.appName?.trim() ?? launchId;
+  const topLevelWindows = await listTopLevelWindows().catch(() => []);
+  const runningBeforeLaunch = await listComputerUseApps().catch(() => null);
+  const existingApp = findReusableRunningWindow(
+    runningBeforeLaunch,
+    topLevelWindows,
+    appName,
+    launchId,
+  );
+  if (existingApp?.isRunning && existingApp.windows.some(isAttachableWindow)) {
+    const window = existingApp.windows.find(isAttachableWindow);
+    await focusAndResizeComputerUseWindow({
+      pid: existingApp.pid,
+      windowId: window?.windowId ?? undefined,
+      width: input.width,
+      height: input.height,
+    });
+    return {
+      appName: existingApp.name,
+      launchId,
+      attached: true,
+      pid: existingApp.pid,
+      ...(window?.windowId ? { windowId: window.windowId } : {}),
+      ...(window?.title ? { windowTitle: window.title } : {}),
+    };
+  }
+
+  const topLevelReuseCandidate = findReusableRunningWindowByTopLevelWindow(
+    topLevelWindows,
+    launchId,
+    appName,
+  );
+  if (topLevelReuseCandidate?.pid) {
+    const attached = await canAttachToPid(
+      topLevelReuseCandidate.pid,
+      input.width,
+      input.height,
     );
-    child.once("spawn", () => resolve());
-    child.once("error", reject);
+    if (attached) {
+      const fallbackAppName =
+        topLevelReuseCandidate.title.trim().length > 0 ? topLevelReuseCandidate.title : appName;
+      return {
+        appName: fallbackAppName,
+        launchId,
+        attached: true,
+        pid: topLevelReuseCandidate.pid,
+        ...(topLevelReuseCandidate.windowId ? { windowId: topLevelReuseCandidate.windowId } : {}),
+        ...(topLevelReuseCandidate.title ? { windowTitle: topLevelReuseCandidate.title } : {}),
+      };
+    }
+  }
+
+  const recentLaunchAt = recentComputerUseLaunches.get(launchId) ?? 0;
+  const shouldLaunch = Date.now() - recentLaunchAt > COMPUTER_USE_LAUNCH_COOLDOWN_MS;
+  if (shouldLaunch) {
+    recentComputerUseLaunches.set(launchId, Date.now());
+    await new Promise<void>((resolve, reject) => {
+      const child = execFile(
+        "explorer.exe",
+        [`shell:AppsFolder\\${launchId}`],
+        { windowsHide: true },
+        (error) => {
+          if (error) reject(error);
+        },
+      );
+      child.once("spawn", () => resolve());
+      child.once("error", reject);
+    });
+  }
+
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    const currentTopLevelWindows = await listTopLevelWindows().catch(() => topLevelWindows);
+    const appsResult = await listComputerUseApps();
+    const launchedApp = appsResult.apps.find(
+      (app) =>
+        app.launchId === launchId ||
+        normalizeAppName(app.name) === normalizeAppName(appName),
+    );
+    const readyWindow = launchedApp?.windows.find(
+      isAttachableWindow,
+    );
+    if (launchedApp?.isRunning && readyWindow) {
+      await focusAndResizeComputerUseWindow({
+        pid: launchedApp.pid,
+        windowId: readyWindow.windowId ?? undefined,
+        width: input.width,
+        height: input.height,
+      });
+      return {
+        appName: launchedApp.name,
+        launchId,
+        attached: true,
+        pid: launchedApp.pid,
+        ...(readyWindow.windowId ? { windowId: readyWindow.windowId } : {}),
+        ...(readyWindow.title ? { windowTitle: readyWindow.title } : {}),
+      };
+    }
+    const reusableTopLevelMatch = findReusableRunningWindow(
+      appsResult,
+      currentTopLevelWindows,
+      appName,
+      launchId,
+    );
+    if (reusableTopLevelMatch?.isRunning && reusableTopLevelMatch.windows.some(isAttachableWindow)) {
+      const window = reusableTopLevelMatch.windows.find(isAttachableWindow);
+      await focusAndResizeComputerUseWindow({
+        pid: reusableTopLevelMatch.pid,
+        windowId: window?.windowId ?? undefined,
+        width: input.width,
+        height: input.height,
+      });
+      return {
+        appName: reusableTopLevelMatch.name,
+        launchId,
+        attached: true,
+        pid: reusableTopLevelMatch.pid,
+        ...(window?.windowId ? { windowId: window.windowId } : {}),
+        ...(window?.title ? { windowTitle: window.title } : {}),
+      };
+    }
+    const fallbackTopLevelMatch = findReusableRunningWindowByTopLevelWindow(
+      currentTopLevelWindows,
+      launchId,
+      appName,
+    );
+    if (
+      fallbackTopLevelMatch?.pid &&
+      (await canAttachToPid(fallbackTopLevelMatch.pid, input.width, input.height))
+    ) {
+      const fallbackAppName =
+        fallbackTopLevelMatch.title.trim().length > 0 ? fallbackTopLevelMatch.title : appName;
+      return {
+        appName: fallbackAppName,
+        launchId,
+        attached: true,
+        pid: fallbackTopLevelMatch.pid,
+        ...(fallbackTopLevelMatch.windowId ? { windowId: fallbackTopLevelMatch.windowId } : {}),
+        ...(fallbackTopLevelMatch.title ? { windowTitle: fallbackTopLevelMatch.title } : {}),
+      };
+    }
+    await delay(400);
+  }
+
+  return { appName, launchId, attached: false };
+}
+
+async function delay(ms: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
   });
+}
+
+function isAttachableWindow(window: ComputerUseAppSummary["windows"][number]): boolean {
+  return window.isOnscreen && !window.isMinimized;
+}
+
+async function listTopLevelWindows(): Promise<ReadonlyArray<TopLevelWindowCandidate>> {
+  if (process.platform !== "win32") {
+    return [];
+  }
+
+  const raw = await runPowerShellJson(
+    `
+$windows = Get-Process |
+  Where-Object { $_.MainWindowHandle -ne 0 -and -not [string]::IsNullOrWhiteSpace($_.MainWindowTitle) } |
+  ForEach-Object {
+    $processId = [int]$_.Id
+    $processPath = $null
+    try {
+      $processPath = (
+        Get-CimInstance -Class Win32_Process -Filter "ProcessId = $processId" -ErrorAction SilentlyContinue
+      ).ExecutablePath
+    } catch {
+      $processPath = $null
+    }
+    [PSCustomObject]@{
+      pid = $processId
+      processName = $_.ProcessName
+      title = $_.MainWindowTitle
+      windowId = [int64]$_.MainWindowHandle
+      processPath = $processPath
+    }
+  }
+$windows | ConvertTo-Json -Compress
+`,
+    5_000,
+  ).catch(() => []);
+
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  return raw.flatMap((entry): TopLevelWindowCandidate[] => {
+    const pid = typeof entry?.pid === "number" ? entry.pid : Number(entry?.pid);
+    const title = typeof entry?.title === "string" ? entry.title : "";
+    if (!Number.isFinite(pid) || pid <= 0 || title.trim().length === 0) {
+      return [];
+    }
+    const processPath =
+      typeof entry?.processPath === "string" && entry.processPath.trim().length > 0
+        ? entry.processPath
+        : undefined;
+    const windowId =
+      typeof entry?.windowId === "number" ? entry.windowId : Number(entry?.windowId);
+    return [
+      {
+        pid,
+        processName: typeof entry?.processName === "string" ? entry.processName : "",
+        title,
+        ...(processPath ? { processPath } : {}),
+        ...(Number.isFinite(windowId) && windowId > 0 ? { windowId } : {}),
+      },
+    ];
+  });
+}
+
+function matchesInstalledAppWindow(installedAppName: string, candidate: TopLevelWindowCandidate): boolean {
+  const installed = normalizeAppName(installedAppName);
+  const title = normalizeAppName(candidate.title);
+  const processName = normalizeAppName(candidate.processName);
+  const processPath = normalizeAppName(candidate.processPath ?? "");
+  const installedTokens = installedAppNameCandidates(installed);
+
+  if (processPath && installed && processPath.includes(installed)) {
+    return true;
+  }
+  if (processName && installed && processName.includes(installed)) {
+    return true;
+  }
+  if (title && installed && (title.includes(installed) || installed.includes(title))) {
+    return true;
+  }
+  const candidateTokens = [title, processName, processPath].filter(Boolean);
+  if (
+    installedTokens.some((token) =>
+      candidateTokens.some(
+        (candidateToken) => candidateToken.includes(token) || token.includes(candidateToken),
+      ),
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function installedAppMatchesLaunchLikeValue(
+  installed: InstalledWindowsApp,
+  value: string | undefined,
+): boolean {
+  const normalizedInstalledId = normalizeAppName(installed.appId);
+  const normalizedValue = normalizeAppName(value ?? "");
+  if (!normalizedInstalledId || !normalizedValue) return false;
+  return (
+    normalizedValue.includes(normalizedInstalledId) ||
+    normalizedInstalledId.includes(normalizedValue) ||
+    installedAppNameCandidates(installed.appId).some(
+      (token) => normalizedValue.includes(token) || token.includes(normalizedValue),
+    )
+  );
+}
+
+function findInstalledAppForRunningApp(
+  app: HelperApp,
+  windows: ReadonlyArray<HelperWindow>,
+  installedApps: ReadonlyArray<InstalledWindowsApp>,
+  topLevelWindows: ReadonlyArray<TopLevelWindowCandidate>,
+): InstalledWindowsApp | undefined {
+  const exactName = installedApps.find(
+    (installed) => normalizeAppName(installed.name) === normalizeAppName(app.appName),
+  );
+  if (exactName) return exactName;
+
+  const topLevelForProcess = topLevelWindows.filter((candidate) => candidate.pid === app.pid);
+  const byTopLevelIdentity = installedApps.find((installed) =>
+    topLevelForProcess.some((candidate) => topLevelWindowMatchesInstalledApp(installed, candidate)),
+  );
+  if (byTopLevelIdentity) return byTopLevelIdentity;
+
+  const byBundleId = installedApps.find((installed) =>
+    installedAppMatchesLaunchLikeValue(installed, app.bundleId),
+  );
+  if (byBundleId) return byBundleId;
+
+  return installedApps.find((installed) =>
+    windows.some((window) =>
+      matchesInstalledAppWindow(installed.name, {
+        pid: app.pid,
+        processName: app.appName,
+        title: window.title,
+        ...(typeof window.windowId === "number" ? { windowId: window.windowId } : {}),
+      }),
+    ),
+  );
+}
+
+function installedAppNameCandidates(launchId: string): ReadonlyArray<string> {
+  const normalizedLaunchId = normalizeAppName(launchId);
+  if (!normalizedLaunchId) return [];
+  const [packageFamily] = launchId.split("!");
+  const appToken = packageFamily ?? "";
+  const candidates = new Set<string>([
+    normalizeAppName(appToken),
+    normalizeAppName(launchId),
+    normalizedLaunchId,
+  ]);
+  candidates.delete("");
+  return [...candidates];
+}
+
+function topLevelWindowMatchesInstalledApp(
+  installedApp: InstalledWindowsApp,
+  candidate: TopLevelWindowCandidate,
+): boolean {
+  if (matchesInstalledAppWindow(installedApp.name, candidate)) {
+    return true;
+  }
+  const candidateWindowTitle = normalizeAppName(candidate.title);
+  const processName = normalizeAppName(candidate.processName);
+  const processPath = normalizeAppName(candidate.processPath ?? "");
+  const candidateTokens: string[] = [];
+  for (const token of [processName, processPath, candidateWindowTitle]) {
+    if (!token) continue;
+    candidateTokens.push(token);
+    candidateTokens.push(...installedAppNameCandidates(token));
+  }
+  return installedAppNameCandidates(installedApp.appId).some((token) =>
+    candidateTokens.some((candidateToken) =>
+      candidateToken.includes(token) || token.includes(candidateToken),
+    ),
+  );
+}
+
+function topLevelWindowMatchesRequest(
+  appName: string,
+  launchId: string | undefined,
+  candidate: TopLevelWindowCandidate,
+): boolean {
+  const normalizedAppName = normalizeAppName(appName);
+  const requestTokens = [
+    ...installedAppNameCandidates(launchId ?? ""),
+    ...installedAppNameCandidates(normalizedAppName),
+    ...(launchId ? [normalizeAppName(launchId)] : []),
+  ].filter(Boolean);
+  const normalizedTitle = normalizeAppName(candidate.title);
+  const normalizedPath = normalizeAppName(candidate.processPath ?? "");
+  const normalizedProcess = normalizeAppName(candidate.processName);
+  const processIdText = String(candidate.pid);
+  const candidateTokens = [normalizedTitle, normalizedPath, normalizedProcess, processIdText].filter(
+    Boolean,
+  );
+
+  return requestTokens.some(
+    (requestToken) =>
+      requestToken.length > 0 &&
+      candidateTokens.some(
+        (candidateToken) =>
+          candidateToken.includes(requestToken) || requestToken.includes(candidateToken),
+      ),
+  );
+}
+
+function bestTopLevelWindowMatch(
+  topLevelWindows: ReadonlyArray<TopLevelWindowCandidate>,
+  appName: string,
+  launchId?: string,
+): TopLevelWindowCandidate | undefined {
+  const normalizedAppName = normalizeAppName(appName);
+  if (!normalizedAppName && !launchId) {
+    return undefined;
+  }
+  const directLaunchMatch = topLevelWindows.find((candidate) => {
+    const launchPathMatch = installedAppNameCandidates(launchId ?? "")
+      .map(normalizeAppName)
+      .some((token) => token && normalizeAppName(candidate.processPath ?? "").includes(token));
+    return launchPathMatch;
+  });
+  if (directLaunchMatch) return directLaunchMatch;
+  return topLevelWindows.find((candidate) =>
+    topLevelWindowMatchesRequest(normalizedAppName, launchId, candidate),
+  );
+}
+
+function findAttachedSummaryForWindow(
+  appsResult: ComputerUseListAppsResult,
+  topLevelWindow: TopLevelWindowCandidate | undefined,
+): ComputerUseAppSummary | undefined {
+  if (!topLevelWindow) return undefined;
+  return appsResult.apps.find(
+    (app) => app.pid === topLevelWindow.pid && app.windows.some(isAttachableWindow),
+  );
+}
+
+function appSummaryMatchesRequest(
+  app: ComputerUseAppSummary,
+  appName: string,
+  launchId?: string,
+): boolean {
+  if (launchId && app.launchId === launchId) {
+    return true;
+  }
+  const appMatchName = normalizeAppName(appName);
+  const runningName = normalizeAppName(app.name);
+  if (!appMatchName) {
+    return false;
+  }
+  if (runningName && (runningName === appMatchName || runningName.includes(appMatchName))) {
+    return true;
+  }
+  return installedAppNameCandidates(appMatchName).some((token) =>
+    normalizeAppName(app.appId).includes(token) || token.includes(normalizeAppName(app.appId)),
+  );
+}
+
+async function canAttachToPid(
+  pid: number,
+  width?: number,
+  height?: number,
+): Promise<boolean> {
+  const app = {
+    appName: "DesktopApp",
+    pid,
+  };
+  const windows = await listWindowsForApp(app);
+  const window = windows.find((candidate) => isAttachableWindow(toWindowSummary(candidate)));
+  if (!window) {
+    return false;
+  }
+  await focusAndResizeComputerUseWindow({ pid, windowId: window.windowId, width, height });
+  return true;
+}
+
+function findTopLevelWindowForApp(
+  topLevelWindows: ReadonlyArray<TopLevelWindowCandidate>,
+  appName: string,
+  launchId?: string,
+): TopLevelWindowCandidate | undefined {
+  return bestTopLevelWindowMatch(topLevelWindows, appName, launchId);
+}
+
+function findReusableRunningWindow(
+  appsResult: ComputerUseListAppsResult | null,
+  topLevelWindows: ReadonlyArray<TopLevelWindowCandidate>,
+  appName: string,
+  launchId?: string,
+): ComputerUseAppSummary | null {
+  const existing = appsResult?.apps.find((app) => appSummaryMatchesRequest(app, appName, launchId));
+  if (existing && existing.windows.some(isAttachableWindow)) {
+    return existing;
+  }
+  const topLevelMatch = findTopLevelWindowForApp(topLevelWindows, appName, launchId);
+  const byWindow = topLevelMatch && appsResult ? findAttachedSummaryForWindow(appsResult, topLevelMatch) : null;
+  if (!byWindow) {
+    return null;
+  }
+  return byWindow;
+}
+
+function findReusableRunningWindowByTopLevelWindow(
+  topLevelWindows: ReadonlyArray<TopLevelWindowCandidate>,
+  launchId?: string,
+  appName?: string,
+): TopLevelWindowCandidate | null {
+  if (!topLevelWindows.length) {
+    return null;
+  }
+  if (!appName && !launchId) {
+    return null;
+  }
+
+  const normalizedAppName = normalizeAppName(appName ?? "");
+  const normalizedLaunchId = normalizeAppName(launchId ?? "");
+  const tokens = new Set<string>(
+    [...installedAppNameCandidates(normalizedAppName), ...installedAppNameCandidates(normalizedLaunchId)]
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0),
+  );
+
+  if (!tokens.size) {
+    return null;
+  }
+
+  const directWindowMatch = topLevelWindows.find((candidate) =>
+    [...tokens].some((token) =>
+      [candidate.title, candidate.processName, candidate.processPath ?? "", String(candidate.pid)]
+        .map((value) => normalizeAppName(value))
+        .filter((value) => value.length > 0)
+        .some((candidateToken) => candidateToken.includes(token) || token.includes(candidateToken)),
+    ),
+  );
+  if (directWindowMatch) {
+    return directWindowMatch;
+  }
+
+  return findTopLevelWindowForApp(topLevelWindows, normalizedAppName, launchId) ?? null;
 }
 
 async function listWindowsForApp(app: HelperApp): Promise<HelperWindow[]> {
@@ -468,6 +1115,333 @@ async function listWindowsForApp(app: HelperApp): Promise<HelperWindow[]> {
   }
 }
 
+function isAttachableHelperWindow(window: HelperWindow): boolean {
+  return window.windowId !== undefined && window.windowId > 0 && window.isOnscreen && !window.isMinimized;
+}
+
+function chooseWindowCandidate(
+  windows: ReadonlyArray<HelperWindow>,
+  input: {
+    readonly windowId?: number;
+    readonly windowTitle?: string;
+  },
+  preferFocused = true,
+): HelperWindow | undefined {
+  const candidateWindowId = input.windowId;
+  if (candidateWindowId && candidateWindowId > 0) {
+    const exactWindow = windows.find((window) => window.windowId === candidateWindowId);
+    if (exactWindow) return exactWindow;
+  }
+
+  const normalizedTitle =
+    input.windowTitle ? normalizeAppName(input.windowTitle) : "";
+  if (normalizedTitle) {
+    const exactMatches = windows.filter(
+      (window) => normalizeAppName(window.title) === normalizedTitle,
+    );
+    if (exactMatches.length > 0) {
+      return exactMatches[0];
+    }
+
+    const partialMatches = windows.filter((window) =>
+      normalizeAppName(window.title).includes(normalizedTitle),
+    );
+    if (partialMatches.length > 0) {
+      return partialMatches[0];
+    }
+  }
+
+  const attachable = windows.filter(isAttachableHelperWindow);
+  const candidates = attachable.length > 0 ? attachable : windows;
+  if (candidates.length === 0) return undefined;
+
+  if (preferFocused) {
+    return (
+      candidates.find((window) => window.isFocused) ??
+      candidates.find((window) => window.isMain) ??
+      candidates[0]
+    );
+  }
+
+  return candidates[0];
+}
+
+function boundedWindowFromSummary(
+  app: {
+    appName: string;
+    launchId: string;
+    pid: number;
+  },
+  window: HelperWindow,
+): BoundedComputerUseWindow {
+  const windowId = window.windowId;
+  return {
+    appName: app.appName,
+    launchId: app.launchId,
+    pid: app.pid,
+    windowId: typeof windowId === "number" && Number.isFinite(windowId) ? Math.trunc(windowId) : 0,
+    windowTitle: window.title.length > 0 ? window.title : "(untitled)",
+    isFocused: window.isFocused,
+    isMinimized: window.isMinimized,
+    isOnscreen: window.isOnscreen,
+    isMain: window.isMain,
+    x: window.framePoints.x,
+    y: window.framePoints.y,
+    width: window.framePoints.w,
+    height: window.framePoints.h,
+  };
+}
+
+function managedWindowFromBounded(
+  bounded: BoundedComputerUseWindow | null,
+): ManagedComputerUseWindowResult | null {
+  if (!bounded || bounded.windowId <= 0) {
+    return null;
+  }
+  return {
+    appName: bounded.appName,
+    launchId: bounded.launchId,
+    pid: bounded.pid,
+    windowId: bounded.windowId,
+    windowTitle: bounded.windowTitle,
+    focused: bounded.isFocused,
+  };
+}
+
+async function findBoundedWindowForPid(
+  pid: number,
+  input: Pick<ComputerUseWindowQuery, "windowId" | "windowTitle">,
+): Promise<BoundedComputerUseWindow | null> {
+  if (!pid || pid <= 0) return null;
+  const appWindows = await listWindowsForApp({ appName: "Application", pid });
+  if (!appWindows.length) return null;
+  const window = chooseWindowCandidate(appWindows, input);
+  if (!window || window.windowId === undefined || window.windowId <= 0) {
+    return null;
+  }
+
+  const apps = await listComputerUseApps().catch(() => null);
+  const app = apps?.apps.find((candidate) => candidate.pid === pid);
+  const appName = app?.name ?? `Process ${pid}`;
+  const launchId = app?.launchId ?? `win32:${pid}`;
+  return boundedWindowFromSummary(
+    { appName, launchId, pid },
+    window,
+  );
+}
+
+async function findBoundedWindowForQuery(
+  input: ComputerUseWindowQuery,
+): Promise<BoundedComputerUseWindow | null> {
+  if (input.pid && input.pid > 0) {
+    return findBoundedWindowForPid(input.pid, input);
+  }
+
+  const topLevelWindows = await listTopLevelWindows().catch(() => []);
+  if (input.windowId && input.windowId > 0) {
+    const byId = topLevelWindows.find((window) => window.windowId === input.windowId);
+    if (byId) {
+      return findBoundedWindowForPid(byId.pid, input);
+    }
+  }
+
+  if (!input.appName && !input.launchId && !input.windowTitle) {
+    return null;
+  }
+
+  const appResult = await listComputerUseApps();
+  const byRequest = appResult.apps.find((app) =>
+    appSummaryMatchesRequest(app, input.appName ?? "", input.launchId),
+  );
+  if (byRequest) {
+    const requestWindows = await listWindowsForApp({
+      appName: byRequest.name,
+      pid: byRequest.pid,
+    });
+    const requestWindow = chooseWindowCandidate(requestWindows, input);
+    if (requestWindow?.windowId && requestWindow.windowId > 0) {
+      return boundedWindowFromSummary(
+        {
+          appName: byRequest.name,
+          launchId: byRequest.launchId ?? `win32:${byRequest.pid}`,
+          pid: byRequest.pid,
+        },
+        requestWindow,
+      );
+    }
+  }
+
+  if (!input.appName && !input.launchId) {
+    return null;
+  }
+
+  const topLevelMatch = findReusableRunningWindowByTopLevelWindow(
+    topLevelWindows,
+    input.launchId,
+    input.appName,
+  );
+  if (topLevelMatch?.pid) {
+    return findBoundedWindowForPid(topLevelMatch.pid, input);
+  }
+
+  return null;
+}
+
+export async function resolveComputerUseWindow(input: {
+  appName?: string;
+  launchId?: string;
+  pid?: number;
+  windowId?: number;
+  windowTitle?: string;
+}): Promise<ManagedComputerUseWindowResult | null> {
+  const window = await findBoundedWindowForQuery(input);
+  return managedWindowFromBounded(window);
+}
+
+export async function attachComputerUseWindow(
+  input: ComputerUseWindowQuery & {
+    readonly width?: number | undefined;
+    readonly height?: number | undefined;
+    readonly x?: number | undefined;
+    readonly y?: number | undefined;
+    readonly focus?: boolean | undefined;
+  },
+): Promise<ManagedComputerUseWindowResult> {
+  const managed = await resolveComputerUseWindow(input);
+  if (!managed) {
+    throw new Error("Could not resolve a target desktop window to attach.");
+  }
+  await focusAndResizeComputerUseWindow({
+    pid: managed.pid,
+    windowId: managed.windowId,
+    focus: input.focus ?? false,
+    width: input.width,
+    height: input.height,
+    x: input.x,
+    y: input.y,
+  });
+  return managed;
+}
+
+export async function focusComputerUseWindow(
+  input: ComputerUseWindowQuery,
+): Promise<ManagedComputerUseWindowResult> {
+  return attachComputerUseWindow({
+    ...input,
+    focus: true,
+  });
+}
+
+export async function moveComputerUseWindow(
+  input: ComputerUseWindowQuery & { readonly x: number; readonly y: number },
+): Promise<ManagedComputerUseWindowResult> {
+  const managed = await attachComputerUseWindow(input);
+  await focusAndResizeComputerUseWindow({
+    pid: managed.pid,
+    windowId: managed.windowId,
+    x: input.x,
+    y: input.y,
+    focus: false,
+  });
+  return managed;
+}
+
+export async function resizeComputerUseWindow(
+  input: ComputerUseWindowQuery & { readonly width: number; readonly height: number },
+): Promise<ManagedComputerUseWindowResult> {
+  const managed = await attachComputerUseWindow(input);
+  await focusAndResizeComputerUseWindow({
+    pid: managed.pid,
+    windowId: managed.windowId,
+    width: input.width,
+    height: input.height,
+    focus: false,
+  });
+  return managed;
+}
+
+async function closeWindowByHandle(input: { readonly pid: number; readonly windowId?: number }): Promise<void> {
+  const command = Buffer.from(JSON.stringify(input), "utf8").toString("base64");
+  await runPowerShellJson(
+    `
+$payload = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(${powershellStringLiteral(command)})) | ConvertFrom-Json
+$targetPid = [int]$payload.pid
+$proc = Get-Process -Id $targetPid -ErrorAction SilentlyContinue | Select-Object -First 1
+if (-not $proc) {
+  @{ closed = $true; reason = 'not-running' } | ConvertTo-Json -Compress
+  return
+}
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class T3CloseWindowOps {
+  [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+}
+"@
+$hwnd = [IntPtr]::Zero
+if ($payload.windowId -ne $null) {
+  $candidateHwnd = [IntPtr]([int64]$payload.windowId)
+  if ([T3CloseWindowOps]::IsWindow($candidateHwnd)) {
+    $hwnd = $candidateHwnd
+  }
+}
+if ($hwnd -ne [IntPtr]::Zero) {
+  [void][T3CloseWindowOps]::PostMessage($hwnd, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+} elseif (-not $proc.CloseMainWindow()) {
+  Stop-Process -Id $targetPid -Force -ErrorAction SilentlyContinue
+}
+Start-Sleep -Milliseconds 350
+if ($hwnd -ne [IntPtr]::Zero -and -not [T3CloseWindowOps]::IsWindow($hwnd)) {
+  @{ closed = $true; reason = 'closed-window' } | ConvertTo-Json -Compress
+  return
+}
+if ($hwnd -eq [IntPtr]::Zero -and (Get-Process -Id $targetPid -ErrorAction SilentlyContinue)) {
+  Stop-Process -Id $targetPid -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Milliseconds 220
+}
+if ($hwnd -ne [IntPtr]::Zero -and [T3CloseWindowOps]::IsWindow($hwnd)) {
+  throw "Unable to close window $($payload.windowId)"
+}
+$stillRunning = if ($hwnd -eq [IntPtr]::Zero) { Get-Process -Id $targetPid -ErrorAction SilentlyContinue } else { $null }
+if ($stillRunning) {
+  throw "Unable to close process $targetPid"
+}
+@{ closed = $true; reason = 'closed' } | ConvertTo-Json -Compress
+`,
+    6_000,
+  ).catch(() => undefined);
+}
+
+export async function closeComputerUseWindow(
+  input: ComputerUseWindowQuery,
+): Promise<ManagedComputerUseWindowResult> {
+  const managed = await attachComputerUseWindow(input);
+  await closeWindowByHandle({ pid: managed.pid, windowId: managed.windowId });
+  return managed;
+}
+
+export async function getActiveComputerUseWindow(): Promise<ManagedComputerUseWindowResult | null> {
+  const appsResult = await listComputerUseApps();
+  const activeApp = appsResult.apps.find((app) => app.isFrontmost) ?? appsResult.apps[0];
+  if (!activeApp) return null;
+  return resolveComputerUseWindow({
+    appName: activeApp.name,
+    ...(activeApp.launchId ? { launchId: activeApp.launchId } : {}),
+    pid: activeApp.pid,
+  });
+}
+
+export async function getComputerUseWindowBounds(input: {
+  readonly appName?: string;
+  readonly launchId?: string;
+  readonly pid?: number;
+  readonly windowId?: number;
+  readonly windowTitle?: string;
+}): Promise<BoundedComputerUseWindow | null> {
+  return findBoundedWindowForQuery(input);
+}
+
 export async function listComputerUseApps(input: {
   readonly iconBaseUrl?: string | undefined;
 } = {}): Promise<ComputerUseListAppsResult> {
@@ -484,11 +1458,15 @@ export async function listComputerUseApps(input: {
     return unavailableResult(error);
   }
   const installedApps = await listInstalledWindowsApps().catch(() => []);
+  const topLevelWindows = await listTopLevelWindows().catch(() => []);
   const appsByName = new Map<string, ComputerUseAppSummary>();
   for (const app of result.details.apps.slice(0, 24)) {
     const windows = await listWindowsForApp(app);
-    const installedMatch = installedApps.find(
-      (installed) => normalizeAppName(installed.name) === normalizeAppName(app.appName),
+    const installedMatch = findInstalledAppForRunningApp(
+      app,
+      windows,
+      installedApps,
+      topLevelWindows,
     );
     const summary = {
       appId: appIdFor(app),
@@ -513,6 +1491,9 @@ export async function listComputerUseApps(input: {
       windows: windows.map(toWindowSummary),
     } satisfies ComputerUseAppSummary;
     appsByName.set(normalizeAppName(app.appName), summary);
+    if (installedMatch) {
+      appsByName.set(normalizeAppName(installedMatch.name), summary);
+    }
   }
   for (const installed of installedApps) {
     const key = normalizeAppName(installed.name);
@@ -522,6 +1503,37 @@ export async function listComputerUseApps(input: {
         ...existing,
         name: installed.name,
         launchId: installed.appId,
+      });
+      continue;
+    }
+    const topLevelWindow = topLevelWindows.find((candidate) =>
+      topLevelWindowMatchesInstalledApp(installed, candidate),
+    );
+    if (topLevelWindow) {
+      const windows = await listWindowsForApp({
+        appName: installed.name,
+        pid: topLevelWindow.pid,
+      });
+      appsByName.set(key, {
+        appId: appCatalogIdForLaunchId(installed.appId),
+        name: installed.name,
+        pid: topLevelWindow.pid,
+        isRunning: true,
+        category: classifyComputerUseApp({
+          name: installed.name,
+          appId: appCatalogIdForLaunchId(installed.appId),
+          launchId: installed.appId,
+          isRunning: true,
+          windowCount: windows.length,
+        }),
+        launchId: installed.appId,
+        iconUrl: computerUseAppIconUrl({
+          iconBaseUrl: input.iconBaseUrl,
+          name: installed.name,
+          pid: topLevelWindow.pid,
+          launchId: installed.appId,
+        }),
+        windows: windows.map(toWindowSummary),
       });
       continue;
     }
@@ -547,7 +1559,23 @@ export async function listComputerUseApps(input: {
       windows: [],
     });
   }
-  const apps = [...appsByName.values()].toSorted((left, right) =>
+  const appsByIdentity = new Map<string, ComputerUseAppSummary>();
+  for (const app of appsByName.values()) {
+    const windowIds = app.windows
+      .map((window) => window.windowId)
+      .filter((windowId): windowId is number => typeof windowId === "number" && windowId > 0)
+      .toSorted((left, right) => left - right)
+      .join(",");
+    const key = [
+      app.launchId ? normalizeAppName(app.launchId) : normalizeAppName(app.name),
+      app.pid,
+      windowIds,
+    ].join(":");
+    if (!appsByIdentity.has(key)) {
+      appsByIdentity.set(key, app);
+    }
+  }
+  const apps = [...appsByIdentity.values()].toSorted((left, right) =>
     left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
   );
   return { apps, status: { available: true } };

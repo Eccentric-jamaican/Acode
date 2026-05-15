@@ -89,6 +89,116 @@ const BROWSER_SET_INSPECT_MODE_CHANNEL = "desktop:browser-set-inspect-mode";
 const BROWSER_CAPTURE_INSPECT_SELECTION_CHANNEL = "desktop:browser-capture-inspect-selection";
 const BROWSER_EVENT_CHANNEL = "desktop:browser-event";
 const BROWSER_PAGE_EVENT_CHANNEL = "desktop:browser-page-event";
+const COMPUTER_OVERLAY_HTML = String.raw`<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: transparent;
+        font-family: "Segoe UI", system-ui, sans-serif;
+      }
+      #root {
+        position: relative;
+        width: 100%;
+        height: 100%;
+      }
+      #cursor {
+        position: absolute;
+        width: 18px;
+        height: 18px;
+        border-radius: 9999px;
+        pointer-events: none;
+        transform: translate(-50%, -50%);
+        opacity: 0;
+        border: 2px solid rgba(16, 185, 129, 0.98);
+        background: rgba(16, 185, 129, 0.28);
+        box-shadow: 0 0 0 5px rgba(16, 185, 129, 0.16), 0 8px 18px rgba(0, 0, 0, 0.28);
+        transition: left 90ms ease-out, top 90ms ease-out, opacity 80ms ease-out, scale 80ms ease-out;
+      }
+      #cursor::after {
+        content: "";
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 4px;
+        height: 4px;
+        border-radius: 9999px;
+        background: white;
+        transform: translate(-50%, -50%);
+        box-shadow: 0 0 5px rgba(0, 0, 0, 0.35);
+      }
+      #label {
+        position: absolute;
+        left: 12px;
+        top: 12px;
+        max-width: min(420px, calc(100vw - 24px));
+        border-radius: 9999px;
+        padding: 8px 12px;
+        background: rgba(16, 24, 40, 0.82);
+        color: white;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22);
+        backdrop-filter: blur(10px);
+        pointer-events: none;
+      }
+      #title {
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: rgba(167, 243, 208, 0.98);
+      }
+      #subtitle {
+        margin-top: 2px;
+        font-size: 13px;
+        color: rgba(255, 255, 255, 0.92);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div id="label">
+        <div id="title">T3 Computer Use</div>
+        <div id="subtitle"></div>
+      </div>
+      <div id="cursor" aria-hidden="true"></div>
+    </div>
+    <script>
+      const cursor = document.getElementById("cursor");
+      const subtitle = document.getElementById("subtitle");
+      window.__t3ComputerOverlayUpdate = (payload) => {
+        if (!payload || typeof payload !== "object") {
+          cursor.style.opacity = "0";
+          subtitle.textContent = "";
+          return true;
+        }
+        subtitle.textContent = typeof payload.label === "string" ? payload.label : "";
+        if (payload.cursor && payload.cursor.visible !== false) {
+          const x = Math.max(0, Number(payload.cursor.x) || 0);
+          const y = Math.max(0, Number(payload.cursor.y) || 0);
+          cursor.style.left = x + "px";
+          cursor.style.top = y + "px";
+          cursor.style.opacity = "1";
+          cursor.style.scale = payload.cursor.intent === "click" ? "0.82" : "1";
+          window.clearTimeout(window.__t3ComputerOverlayScaleTimer);
+          window.__t3ComputerOverlayScaleTimer = window.setTimeout(() => {
+            cursor.style.scale = "1";
+          }, 90);
+        } else {
+          cursor.style.opacity = "0";
+        }
+        return true;
+      };
+    </script>
+  </body>
+</html>`;
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
 const shouldOpenDevToolsOnStartup = process.env.T3CODE_DESKTOP_OPEN_DEVTOOLS === "1";
 const APP_DISPLAY_NAME = getAppDisplayName(isDevelopment);
@@ -147,6 +257,7 @@ let backendWsUrl = "";
 let browserBridgeServer: Http.Server | null = null;
 let browserBridgeUrl = "";
 let browserBridgeAuthToken = "";
+let computerOverlayWindow: BrowserWindow | null = null;
 let restartAttempt = 0;
 let restartTimer: ReturnType<typeof setTimeout> | null = null;
 let isQuitting = false;
@@ -192,6 +303,82 @@ function emitBrowserEvent(event: BrowserRuntimeEvent): void {
 
 browserRuntimeRegistry.on("event", emitBrowserEvent);
 
+type ComputerOverlayPayload = {
+  readonly bounds: {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+  };
+  readonly cursor?: {
+    readonly x: number;
+    readonly y: number;
+    readonly visible?: boolean;
+    readonly intent?: "move" | "click";
+  };
+  readonly label?: string;
+};
+
+async function ensureComputerOverlayWindow(): Promise<BrowserWindow> {
+  if (computerOverlayWindow && !computerOverlayWindow.isDestroyed()) {
+    return computerOverlayWindow;
+  }
+
+  const overlay = new BrowserWindow({
+    show: false,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    focusable: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    backgroundColor: "#00000000",
+    webPreferences: {
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  overlay.setIgnoreMouseEvents(true, { forward: true });
+  overlay.setAlwaysOnTop(true, "screen-saver");
+  overlay.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  await overlay.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(COMPUTER_OVERLAY_HTML)}`);
+  computerOverlayWindow = overlay;
+  overlay.on("closed", () => {
+    if (computerOverlayWindow === overlay) {
+      computerOverlayWindow = null;
+    }
+  });
+  return overlay;
+}
+
+async function showComputerOverlay(input: ComputerOverlayPayload): Promise<void> {
+  const overlay = await ensureComputerOverlayWindow();
+  const bounds = {
+    x: Math.round(input.bounds.x),
+    y: Math.round(input.bounds.y),
+    width: Math.max(1, Math.round(input.bounds.width)),
+    height: Math.max(1, Math.round(input.bounds.height)),
+  };
+  overlay.setBounds(bounds, false);
+  overlay.showInactive();
+  await overlay.webContents.executeJavaScript(
+    `window.__t3ComputerOverlayUpdate(${JSON.stringify({
+      cursor: input.cursor,
+      label: input.label ?? "",
+    })})`,
+    true,
+  );
+}
+
+function hideComputerOverlay(): void {
+  if (!computerOverlayWindow || computerOverlayWindow.isDestroyed()) {
+    return;
+  }
+  computerOverlayWindow.hide();
+}
+
 app.setPath("userData", ELECTRON_USER_DATA_DIR);
 app.setPath("sessionData", Path.join(ELECTRON_USER_DATA_DIR, "session"));
 
@@ -208,6 +395,13 @@ function asProjectId(value: unknown): ProjectId {
     throw new Error("projectId must be a non-empty string.");
   }
   return value as ProjectId;
+}
+
+function asOptionalThreadId(value: unknown): ThreadId | undefined {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return undefined;
+  }
+  return value as ThreadId;
 }
 
 function asPaneBounds(value: unknown): BrowserPaneBounds {
@@ -561,7 +755,7 @@ async function handleBrowserBridgeRequest(body: unknown): Promise<unknown> {
     ? asProjectId(input.projectId)
     : null;
   if (revealedProjectId) {
-    await browserRuntimeRegistry.requestPane(revealedProjectId);
+    await browserRuntimeRegistry.requestPane(revealedProjectId, asOptionalThreadId(input.threadId));
   }
   switch (method) {
     case "browser.ensure":
@@ -670,6 +864,15 @@ async function handleBrowserBridgeRequest(body: unknown): Promise<unknown> {
         throw new Error("expression must be a non-empty string.");
       }
       return { value: await browserRuntimeRegistry.evaluate(asProjectId(input.projectId), input.expression) };
+    case "computer.show_overlay":
+      if (!input.bounds || typeof input.bounds !== "object") {
+        throw new Error("bounds must be provided for computer.show_overlay.");
+      }
+      await showComputerOverlay(input as unknown as ComputerOverlayPayload);
+      return {};
+    case "computer.hide_overlay":
+      hideComputerOverlay();
+      return {};
     default:
       throw new Error(`Unknown browser bridge method '${method}'.`);
   }
@@ -750,6 +953,7 @@ function stopBrowserBridgeServer(): void {
   browserBridgeServer = null;
   browserBridgeUrl = "";
   browserBridgeAuthToken = "";
+  hideComputerOverlay();
 }
 
 function sanitizeLogValue(value: string): string {

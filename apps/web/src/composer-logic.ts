@@ -44,12 +44,12 @@ export function expandCollapsedComposerCursor(text: string, cursorInput: number)
 
   for (const segment of segments) {
     if (segment.type === "mention") {
-      const expandedLength = segment.path.length + 1;
-      if (remaining <= 1) {
-        return expandedCursor + (remaining === 0 ? 0 : expandedLength);
+      const segmentLength = segment.token.length;
+      if (remaining <= segmentLength) {
+        return expandedCursor + remaining;
       }
-      remaining -= 1;
-      expandedCursor += expandedLength;
+      remaining -= segmentLength;
+      expandedCursor += segmentLength;
       continue;
     }
 
@@ -64,12 +64,14 @@ export function expandCollapsedComposerCursor(text: string, cursorInput: number)
   return expandedCursor;
 }
 
-function collapsedSegmentLength(segment: { type: "text"; text: string } | { type: "mention" }): number {
-  return segment.type === "mention" ? 1 : segment.text.length;
+function collapsedSegmentLength(
+  segment: { type: "text"; text: string } | { type: "mention"; token: string },
+): number {
+  return segment.type === "mention" ? segment.token.length : segment.text.length;
 }
 
 function clampCollapsedComposerCursor(
-  segments: ReadonlyArray<{ type: "text"; text: string } | { type: "mention" }>,
+  segments: ReadonlyArray<{ type: "text"; text: string } | { type: "mention"; token: string }>,
   cursorInput: number,
 ): number {
   const collapsedLength = segments.reduce(
@@ -97,7 +99,8 @@ export function isCollapsedCursorAdjacentToMention(
 
   for (const segment of segments) {
     if (segment.type === "mention") {
-      if (direction === "left" && cursor === collapsedOffset + 1) {
+      const segmentLength = segment.token.length;
+      if (direction === "left" && cursor === collapsedOffset + segmentLength) {
         return true;
       }
       if (direction === "right" && cursor === collapsedOffset) {

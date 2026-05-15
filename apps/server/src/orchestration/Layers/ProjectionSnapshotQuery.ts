@@ -127,6 +127,8 @@ const REQUIRED_SNAPSHOT_PROJECTORS = [
   ORCHESTRATION_PROJECTOR_NAMES.threadSessions,
   ORCHESTRATION_PROJECTOR_NAMES.checkpoints,
 ] as const;
+const SNAPSHOT_INFO_LOG_THRESHOLD_MS = 1_000;
+const SNAPSHOT_WARN_LOG_THRESHOLD_MS = 5_000;
 
 function maxIso(left: string | null, right: string): string {
   if (left === null) {
@@ -522,23 +524,33 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     const heavyRowsThreadId = snapshotMode === "full" ? null : (input?.threadId ?? null);
     const threadScopedInput =
       heavyRowsThreadId !== null ? { threadId: heavyRowsThreadId } : null;
+    const requestStartedAt = Date.now();
 
     return sql
       .withTransaction(
         Effect.gen(function* () {
-          const [
-            projectRows,
-            projectRulesRows,
-            taskRows,
-            threadRows,
-            messageRows,
-            proposedPlanRows,
-            activityRows,
-            sessionRows,
-            checkpointRows,
-            latestTurnRows,
-            stateRows,
-          ] = yield* Effect.all([
+          const queryTimings: Array<{
+            phase: string;
+            rows: number;
+            durationMs: number;
+          }> = [];
+          const measureRows = <A extends ReadonlyArray<unknown>>(
+            phase: string,
+            effect: Effect.Effect<A, ProjectionRepositoryError>,
+          ): Effect.Effect<A, ProjectionRepositoryError> =>
+            Effect.gen(function* () {
+              const startedAt = Date.now();
+              const rows = yield* effect;
+              queryTimings.push({
+                phase,
+                rows: rows.length,
+                durationMs: Date.now() - startedAt,
+              });
+              return rows;
+            });
+
+          const projectRows = yield* measureRows(
+            "projects",
             listProjectRows(undefined).pipe(
               Effect.mapError(
                 toPersistenceSqlOrDecodeError(
@@ -547,6 +559,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ),
               ),
             ),
+          );
+          const projectRulesRows = yield* measureRows(
+            "projectRules",
             listProjectRulesRows(undefined).pipe(
               Effect.mapError(
                 toPersistenceSqlOrDecodeError(
@@ -555,6 +570,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ),
               ),
             ),
+          );
+          const taskRows = yield* measureRows(
+            "tasks",
             listTaskRows(undefined).pipe(
               Effect.mapError(
                 toPersistenceSqlOrDecodeError(
@@ -563,6 +581,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ),
               ),
             ),
+          );
+          const threadRows = yield* measureRows(
+            "threads",
             listThreadRows(undefined).pipe(
               Effect.mapError(
                 toPersistenceSqlOrDecodeError(
@@ -571,6 +592,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ),
               ),
             ),
+          );
+          const messageRows = yield* measureRows(
+            "threadMessages",
             (snapshotMode === "full"
               ? listThreadMessageRows(undefined)
               : threadScopedInput
@@ -583,6 +607,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ),
               ),
             ),
+          );
+          const proposedPlanRows = yield* measureRows(
+            "threadProposedPlans",
             (snapshotMode === "full"
               ? listThreadProposedPlanRows(undefined)
               : threadScopedInput
@@ -595,6 +622,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ),
               ),
             ),
+          );
+          const activityRows = yield* measureRows(
+            "threadActivities",
             (snapshotMode === "full"
               ? listThreadActivityRows(undefined)
               : threadScopedInput
@@ -607,6 +637,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ),
               ),
             ),
+          );
+          const sessionRows = yield* measureRows(
+            "threadSessions",
             listThreadSessionRows(undefined).pipe(
               Effect.mapError(
                 toPersistenceSqlOrDecodeError(
@@ -615,6 +648,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ),
               ),
             ),
+          );
+          const checkpointRows = yield* measureRows(
+            "checkpoints",
             (snapshotMode === "full"
               ? listCheckpointRows(undefined)
               : threadScopedInput
@@ -627,6 +663,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ),
               ),
             ),
+          );
+          const latestTurnRows = yield* measureRows(
+            "latestTurns",
             listLatestTurnRows(undefined).pipe(
               Effect.mapError(
                 toPersistenceSqlOrDecodeError(
@@ -635,6 +674,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ),
               ),
             ),
+          );
+          const stateRows = yield* measureRows(
+            "projectionState",
             listProjectionStateRows(undefined).pipe(
               Effect.mapError(
                 toPersistenceSqlOrDecodeError(
@@ -643,7 +685,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
                 ),
               ),
             ),
-          ]);
+          );
 
           const messagesByThread = new Map<string, Array<OrchestrationMessage>>();
           const proposedPlansByThread = new Map<string, Array<OrchestrationProposedPlan>>();
@@ -878,11 +920,33 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             updatedAt: updatedAt ?? new Date(0).toISOString(),
           };
 
-          return yield* decodeReadModel(snapshot).pipe(
+          const readModel = yield* decodeReadModel(snapshot).pipe(
             Effect.mapError(
               toPersistenceDecodeError("ProjectionSnapshotQuery.getSnapshot:decodeReadModel"),
             ),
           );
+
+          const totalDurationMs = Date.now() - requestStartedAt;
+          if (totalDurationMs >= SNAPSHOT_INFO_LOG_THRESHOLD_MS) {
+            const logEffect =
+              totalDurationMs >= SNAPSHOT_WARN_LOG_THRESHOLD_MS ? Effect.logWarning : Effect.logInfo;
+            yield* logEffect("projection snapshot query completed", {
+              mode: snapshotMode,
+              threadId: heavyRowsThreadId,
+              totalDurationMs,
+              snapshotSequence: readModel.snapshotSequence,
+              projectCount: readModel.projects.length,
+              taskCount: readModel.tasks.length,
+              threadCount: readModel.threads.length,
+              queryTimings: queryTimings.map((timing) => ({
+                phase: timing.phase,
+                rows: timing.rows,
+                durationMs: timing.durationMs,
+              })),
+            });
+          }
+
+          return readModel;
         }),
       )
       .pipe(

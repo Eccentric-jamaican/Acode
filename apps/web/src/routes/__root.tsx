@@ -32,6 +32,7 @@ import {
 import { providerQueryKeys } from "../lib/providerReactQuery";
 import { collectActiveTerminalThreadIds } from "../lib/terminalStateCleanup";
 import { TaskCompletionNotifications } from "../notifications/taskCompletion";
+import { DesktopBrowserController } from "../components/DesktopBrowserController";
 
 export const Route = createRootRouteWithContext<{
   queryClient: QueryClient;
@@ -60,6 +61,7 @@ function RootRouteView() {
     <ToastProvider>
       <AnchoredToastProvider>
         <EventRouter />
+        <DesktopBrowserController />
         <DesktopProjectBootstrap />
         <TaskCompletionNotifications />
         <Outlet />
@@ -144,7 +146,8 @@ function activeThreadIdFromPathname(pathname: string): ThreadId | undefined {
   if (!firstSegment || firstSegment === "settings") {
     return undefined;
   }
-  return ThreadId.makeUnsafe(decodeURIComponent(firstSegment));
+  const threadIdSegment: string = firstSegment;
+  return ThreadId.makeUnsafe(decodeURIComponent(threadIdSegment));
 }
 
 function snapshotInputForLocation(pathname: string): OrchestrationGetSnapshotInput {
@@ -154,6 +157,13 @@ function snapshotInputForLocation(pathname: string): OrchestrationGetSnapshotInp
   }
   const activeThreadId = activeThreadIdFromPathname(pathname);
   return activeThreadId ? { mode: "focused", threadId: activeThreadId } : { mode: "bootstrap" };
+}
+
+function describeSnapshotInput(input: OrchestrationGetSnapshotInput): string {
+  if (input.mode === "focused") {
+    return `focused:${input.threadId ?? ""}`;
+  }
+  return input.mode ?? "bootstrap";
 }
 
 function EventRouter() {
@@ -188,9 +198,32 @@ function EventRouter() {
     let pending = false;
 
     const flushSnapshotSync = async (): Promise<void> => {
-      const snapshot = await api.orchestration.getSnapshot(
-        snapshotInputForLocation(pathnameRef.current),
-      );
+      const requestedSnapshotInput = snapshotInputForLocation(pathnameRef.current);
+      let snapshot;
+      try {
+        snapshot = await api.orchestration.getSnapshot(requestedSnapshotInput);
+      } catch (error) {
+        if (requestedSnapshotInput.mode === "bootstrap") {
+          throw error;
+        }
+
+        reportClientDiagnostic({
+          source: "websocket",
+          category: "websocket",
+          severity: "warning",
+          summary: "Snapshot hydration fell back to bootstrap",
+          detail:
+            error instanceof Error && error.message.trim().length > 0
+              ? error.message
+              : "Focused snapshot failed before bootstrap fallback.",
+          context: {
+            route: pathnameRef.current,
+            requestedMode: describeSnapshotInput(requestedSnapshotInput),
+            fallbackMode: "bootstrap",
+          },
+        });
+        snapshot = await api.orchestration.getSnapshot({ mode: "bootstrap" });
+      }
       if (disposed) return;
       latestSequence = Math.max(latestSequence, snapshot.snapshotSequence);
       syncServerReadModel(snapshot);

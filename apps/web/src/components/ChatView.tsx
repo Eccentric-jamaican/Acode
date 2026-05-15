@@ -135,7 +135,6 @@ import {
   DEFAULT_THREAD_TERMINAL_ID,
   MAX_THREAD_TERMINAL_COUNT,
   type ChatMessage,
-  type Project,
   type Thread,
   type TurnDiffSummary,
 } from "../types";
@@ -151,6 +150,7 @@ import {
   useFilePanelStore,
 } from "../filePanelStore";
 import { ThreadWorktreeHandoffDialog } from "./ThreadWorktreeHandoffDialog";
+import GitActionsControl from "./GitActionsControl";
 import {
   isOpenFavoriteEditorShortcut,
   resolveShortcutCommand,
@@ -170,9 +170,9 @@ import {
   MessageSquareIcon,
   PanelLeftIcon,
   BoxIcon,
+  GitBranchIcon,
   ImageIcon,
   MousePointer2Icon,
-  PlugIcon,
   PlusIcon,
   Maximize2Icon,
   ArrowLeftRight,
@@ -256,7 +256,11 @@ import {
 } from "../composerDraftStore";
 import { buildInspectPrompt } from "../browserInspectCapture";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
-import { ComposerPromptEditor, type ComposerPromptEditorHandle } from "./ComposerPromptEditor";
+import {
+  ComposerPromptEditor,
+  type ComposerMentionDescriptor,
+  type ComposerPromptEditorHandle,
+} from "./ComposerPromptEditor";
 import { shouldUseCompactComposerFooter } from "./composerFooterLayout";
 import { buildQuotedSelectionInsertion, normalizeSelectedText } from "../chatPinnedSelections";
 import { MessagesTimeline, type UserMessageMentionDescriptor } from "./chat/MessagesTimeline";
@@ -268,6 +272,7 @@ import {
 } from "./chat/ExpandedImagePreview";
 import { ComposerCommandMenu, type ComposerCommandItem } from "./chat/ComposerCommandMenu";
 import { ComposerExtrasMenu } from "./chat/ComposerExtrasMenu";
+import { buildChatThreadRelativePath, isChatsProject, joinClientPath } from "~/lib/chatProject";
 
 const LAST_EDITOR_KEY = "t3code:last-editor";
 const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by-project";
@@ -299,7 +304,6 @@ const DEFAULT_COMPUTER_USE_SETTINGS: ComputerUseSettings = {
 };
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
 const EMPTY_HANDOFF_TARGET_PROVIDERS: readonly ProviderKind[] = [];
-const HOME_PROJECT_TITLE = "Home";
 const COMPOSER_PATH_QUERY_DEBOUNCE_MS = 120;
 const SCRIPT_TERMINAL_COLS = 120;
 const SCRIPT_TERMINAL_ROWS = 30;
@@ -334,7 +338,7 @@ const CODEX_REASONING_LABEL_BY_OPTION: Record<CodexReasoningEffort, string> = {
   xhigh: "Extra High",
 };
 
-function skillMentionPrefix(): string {
+function skillMentionPrefix(): "$" {
   return "$";
 }
 
@@ -347,15 +351,6 @@ type SelectedComposerExtension = {
   iconUrl?: string | undefined;
   desktopApp?: ComputerUseAppSummary | undefined;
 };
-
-function isHomeProject(project: Project, homeDirectory: string | null | undefined): boolean {
-  return (
-    homeDirectory !== null &&
-    homeDirectory !== undefined &&
-    project.cwd === homeDirectory &&
-    project.name === HOME_PROJECT_TITLE
-  );
-}
 
 interface ThreadContextArtifact {
   path: string;
@@ -802,17 +797,27 @@ function selectedComposerExtensionsFromPrompt(input: {
   prompt: string;
   plugins: readonly ProviderPluginDescriptor[];
   skills: readonly ProviderSkillDescriptor[];
+  desktopApps?: readonly ComputerUseAppSummary[];
 }): SelectedComposerExtension[] {
   const pluginsByName = new Map(input.plugins.map((plugin) => [plugin.name.toLowerCase(), plugin]));
   const skillsByName = new Map(input.skills.map((skill) => [skill.name.toLowerCase(), skill]));
+  const desktopAppsByName = new Map(
+    (input.desktopApps ?? []).map((app) => [desktopAppMentionName(app).toLowerCase(), app]),
+  );
   const selected = new Map<string, SelectedComposerExtension>();
-  const mentionPattern = /(^|\s)([$/])([^\s]+)/g;
+  const mentionPattern = /(^|\s)([$/@])([^\s]+)(?=\s|$)/g;
   let match: RegExpExecArray | null;
 
   while ((match = mentionPattern.exec(input.prompt)) !== null) {
     const rawName = match[3]?.trim();
     if (!rawName) continue;
     const normalizedName = rawName.replace(/^\[|\]$/g, "").toLowerCase();
+    const marker = match[2];
+    const desktopApp = marker === "@" ? desktopAppsByName.get(normalizedName) : undefined;
+    if (desktopApp) {
+      selected.set(`desktop-app:${desktopApp.appId}`, selectedComposerExtensionFromDesktopApp(desktopApp));
+      continue;
+    }
     const plugin = pluginsByName.get(normalizedName);
     if (plugin) {
       selected.set(`plugin:${plugin.name}`, selectedComposerExtensionFromPlugin(plugin));
@@ -895,26 +900,28 @@ function mergeSelectedComposerExtensions(
   return [...merged.values()];
 }
 
-function selectedComposerExtensionTokens(
-  extensions: readonly SelectedComposerExtension[],
-): Set<string> {
-  return new Set(extensions.map((extension) => extension.mentionName.toLowerCase()));
+function selectedComposerExtensionMarker(extension: SelectedComposerExtension): "$" | "@" {
+  return extension.type === "desktop-app" ? "@" : skillMentionPrefix();
 }
 
-function stripSelectedComposerExtensionTokens(
+function promptContainsSelectedComposerExtensionToken(
   prompt: string,
-  extensions: readonly SelectedComposerExtension[],
-): string {
-  if (extensions.length === 0 || prompt.length === 0) return prompt;
-  const selectedTokens = selectedComposerExtensionTokens(extensions);
-  return prompt
-    .replace(
-      /(^|\s)([$/@])([^\s]+)(?=\s|$)/g,
-      (fullMatch, prefix: string, _marker: string, rawName: string) =>
-        selectedTokens.has(rawName.replace(/^\[|\]$/g, "").toLowerCase()) ? prefix : fullMatch,
-    )
-    .replace(/[ \t]{2,}/g, " ")
-    .trimStart();
+  extension: SelectedComposerExtension,
+): boolean {
+  const selectedToken = extension.mentionName.toLowerCase();
+  const selectedMarker = selectedComposerExtensionMarker(extension);
+  const mentionPattern = /(^|\s)([$/@])([^\s]+)(?=\s|$)/g;
+  let match: RegExpExecArray | null;
+  while ((match = mentionPattern.exec(prompt)) !== null) {
+    const marker = match[2];
+    const rawName = match[3];
+    if (!marker || !rawName) continue;
+    if (marker !== selectedMarker) continue;
+    if (rawName.replace(/^\[|\]$/g, "").toLowerCase() === selectedToken) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function promptWithSelectedComposerExtensions(input: {
@@ -922,7 +929,6 @@ function promptWithSelectedComposerExtensions(input: {
   selectedExtensions: readonly SelectedComposerExtension[];
 }): string {
   if (input.selectedExtensions.length === 0) return input.prompt;
-  const prefix = skillMentionPrefix();
   const providerExtensions = input.selectedExtensions.filter(
     (extension) => extension.type === "plugin" || extension.type === "skill",
   );
@@ -930,33 +936,30 @@ function promptWithSelectedComposerExtensions(input: {
     (extension) => extension.type === "desktop-app" && extension.desktopApp,
   );
   const selectedPrompt = providerExtensions
-    .map((extension) => `${prefix}${extension.mentionName}`)
+    .filter(
+      (extension) => !promptContainsSelectedComposerExtensionToken(input.prompt, extension),
+    )
+    .map((extension) => `${selectedComposerExtensionMarker(extension)}${extension.mentionName}`)
     .join(" ");
-  const cleanPrompt = stripSelectedComposerExtensionTokens(
-    input.prompt,
-    input.selectedExtensions,
-  ).trim();
+  const cleanPrompt = input.prompt.trim();
   const computerUseContext =
     desktopApps.length > 0
-      ? [
-          "T3 Computer Use app target selected by the user:",
-          ...desktopApps.map((extension) => {
+      ? desktopApps
+          .map((extension) => {
             const app = extension.desktopApp!;
             const window = app.windows.find((candidate) => candidate.isFocused || candidate.isMain);
             const windowText = window?.title ? `, window: ${window.title}` : "";
             const pidText = app.isRunning !== false && app.pid > 0 ? `, pid: ${app.pid}` : "";
             const launchText = app.launchId ? `, launchId: ${app.launchId}` : "";
             const runningText = app.isRunning === false ? ", not running" : "";
-            return `- ${app.name} (appId: ${app.appId}${pidText}${launchText}${windowText}${runningText})`;
-          }),
-          "Infer T3 Computer Use automatically when the task involves this app. Use the t3_computer MCP tools. Prefer observe_app, list_elements, get_visible_text, and activate_element so the app can be controlled through accessibility data without taking over the user's cursor. If the selected app is not running, launch it first with launch_app. Do not use shell commands, PowerShell, or OS scripts to launch, inspect, or control the selected desktop app; if T3 Computer Use cannot complete the action, explain the exact tool or approval gap instead. Only use tools with allowGlobalInput: true after the user explicitly approves real mouse or keyboard fallback.",
-          "",
-        ].join("\n")
+            return `Use t3_computer MCP - ${app.name} (appId: ${app.appId}${pidText}${launchText}${windowText}${runningText})`;
+          })
+          .join("\n")
       : "";
   const visiblePrompt = cleanPrompt
     ? [selectedPrompt, cleanPrompt].filter(Boolean).join(" ")
     : selectedPrompt;
-  return `${computerUseContext}${visiblePrompt}`.trim();
+  return [computerUseContext, visiblePrompt].filter(Boolean).join("\n\n").trim();
 }
 
 function displayPromptWithSelectedComposerExtensions(input: {
@@ -964,18 +967,13 @@ function displayPromptWithSelectedComposerExtensions(input: {
   selectedExtensions: readonly SelectedComposerExtension[];
 }): string {
   if (input.selectedExtensions.length === 0) return input.prompt;
-  const prefix = skillMentionPrefix();
   const selectedPrompt = input.selectedExtensions
-    .map((extension) =>
-      extension.type === "desktop-app"
-        ? `@${extension.mentionName}`
-        : `${prefix}${extension.mentionName}`,
+    .filter(
+      (extension) => !promptContainsSelectedComposerExtensionToken(input.prompt, extension),
     )
+    .map((extension) => `${selectedComposerExtensionMarker(extension)}${extension.mentionName}`)
     .join(" ");
-  const cleanPrompt = stripSelectedComposerExtensionTokens(
-    input.prompt,
-    input.selectedExtensions,
-  ).trim();
+  const cleanPrompt = input.prompt.trim();
   return cleanPrompt ? `${selectedPrompt} ${cleanPrompt}` : selectedPrompt;
 }
 
@@ -1092,34 +1090,6 @@ function displayPromptWithFilePanelComments(input: {
   return cleanPrompt ? `${token} ${cleanPrompt}` : token;
 }
 
-const SelectedComposerExtensionIcon = memo(function SelectedComposerExtensionIcon(props: {
-  extension: SelectedComposerExtension;
-}) {
-  const [failedIconUrl, setFailedIconUrl] = useState<string | null>(null);
-  const failed = props.extension.iconUrl !== undefined && failedIconUrl === props.extension.iconUrl;
-  const Icon =
-    props.extension.type === "plugin"
-      ? PlugIcon
-      : props.extension.type === "desktop-app"
-        ? MousePointer2Icon
-        : BoxIcon;
-
-  if (props.extension.iconUrl && !failed) {
-    return (
-      <img
-        src={props.extension.iconUrl}
-        alt=""
-        aria-hidden="true"
-        className="size-4 shrink-0 object-contain"
-        draggable={false}
-        onError={() => setFailedIconUrl(props.extension.iconUrl ?? null)}
-      />
-    );
-  }
-
-  return <Icon className="size-4 shrink-0" />;
-});
-
 const SelectedComposerShortcutIcon = memo(function SelectedComposerShortcutIcon(props: {
   shortcut: SelectedComposerShortcut;
 }) {
@@ -1141,13 +1111,6 @@ const SelectedInspectCaptureIcon = memo(function SelectedInspectCaptureIcon() {
 const SelectedLocalCommentIcon = memo(function SelectedLocalCommentIcon() {
   return <MessageSquareIcon className="size-4 shrink-0" />;
 });
-
-function removeSelectedComposerExtensionById(
-  extensions: SelectedComposerExtension[],
-  extensionId: string,
-): SelectedComposerExtension[] {
-  return extensions.filter((extension) => extension.id !== extensionId);
-}
 
 function removeSelectedComposerShortcutById(
   shortcuts: SelectedComposerShortcut[],
@@ -1479,6 +1442,12 @@ export default function ChatView({
   const [respondingUserInputRequestIds, setRespondingUserInputRequestIds] = useState<
     ApprovalRequestId[]
   >([]);
+  const [locallyDismissedApprovalRequestIds, setLocallyDismissedApprovalRequestIds] = useState<
+    Record<string, true>
+  >({});
+  const [locallyDismissedUserInputRequestIds, setLocallyDismissedUserInputRequestIds] = useState<
+    Record<string, true>
+  >({});
   const [pendingUserInputAnswersByRequestId, setPendingUserInputAnswersByRequestId] = useState<
     Record<string, Record<string, PendingUserInputDraftAnswer>>
   >({});
@@ -1664,11 +1633,11 @@ export default function ChatView({
   const homeDirectory = serverConfigQuery.data?.homeDirectory ?? null;
   const chatWorkspaceRoot = serverConfigQuery.data?.chatWorkspaceRoot ?? null;
   const projectPickerProjects = useMemo(
-    () => projects.filter((project) => !isHomeProject(project, chatWorkspaceRoot ?? homeDirectory)),
+    () => projects.filter((project) => !isChatsProject(project, chatWorkspaceRoot ?? homeDirectory)),
     [chatWorkspaceRoot, homeDirectory, projects],
   );
   const isActiveHomeProject = activeProject
-    ? isHomeProject(activeProject, chatWorkspaceRoot ?? homeDirectory)
+    ? isChatsProject(activeProject, chatWorkspaceRoot ?? homeDirectory)
     : false;
   const providerStatuses = serverConfigQuery.data?.providers ?? EMPTY_PROVIDER_STATUSES;
   const lockedProvider: ProviderKind | null = hasThreadStarted
@@ -1698,8 +1667,7 @@ export default function ChatView({
     sessionProvider,
     setComposerDraftProvider,
   ]);
-  const assistantDeliveryMode =
-    selectedProvider === "opencode" || settings.enableAssistantStreaming ? "streaming" : "buffered";
+  const assistantDeliveryMode = settings.enableAssistantStreaming ? "streaming" : "buffered";
   const baseThreadModel = resolveModelSlugForProvider(
     selectedProvider,
     activeThread?.model ?? activeProject?.model ?? getDefaultModel(selectedProvider),
@@ -1872,6 +1840,48 @@ export default function ChatView({
     () => derivePendingUserInputs(threadActivities),
     [threadActivities],
   );
+  const effectivePendingApprovals = useMemo(
+    () =>
+      pendingApprovals.filter(
+        (approval) => !locallyDismissedApprovalRequestIds[`${approval.requestId}`],
+      ),
+    [locallyDismissedApprovalRequestIds, pendingApprovals],
+  );
+  const effectivePendingUserInputs = useMemo(
+    () =>
+      pendingUserInputs.filter(
+        (userInput) => !locallyDismissedUserInputRequestIds[`${userInput.requestId}`],
+      ),
+    [locallyDismissedUserInputRequestIds, pendingUserInputs],
+  );
+  useEffect(() => {
+    if (Object.keys(locallyDismissedApprovalRequestIds).length === 0) {
+      return;
+    }
+    const activeRequestIds = new Set(
+      pendingApprovals.map((approval) => `${approval.requestId}`),
+    );
+    setLocallyDismissedApprovalRequestIds((existing) => {
+      const next = Object.fromEntries(
+        Object.entries(existing).filter(([requestId]) => activeRequestIds.has(requestId)),
+      );
+      return Object.keys(next).length === Object.keys(existing).length ? existing : next;
+    });
+  }, [pendingApprovals, locallyDismissedApprovalRequestIds]);
+  useEffect(() => {
+    if (Object.keys(locallyDismissedUserInputRequestIds).length === 0) {
+      return;
+    }
+    const activeRequestIds = new Set(
+      pendingUserInputs.map((request) => `${request.requestId}`),
+    );
+    setLocallyDismissedUserInputRequestIds((existing) => {
+      const next = Object.fromEntries(
+        Object.entries(existing).filter(([requestId]) => activeRequestIds.has(requestId)),
+      );
+      return Object.keys(next).length === Object.keys(existing).length ? existing : next;
+    });
+  }, [pendingUserInputs, locallyDismissedUserInputRequestIds]);
   const handoffBadgeLabel = useMemo(
     () => (activeThread ? resolveThreadHandoffBadgeLabel(activeThread) : null),
     [activeThread],
@@ -1931,11 +1941,11 @@ export default function ChatView({
     canCreateThreadHandoff({
       thread: activeThread,
       isBusy: isWorking,
-      hasPendingApprovals: pendingApprovals.length > 0,
-      hasPendingUserInput: pendingUserInputs.length > 0,
+      hasPendingApprovals: effectivePendingApprovals.length > 0,
+      hasPendingUserInput: effectivePendingUserInputs.length > 0,
     })
   );
-  const activePendingUserInput = pendingUserInputs[0] ?? null;
+  const activePendingUserInput = effectivePendingUserInputs[0] ?? null;
   const activePendingDraftAnswers = useMemo(
     () =>
       activePendingUserInput
@@ -1987,11 +1997,11 @@ export default function ChatView({
     [activeLatestTurn?.interactionMode, activeLatestTurn?.turnId, threadActivities],
   );
   const showPlanFollowUpPrompt =
-    pendingUserInputs.length === 0 &&
+    effectivePendingUserInputs.length === 0 &&
     interactionMode === "plan" &&
     latestTurnSettled &&
     activeProposedPlan !== null;
-  const activePendingApproval = pendingApprovals[0] ?? null;
+  const activePendingApproval = effectivePendingApprovals[0] ?? null;
   const isComposerApprovalState = activePendingApproval !== null;
   const composerFooterHasWideActions = showPlanFollowUpPrompt || activePendingProgress !== null;
   useEffect(() => {
@@ -2219,7 +2229,8 @@ export default function ChatView({
     latestTurnSettled,
     timelineEntries,
   ]);
-  const gitCwd = activeThread?.worktreePath ?? activeProject?.cwd ?? null;
+  const threadWorkspaceCwd = activeThread?.worktreePath ?? activeProject?.cwd ?? null;
+  const gitCwd = isActiveHomeProject ? null : threadWorkspaceCwd;
   const composerWorkspaceSearchCwd =
     activeThread?.worktreePath ?? (!isActiveHomeProject ? (activeProject?.cwd ?? null) : null);
   const composerTriggerKind = composerTrigger?.kind ?? null;
@@ -2324,26 +2335,6 @@ export default function ChatView({
       EMPTY_PROVIDER_PLUGINS,
     [providerPluginsQuery.data?.marketplaces],
   );
-  useEffect(() => {
-    const extractedExtensions = selectedComposerExtensionsFromPrompt({
-      prompt,
-      plugins: providerPlugins,
-      skills: providerSkills,
-    });
-    if (extractedExtensions.length === 0) return;
-
-    setSelectedComposerExtensions((existing) =>
-      mergeSelectedComposerExtensions(existing, extractedExtensions),
-    );
-    const nextPrompt = stripSelectedComposerExtensionTokens(prompt, extractedExtensions);
-    if (nextPrompt === prompt) return;
-    const nextCursor = Math.min(composerCursor, nextPrompt.length);
-    promptRef.current = nextPrompt;
-    setPrompt(nextPrompt);
-    setComposerCursor(nextCursor);
-    setComposerTrigger(detectComposerTrigger(nextPrompt, nextCursor));
-  }, [composerCursor, prompt, providerPlugins, providerSkills, setPrompt]);
-
   const providerUserMessageMentionDescriptors = useMemo<UserMessageMentionDescriptor[]>(() => {
     const pluginDescriptors = providerPlugins.map((plugin) => {
       const iconUrl = pluginComposerIcon(plugin);
@@ -2400,6 +2391,7 @@ export default function ChatView({
     });
     return [...providerUserMessageMentionDescriptors, ...desktopAppDescriptors];
   }, [desktopApps, providerUserMessageMentionDescriptors]);
+  const composerMentionDescriptors: readonly ComposerMentionDescriptor[] = userMessageMentionDescriptors;
 
   const composerMenuItems = useComposerCommandMenuItems({
     composerTrigger,
@@ -2435,8 +2427,36 @@ export default function ChatView({
   const availableEditors = serverConfigQuery.data?.availableEditors ?? EMPTY_AVAILABLE_EDITORS;
   const activeProvider = activeThread?.session?.provider ?? "codex";
   const activeProviderStatus = useMemo(
-    () => providerStatuses.find((status) => status.provider === activeProvider) ?? null,
-    [activeProvider, providerStatuses],
+    () => {
+      const providerStatus =
+        providerStatuses.find((status) => status.provider === activeProvider) ?? null;
+      if (!providerStatus) {
+        return null;
+      }
+
+      const liveSession = activeThread?.session;
+      const liveSessionMatchesProvider =
+        liveSession !== null &&
+        liveSession !== undefined &&
+        liveSession.provider === activeProvider;
+      const liveSessionHealthy =
+        liveSessionMatchesProvider &&
+        liveSession.lastError === null &&
+        (liveSession.status === "connecting" ||
+          liveSession.status === "running" ||
+          liveSession.status === "ready");
+
+      if (!liveSessionHealthy || providerStatus.status === "ready") {
+        return providerStatus;
+      }
+
+      const { message: _message, ...providerStatusWithoutMessage } = providerStatus;
+      return {
+        ...providerStatusWithoutMessage,
+        status: "ready" as const,
+      };
+    },
+    [activeProvider, activeThread?.session, providerStatuses],
   );
   const activeProjectCwd = activeProject?.cwd ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
@@ -2450,7 +2470,7 @@ export default function ChatView({
     });
   }, [activeProjectCwd, activeThreadWorktreePath]);
   // Default true while loading to avoid toolbar flicker.
-  const isGitRepo = branchesQuery.data?.isRepo ?? true;
+  const isGitRepo = gitCwd === null ? false : (branchesQuery.data?.isRepo ?? true);
   const showRuntimeControlInComposer = !isGitRepo;
   const splitTerminalShortcutLabel = useMemo(
     () => shortcutLabelForCommand(keybindings, "terminal.split"),
@@ -3728,17 +3748,30 @@ export default function ChatView({
       queuedChatTurn?.inspectCaptures ?? composerInspectCaptures;
     const selectedProviderForSend = queuedChatTurn?.selectedProvider ?? selectedProvider;
     const rawPromptForSend = queuedChatTurn?.displayText ?? promptRef.current;
+    const inlineSelectedComposerExtensions =
+      queuedChatTurn === null
+        ? selectedComposerExtensionsFromPrompt({
+            prompt: rawPromptForSend,
+            plugins: providerPlugins,
+            skills: providerSkills,
+            desktopApps,
+          })
+        : [];
+    const selectedComposerExtensionsForSend = mergeSelectedComposerExtensions(
+      selectedComposerExtensions,
+      inlineSelectedComposerExtensions,
+    );
     const basePromptForSend =
       queuedChatTurn?.prompt ??
       promptWithSelectedComposerExtensions({
         prompt: rawPromptForSend,
-        selectedExtensions: selectedComposerExtensions,
+        selectedExtensions: selectedComposerExtensionsForSend,
       });
     const baseDisplayPromptForSend =
       queuedChatTurn?.displayText ??
       displayPromptWithSelectedComposerExtensions({
         prompt: rawPromptForSend,
-        selectedExtensions: selectedComposerExtensions,
+        selectedExtensions: selectedComposerExtensionsForSend,
       });
     const shortcutPromptForSend =
       queuedChatTurn?.prompt ??
@@ -3825,7 +3858,7 @@ export default function ChatView({
     if (
       queuedChatTurn === null &&
       composerImagesForSend.length === 0 &&
-      selectedComposerExtensions.length === 0 &&
+      selectedComposerExtensionsForSend.length === 0 &&
       selectedComposerShortcuts.length === 0 &&
       composerInspectCapturesForSend.length === 0
     ) {
@@ -3990,6 +4023,53 @@ export default function ChatView({
         (activeProject.model as ModelSlug) ||
         DEFAULT_MODEL_BY_PROVIDER.codex;
 
+      if (isActiveHomeProject && nextThreadWorktreePath === null && chatWorkspaceRoot) {
+        const initialRelativePath = buildChatThreadRelativePath({
+          createdAt: activeThread.createdAt,
+          title,
+        });
+        const [dateSegment, baseSlug] = initialRelativePath.split("/");
+        let suffix = 1;
+        let relativePath = initialRelativePath;
+        if (dateSegment && baseSlug) {
+          const existingDirectoryNames = await api.projects
+            .listDirectory({ cwd: chatWorkspaceRoot, relativePath: dateSegment })
+            .then((result) =>
+              new Set(
+                result.entries
+                  .filter((entry) => entry.kind === "directory")
+                  .map((entry) => entry.name.toLowerCase()),
+              ),
+            )
+            .catch(() => new Set<string>());
+          while (
+            existingDirectoryNames.has(relativePath.slice(dateSegment.length + 1).toLowerCase())
+          ) {
+            suffix += 1;
+            relativePath = buildChatThreadRelativePath({
+              createdAt: activeThread.createdAt,
+              title,
+              suffix,
+            });
+          }
+        }
+        await api.projects.createDirectory({
+          cwd: chatWorkspaceRoot,
+          relativePath,
+        });
+        nextThreadWorktreePath = joinClientPath(chatWorkspaceRoot, relativePath);
+
+        if (isServerThread) {
+          await api.orchestration.dispatchCommand({
+            type: "thread.meta.update",
+            commandId: newCommandId(),
+            threadId: threadIdForSend,
+            worktreePath: nextThreadWorktreePath,
+          });
+          setStoreThreadBranch(threadIdForSend, nextThreadBranch, nextThreadWorktreePath);
+        }
+      }
+
       if (isLocalDraftThread) {
         await api.orchestration.dispatchCommand({
           type: "thread.create",
@@ -4135,22 +4215,31 @@ export default function ChatView({
       setRespondingRequestIds((existing) =>
         existing.includes(requestId) ? existing : [...existing, requestId],
       );
-      await api.orchestration
-        .dispatchCommand({
+      let wasSubmitted = false;
+      try {
+        await api.orchestration.dispatchCommand({
           type: "thread.approval.respond",
           commandId: newCommandId(),
           threadId: activeThreadId,
           requestId,
           decision,
           createdAt: new Date().toISOString(),
-        })
-        .catch((err: unknown) => {
-          setStoreThreadError(
-            activeThreadId,
-            err instanceof Error ? err.message : "Failed to submit approval decision.",
-          );
         });
-      setRespondingRequestIds((existing) => existing.filter((id) => id !== requestId));
+        wasSubmitted = true;
+      } catch (err: unknown) {
+        setStoreThreadError(
+          activeThreadId,
+          err instanceof Error ? err.message : "Failed to submit approval decision.",
+        );
+      } finally {
+        setRespondingRequestIds((existing) => existing.filter((id) => id !== requestId));
+      }
+      if (wasSubmitted) {
+        setLocallyDismissedApprovalRequestIds((existing) => ({
+          ...existing,
+          [String(requestId)]: true,
+        }));
+      }
     },
     [activeThreadId, setStoreThreadError],
   );
@@ -4163,22 +4252,45 @@ export default function ChatView({
       setRespondingUserInputRequestIds((existing) =>
         existing.includes(requestId) ? existing : [...existing, requestId],
       );
-      await api.orchestration
-        .dispatchCommand({
+      let wasSubmitted = false;
+      try {
+        await api.orchestration.dispatchCommand({
           type: "thread.user-input.respond",
           commandId: newCommandId(),
           threadId: activeThreadId,
           requestId,
           answers,
           createdAt: new Date().toISOString(),
-        })
-        .catch((err: unknown) => {
-          setStoreThreadError(
-            activeThreadId,
-            err instanceof Error ? err.message : "Failed to submit user input.",
-          );
         });
-      setRespondingUserInputRequestIds((existing) => existing.filter((id) => id !== requestId));
+        wasSubmitted = true;
+      } catch (err: unknown) {
+        setStoreThreadError(
+          activeThreadId,
+          err instanceof Error ? err.message : "Failed to submit user input.",
+        );
+      } finally {
+        setRespondingUserInputRequestIds((existing) => existing.filter((id) => id !== requestId));
+      }
+      if (wasSubmitted) {
+        setLocallyDismissedUserInputRequestIds((existing) => ({
+          ...existing,
+          [String(requestId)]: true,
+        }));
+        setPendingUserInputAnswersByRequestId((existing) => {
+          const key = String(requestId);
+          if (!existing[key]) return existing;
+          const next = { ...existing };
+          delete next[key];
+          return next;
+        });
+        setPendingUserInputQuestionIndexByRequestId((existing) => {
+          const key = String(requestId);
+          if (!existing[key]) return existing;
+          const next = { ...existing };
+          delete next[key];
+          return next;
+        });
+      }
     },
     [activeThreadId, setStoreThreadError],
   );
@@ -4460,7 +4572,7 @@ export default function ChatView({
       sendInFlightRef.current ||
       activePendingApproval !== null ||
       activePendingProgress !== null ||
-      pendingUserInputs.length > 0 ||
+      effectivePendingUserInputs.length > 0 ||
       queuedComposerTurns.length === 0
     ) {
       return;
@@ -4485,7 +4597,7 @@ export default function ChatView({
     dispatchQueuedComposerTurn,
     isConnecting,
     isSendBusy,
-    pendingUserInputs.length,
+    effectivePendingUserInputs.length,
     phase,
     queuedComposerTurns,
   ]);
@@ -5278,15 +5390,15 @@ export default function ChatView({
         return;
       }
       if (item.type === "desktop-app") {
-        const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
-          expectedText: expectedToken,
-        });
+        const applied = applyPromptReplacement(
+          trigger.rangeStart,
+          trigger.rangeEnd,
+          `@${desktopAppMentionName(item.app)} `,
+          {
+            expectedText: expectedToken,
+          },
+        );
         if (applied) {
-          setSelectedComposerExtensions((existing) =>
-            mergeSelectedComposerExtensions(existing, [
-              selectedComposerExtensionFromDesktopApp(item.app),
-            ]),
-          );
           setComposerHighlightedItemId(null);
         }
         return;
@@ -5310,29 +5422,29 @@ export default function ChatView({
         return;
       }
       if (item.type === "skill") {
-        const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
-          expectedText: expectedToken,
-        });
+        const applied = applyPromptReplacement(
+          trigger.rangeStart,
+          trigger.rangeEnd,
+          `${skillMentionPrefix()}${item.skill.name} `,
+          {
+            expectedText: expectedToken,
+          },
+        );
         if (applied) {
-          setSelectedComposerExtensions((existing) =>
-            mergeSelectedComposerExtensions(existing, [
-              selectedComposerExtensionFromSkill({ skill: item.skill, plugins: providerPlugins }),
-            ]),
-          );
           setComposerHighlightedItemId(null);
         }
         return;
       }
       if (item.type === "plugin") {
-        const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
-          expectedText: expectedToken,
-        });
+        const applied = applyPromptReplacement(
+          trigger.rangeStart,
+          trigger.rangeEnd,
+          `${skillMentionPrefix()}${item.plugin.name} `,
+          {
+            expectedText: expectedToken,
+          },
+        );
         if (applied) {
-          setSelectedComposerExtensions((existing) =>
-            mergeSelectedComposerExtensions(existing, [
-              selectedComposerExtensionFromPlugin(item.plugin),
-            ]),
-          );
           setComposerHighlightedItemId(null);
         }
         return;
@@ -5349,7 +5461,6 @@ export default function ChatView({
       applyPromptReplacement,
       handleSlashCommandSelection,
       onProviderModelSelect,
-      providerPlugins,
       resolveActiveComposerTrigger,
     ],
   );
@@ -5554,7 +5665,7 @@ export default function ChatView({
           activeProjectName={activeProject?.name}
           activeTaskTitle={activeTask?.title ?? null}
           isGitRepo={isGitRepo}
-          openInCwd={activeThread.worktreePath ?? activeProject?.cwd ?? null}
+          openInCwd={threadWorkspaceCwd}
           activeProjectScripts={activeProject?.scripts}
           preferredScriptId={
             activeProject ? (lastInvokedScriptByProjectId[activeProject.id] ?? null) : null
@@ -5615,6 +5726,7 @@ export default function ChatView({
         <ThreadContextPanel
           thread={activeThread}
           gitCwd={gitCwd}
+          workspaceCwd={threadWorkspaceCwd}
           homeDirectory={homeDirectory ?? undefined}
           activeThreadId={activeThread.id}
           onOpenFilePath={onOpenFilePath}
@@ -5727,9 +5839,9 @@ export default function ChatView({
                 });
               }}
               onOpenFilePath={onOpenFilePath}
-              markdownCwd={gitCwd ?? undefined}
+              markdownCwd={threadWorkspaceCwd ?? undefined}
               resolvedTheme={resolvedTheme}
-              workspaceRoot={activeProject?.cwd ?? undefined}
+              workspaceRoot={threadWorkspaceCwd ?? undefined}
               homeDirectory={homeDirectory ?? undefined}
               pinnedSelections={composerPinnedSelections}
               onAskAboutSelectedText={onAskAboutSelectedText}
@@ -5881,13 +5993,13 @@ export default function ChatView({
                 <div className="rounded-t-[19px] border-b border-border/65 bg-muted/20">
                   <ComposerPendingApprovalPanel
                     approval={activePendingApproval}
-                    pendingCount={pendingApprovals.length}
+                    pendingCount={effectivePendingApprovals.length}
                   />
                 </div>
-              ) : pendingUserInputs.length > 0 ? (
+              ) : effectivePendingUserInputs.length > 0 ? (
                 <div className="rounded-t-[19px] border-b border-border/65 bg-muted/20">
                   <ComposerPendingUserInputPanel
-                    pendingUserInputs={pendingUserInputs}
+                    pendingUserInputs={effectivePendingUserInputs}
                     respondingRequestIds={respondingUserInputRequestIds}
                     answers={activePendingDraftAnswers}
                     questionIndex={activePendingQuestionIndex}
@@ -5920,9 +6032,8 @@ export default function ChatView({
                 )}
 
                 {!isComposerApprovalState &&
-                pendingUserInputs.length === 0 &&
-                (selectedComposerExtensions.length > 0 ||
-                  selectedComposerShortcuts.length > 0 ||
+                effectivePendingUserInputs.length === 0 &&
+                (selectedComposerShortcuts.length > 0 ||
                   composerInspectCaptures.length > 0 ||
                   filePanelCommentCount > 0) ? (
                   <div className="mb-2 flex items-center gap-2 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
@@ -5987,30 +6098,11 @@ export default function ChatView({
                         <XIcon className="size-3 opacity-0 transition-opacity group-hover:opacity-70 group-focus-visible:opacity-70" />
                       </button>
                     ))}
-                    {selectedComposerExtensions.map((extension) => (
-                      <button
-                        type="button"
-                        key={extension.id}
-                        className="group inline-flex shrink-0 items-center gap-1.5 rounded-md px-0.5 py-0.5 text-sm font-medium text-blue-400 outline-none transition-colors hover:bg-blue-400/10 focus-visible:ring-2 focus-visible:ring-blue-400/45"
-                        title={`Remove ${extension.label}`}
-                        aria-label={`Remove ${extension.label}`}
-                        onClick={() => {
-                          setSelectedComposerExtensions((existing) =>
-                            removeSelectedComposerExtensionById(existing, extension.id),
-                          );
-                          scheduleComposerFocus();
-                        }}
-                      >
-                        <SelectedComposerExtensionIcon extension={extension} />
-                        <span className="max-w-40 truncate">{extension.label}</span>
-                        <XIcon className="size-3 opacity-0 transition-opacity group-hover:opacity-70 group-focus-visible:opacity-70" />
-                      </button>
-                    ))}
                   </div>
                 ) : null}
 
                 {!isComposerApprovalState &&
-                pendingUserInputs.length === 0 &&
+                effectivePendingUserInputs.length === 0 &&
                 composerPinnedSelections.length > 0 ? (
                   <div className="mb-2 flex items-center gap-1.5 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
                     {composerPinnedSelections.map((selection, index) => (
@@ -6054,7 +6146,7 @@ export default function ChatView({
                   </div>
                 ) : null}
                 {!isComposerApprovalState &&
-                  pendingUserInputs.length === 0 &&
+                  effectivePendingUserInputs.length === 0 &&
                   composerImages.length > 0 && (
                     <div className="mb-2.5 flex flex-wrap gap-1.5">
                       {composerImages.map((image) => (
@@ -6149,6 +6241,7 @@ export default function ChatView({
                                 : "Ask anything, @tag files/folders, or use / to show available commands"
                   }
                   disabled={isConnecting || isComposerApprovalState}
+                  mentionDescriptors={composerMentionDescriptors}
                 />
               </div>
 
@@ -6301,11 +6394,11 @@ export default function ChatView({
                               onClick={toggleRuntimeMode}
                               title={
                                 runtimeMode === "full-access"
-                                  ? "Full access — click to require approvals"
-                                  : "Approval required — click for full access"
+                                  ? "Full access applies to future turns in this thread. Click for approvals."
+                                  : "Approval required for this turn. Click to enable full access for this thread."
                               }
                             >
-                              {runtimeMode === "full-access" ? "Full access" : "Supervised"}
+                              {runtimeMode === "full-access" ? "Full access (thread)" : "Supervised"}
                             </Button>
                           </>
                         ) : null}
@@ -6372,7 +6465,7 @@ export default function ChatView({
                           <rect x="3" y="3" width="10" height="10" rx="2" />
                         </svg>
                       </button>
-                    ) : pendingUserInputs.length === 0 ? (
+                    ) : effectivePendingUserInputs.length === 0 ? (
                       showPlanFollowUpPrompt ? (
                         prompt.trim().length > 0 ? (
                           <Button
@@ -6534,6 +6627,7 @@ export default function ChatView({
 interface ThreadContextPanelProps {
   thread: Thread;
   gitCwd: string | null;
+  workspaceCwd: string | null;
   homeDirectory: string | undefined;
   activeThreadId: ThreadId;
   onOpenFilePath: (
@@ -6601,6 +6695,7 @@ function ThreadContextCollapsibleSection(props: {
 const ThreadContextPanel = memo(function ThreadContextPanel({
   thread,
   gitCwd,
+  workspaceCwd,
   homeDirectory,
   activeThreadId,
   onOpenFilePath,
@@ -6625,6 +6720,7 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
     [homeDirectory, thread],
   );
   const sources = useMemo(() => collectThreadContextSources(thread), [thread]);
+  const hasGitContext = gitCwd !== null;
   const hasChanges =
     (gitStatus?.workingTree.insertions ?? 0) > 0 || (gitStatus?.workingTree.deletions ?? 0) > 0;
 
@@ -6659,11 +6755,11 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
           ? "opacity-100"
           : "pointer-events-none translate-x-2 opacity-0 group-hover/thread-context:pointer-events-auto group-hover/thread-context:translate-x-0 group-hover/thread-context:opacity-100 focus-within:pointer-events-auto focus-within:translate-x-0 focus-within:opacity-100",
       )}
-      aria-label="Branch details"
+      aria-label={hasGitContext ? "Branch details" : "Thread context"}
     >
       <div className="flex items-center justify-between px-3 py-2">
         <p className="text-sm font-medium text-foreground/82">
-          {progressItems.length > 0 ? "Progress" : "Branch details"}
+          {progressItems.length > 0 ? "Progress" : hasGitContext ? "Branch details" : "Context"}
         </p>
         <Button
           type="button"
@@ -6715,30 +6811,48 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
               ))}
             </div>
 
-            <Separator className="my-3 bg-border/60" />
-            <p className="px-1.5 pb-1 text-xs font-medium text-muted-foreground/80">
-              Branch details
-            </p>
+            {hasGitContext ? (
+              <>
+                <Separator className="my-3 bg-border/60" />
+                <p className="px-1.5 pb-1 text-xs font-medium text-muted-foreground/80">
+                  Branch details
+                </p>
+              </>
+            ) : null}
           </>
         ) : null}
 
-        <button
-          type="button"
-          className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left transition-colors hover:bg-muted/45"
-          onClick={onOpenChanges}
-        >
-          <BoxIcon className="size-4 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 flex-1 text-foreground/88">Changes</span>
-          {hasChanges ? (
-            <span className="shrink-0 font-mono text-xs">
-              <span className="text-success">+{gitStatus?.workingTree.insertions ?? 0}</span>
-              <span className="px-1 text-muted-foreground/50"> </span>
-              <span className="text-destructive">-{gitStatus?.workingTree.deletions ?? 0}</span>
-            </span>
-          ) : (
-            <span className="text-xs text-muted-foreground/60">clean</span>
-          )}
-        </button>
+        {hasGitContext ? (
+          <>
+            <button
+              type="button"
+              className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left transition-colors hover:bg-muted/45"
+              onClick={onOpenChanges}
+            >
+              <BoxIcon className="size-4 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 flex-1 text-foreground/88">Changes</span>
+              {hasChanges ? (
+                <span className="shrink-0 font-mono text-xs">
+                  <span className="text-success">+{gitStatus?.workingTree.insertions ?? 0}</span>
+                  <span className="px-1 text-muted-foreground/50"> </span>
+                  <span className="text-destructive">-{gitStatus?.workingTree.deletions ?? 0}</span>
+                </span>
+              ) : (
+                <span className="text-xs text-muted-foreground/60">clean</span>
+              )}
+            </button>
+
+            <div className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5">
+              <GitBranchIcon className="size-4 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 flex-1 text-foreground/88">Git actions</span>
+              <div className="shrink-0">
+                <GitActionsControl gitCwd={gitCwd} activeThreadId={activeThreadId} />
+              </div>
+            </div>
+
+            <Separator className="my-2 bg-border/60" />
+          </>
+        ) : null}
 
         <ThreadContextCollapsibleSection
           title="Artifacts"
@@ -6755,7 +6869,7 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
               title={artifact.path}
               onClick={() =>
                 onOpenFilePath(artifact.path, {
-                  cwd: artifact.cwd ?? gitCwd ?? undefined,
+                  cwd: artifact.cwd ?? workspaceCwd ?? undefined,
                   displayName: artifact.label,
                 })
               }

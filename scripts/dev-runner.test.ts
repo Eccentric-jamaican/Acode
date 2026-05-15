@@ -5,6 +5,7 @@ import { Effect } from "effect";
 
 import {
   DEFAULT_DEV_STATE_DIR,
+  MODE_ARGS,
   createDevRunnerEnv,
   findFirstAvailableOffset,
   resolveModePortOffsets,
@@ -12,6 +13,16 @@ import {
 } from "./dev-runner.ts";
 
 it.layer(NodeServices.layer)("dev-runner", (it) => {
+  describe("MODE_ARGS", () => {
+    it.effect("runs dev:web with stream logs visible", () =>
+      Effect.sync(() => {
+        assert.ok(MODE_ARGS["dev:web"].includes("--ui=stream"));
+        assert.ok(MODE_ARGS["dev:web"].includes("--output-logs=full"));
+        assert.ok(MODE_ARGS["dev:web"].includes("--log-order=stream"));
+      }),
+    );
+  });
+
   describe("resolveOffset", () => {
     it.effect("uses explicit T3CODE_PORT_OFFSET when provided", () =>
       Effect.sync(() => {

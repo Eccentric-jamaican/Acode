@@ -353,7 +353,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const git = yield* GitCore;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const chatWorkspaceRoot = path.join(homeDirectory, ".codex", "chats");
+  const chatWorkspaceRoot = path.join(homeDirectory, "Documents", "A Code", "Chats");
 
   yield* keybindingsManager.syncDefaultKeybindingsOnStartup.pipe(
     Effect.catch((error) =>

@@ -20,11 +20,19 @@ function escapeTomlString(value: string): string {
 }
 
 function resolveSiblingRuntimePath(baseName: string): string {
-  const builtPath = fileURLToPath(new URL(`./${baseName}.mjs`, import.meta.url));
-  if (FS.existsSync(builtPath)) {
-    return builtPath;
+  const modulePath = fileURLToPath(import.meta.url);
+  const moduleDir = Path.dirname(modulePath);
+  const candidates = [
+    Path.join(moduleDir, `${baseName}.mjs`),
+    Path.join(moduleDir, "..", "dist", `${baseName}.mjs`),
+    Path.join(moduleDir, `${baseName}.ts`),
+  ];
+  for (const candidate of candidates) {
+    if (FS.existsSync(candidate)) {
+      return candidate;
+    }
   }
-  return fileURLToPath(new URL(`./${baseName}.ts`, import.meta.url));
+  return Path.join(moduleDir, `${baseName}.ts`);
 }
 
 function resolveBrowserMcpServerPath(): string {
@@ -33,6 +41,48 @@ function resolveBrowserMcpServerPath(): string {
 
 function resolveComputerMcpServerPath(): string {
   return resolveSiblingRuntimePath("computerMcpServer");
+}
+
+function runtimeCommandForMcpServer(serverPath: string): string {
+  const runtimeName = Path.basename(process.execPath).toLowerCase();
+  if (serverPath.endsWith(".mjs") && runtimeName.startsWith("bun")) {
+    return resolveNodeCommand();
+  }
+  return process.execPath;
+}
+
+function resolveNodeCommand(): string {
+  const currentRuntimeName = Path.basename(process.execPath).toLowerCase();
+  if (currentRuntimeName === "node.exe" || currentRuntimeName === "node") {
+    return process.execPath;
+  }
+
+  const pathValue = process.env.Path ?? process.env.PATH ?? "";
+  const pathExts = process.platform === "win32" ? ["node.exe", "node.cmd", "node"] : ["node"];
+  for (const dir of pathValue.split(Path.delimiter)) {
+    const trimmedDir = dir.trim();
+    if (!trimmedDir) {
+      continue;
+    }
+    for (const executableName of pathExts) {
+      const candidate = Path.join(trimmedDir, executableName);
+      if (FS.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  const windowsCandidates = [
+    "C:\\Program Files\\nodejs\\node.exe",
+    "C:\\Program Files (x86)\\nodejs\\node.exe",
+  ];
+  for (const candidate of windowsCandidates) {
+    if (FS.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return "node";
 }
 
 function resolveBaseCodexHome(preferredHomePath?: string): string {
@@ -180,6 +230,7 @@ function buildBrowserMcpBlock(input: {
     "startup_timeout_sec = 20",
     "tool_timeout_sec = 120",
     "[mcp_servers.t3_browser.env]",
+    'ELECTRON_RUN_AS_NODE = "1"',
     `T3_BROWSER_BRIDGE_URL = "${escapeTomlString(input.bridgeUrl)}"`,
     `T3_BROWSER_BRIDGE_TOKEN = "${escapeTomlString(input.bridgeToken)}"`,
     `T3_BROWSER_PROJECT_ID = "${escapeTomlString(String(input.projectId))}"`,
@@ -193,14 +244,18 @@ function buildComputerMcpBlock(input: {
   threadId: ThreadId;
   stateDir: string;
 }): string {
+  const serverPath = resolveComputerMcpServerPath();
   return [
     "",
     "[mcp_servers.t3_computer]",
-    `command = "${escapeTomlString(process.execPath)}"`,
-    `args = ["${escapeTomlString(resolveComputerMcpServerPath())}"]`,
-    "startup_timeout_sec = 20",
+    `command = "${escapeTomlString(runtimeCommandForMcpServer(serverPath))}"`,
+    `args = ["${escapeTomlString(serverPath)}"]`,
+    `cwd = "${escapeTomlString(process.cwd())}"`,
+    "required = true",
+    "startup_timeout_sec = 60",
     "tool_timeout_sec = 120",
     "[mcp_servers.t3_computer.env]",
+    'ELECTRON_RUN_AS_NODE = "1"',
     `T3CODE_STATE_DIR = "${escapeTomlString(input.stateDir)}"`,
     `T3_COMPUTER_PROJECT_ID = "${escapeTomlString(String(input.projectId))}"`,
     `T3_COMPUTER_THREAD_ID = "${escapeTomlString(String(input.threadId))}"`,
@@ -219,12 +274,9 @@ export interface CodexHomeOverlayInput {
 }
 
 export function createCodexHomeOverlay(input: CodexHomeOverlayInput): string | undefined {
-  if (input.runtimeMode !== "full-access") {
-    return input.preferredHomePath;
-  }
   const bridgeUrl = input.bridgeUrl?.trim();
   const bridgeToken = input.bridgeToken?.trim();
-  const includeBrowserMcp = Boolean(bridgeUrl && bridgeToken);
+  const includeBrowserMcp = input.runtimeMode === "full-access" && Boolean(bridgeUrl && bridgeToken);
 
   const baseHomePath = resolveBaseCodexHome(input.preferredHomePath);
   const overlayDir = Path.join(

@@ -18,7 +18,7 @@ export const DEFAULT_DEV_STATE_DIR = Effect.map(Effect.service(Path.Path), (path
   path.join(homedir(), ".t3", "dev"),
 );
 
-const MODE_ARGS = {
+export const MODE_ARGS = {
   dev: [
     "run",
     "dev",
@@ -29,7 +29,14 @@ const MODE_ARGS = {
     "--parallel",
   ],
   "dev:server": ["run", "dev", "--filter=t3"],
-  "dev:web": ["run", "dev", "--filter=@t3tools/web"],
+  "dev:web": [
+    "run",
+    "dev",
+    "--ui=stream",
+    "--output-logs=full",
+    "--log-order=stream",
+    "--filter=@t3tools/web",
+  ],
   "dev:desktop": [
     "run",
     "dev",

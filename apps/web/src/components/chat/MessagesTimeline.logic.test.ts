@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { computeMessageDurationStart, normalizeCompactToolLabel } from "./MessagesTimeline.logic";
+import {
+  collectComputerUseCaptures,
+  computeMessageDurationStart,
+  normalizeCompactToolLabel,
+} from "./MessagesTimeline.logic";
 
 describe("computeMessageDurationStart", () => {
   it("returns message createdAt when there is no preceding user message", () => {
@@ -102,5 +106,42 @@ describe("normalizeCompactToolLabel", () => {
 
   it("leaves labels without completion wording unchanged", () => {
     expect(normalizeCompactToolLabel("Web search")).toBe("Web search");
+  });
+});
+
+describe("collectComputerUseCaptures", () => {
+  it("finds persisted computer-use captures inside structured content", () => {
+    const payload = {
+      data: {
+        structuredContent: {
+          providerNeutralType: "computer_use",
+          captures: [
+            {
+              captureId: "capture-1",
+              url: "/attachments/computer-use/thread-1/captures/capture-1.png",
+              width: 625,
+              height: 875,
+            },
+          ],
+        },
+      },
+    };
+
+    expect(collectComputerUseCaptures(payload)).toEqual([
+      {
+        captureId: "capture-1",
+        url: "/attachments/computer-use/thread-1/captures/capture-1.png",
+        width: 625,
+        height: 875,
+      },
+    ]);
+  });
+
+  it("ignores non-attachment URLs so broken placeholder images are not synthesized", () => {
+    expect(
+      collectComputerUseCaptures({
+        captures: [{ captureId: "remote", url: "https://example.test/capture.png" }],
+      }),
+    ).toEqual([]);
   });
 });

@@ -1,6 +1,6 @@
 import { stdin, stdout } from "node:process";
 
-import type { ProjectId } from "@t3tools/contracts";
+import type { ProjectId, ThreadId } from "@t3tools/contracts";
 
 import { DesktopBrowserClient } from "./browserDesktopClient";
 
@@ -46,12 +46,27 @@ function readDefaultProjectId(): ProjectId | undefined {
   return value as ProjectId;
 }
 
+function readDefaultThreadId(): ThreadId | undefined {
+  const value = process.env.T3_BROWSER_THREAD_ID?.trim();
+  if (!value) {
+    return undefined;
+  }
+  return value as ThreadId;
+}
+
 const defaultProjectId = readDefaultProjectId();
+const defaultThreadId = readDefaultThreadId();
 const client = new DesktopBrowserClient({
   bridgeUrl: process.env.T3_BROWSER_BRIDGE_URL ?? "",
   authToken: process.env.T3_BROWSER_BRIDGE_TOKEN ?? "",
   ...(defaultProjectId ? { defaultProjectId } : {}),
+  ...(defaultThreadId ? { defaultThreadId } : {}),
 });
+
+const BROWSER_SCOPE_PROPERTIES = {
+  projectId: { type: "string" },
+  threadId: { type: "string" },
+} as const;
 
 const TOOL_DEFINITIONS = [
   {
@@ -59,9 +74,7 @@ const TOOL_DEFINITIONS = [
     description: "Ensure the project browser exists and return its current state.",
     inputSchema: {
       type: "object",
-      properties: {
-        projectId: { type: "string" },
-      },
+      properties: BROWSER_SCOPE_PROPERTIES,
     },
   },
   {
@@ -69,9 +82,7 @@ const TOOL_DEFINITIONS = [
     description: "Ask the desktop app to show the project browser pane.",
     inputSchema: {
       type: "object",
-      properties: {
-        projectId: { type: "string" },
-      },
+      properties: BROWSER_SCOPE_PROPERTIES,
     },
   },
   {
@@ -79,9 +90,7 @@ const TOOL_DEFINITIONS = [
     description: "Kill the project browser instance.",
     inputSchema: {
       type: "object",
-      properties: {
-        projectId: { type: "string" },
-      },
+      properties: BROWSER_SCOPE_PROPERTIES,
     },
   },
   {
@@ -90,7 +99,7 @@ const TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object",
       properties: {
-        projectId: { type: "string" },
+        ...BROWSER_SCOPE_PROPERTIES,
         url: { type: "string" },
       },
     },
@@ -102,7 +111,7 @@ const TOOL_DEFINITIONS = [
       type: "object",
       required: ["tabId"],
       properties: {
-        projectId: { type: "string" },
+        ...BROWSER_SCOPE_PROPERTIES,
         tabId: { type: "string" },
       },
     },
@@ -114,7 +123,7 @@ const TOOL_DEFINITIONS = [
       type: "object",
       required: ["tabId"],
       properties: {
-        projectId: { type: "string" },
+        ...BROWSER_SCOPE_PROPERTIES,
         tabId: { type: "string" },
       },
     },
@@ -124,9 +133,7 @@ const TOOL_DEFINITIONS = [
     description: "List browser tabs and return the active tab id.",
     inputSchema: {
       type: "object",
-      properties: {
-        projectId: { type: "string" },
-      },
+      properties: BROWSER_SCOPE_PROPERTIES,
     },
   },
   {
@@ -136,7 +143,7 @@ const TOOL_DEFINITIONS = [
       type: "object",
       required: ["url"],
       properties: {
-        projectId: { type: "string" },
+        ...BROWSER_SCOPE_PROPERTIES,
         url: { type: "string" },
       },
     },
@@ -144,27 +151,27 @@ const TOOL_DEFINITIONS = [
   {
     name: "browser_back",
     description: "Navigate backward in the project browser history.",
-    inputSchema: { type: "object", properties: { projectId: { type: "string" } } },
+    inputSchema: { type: "object", properties: BROWSER_SCOPE_PROPERTIES },
   },
   {
     name: "browser_forward",
     description: "Navigate forward in the project browser history.",
-    inputSchema: { type: "object", properties: { projectId: { type: "string" } } },
+    inputSchema: { type: "object", properties: BROWSER_SCOPE_PROPERTIES },
   },
   {
     name: "browser_reload",
     description: "Reload the current page.",
-    inputSchema: { type: "object", properties: { projectId: { type: "string" } } },
+    inputSchema: { type: "object", properties: BROWSER_SCOPE_PROPERTIES },
   },
   {
     name: "browser_snapshot",
     description: "Return a text and HTML snapshot of the current page.",
-    inputSchema: { type: "object", properties: { projectId: { type: "string" } } },
+    inputSchema: { type: "object", properties: BROWSER_SCOPE_PROPERTIES },
   },
   {
     name: "browser_screenshot",
     description: "Capture a screenshot of the current page as a data URL.",
-    inputSchema: { type: "object", properties: { projectId: { type: "string" } } },
+    inputSchema: { type: "object", properties: BROWSER_SCOPE_PROPERTIES },
   },
   {
     name: "browser_wait_for",
@@ -172,7 +179,7 @@ const TOOL_DEFINITIONS = [
     inputSchema: {
       type: "object",
       properties: {
-        projectId: { type: "string" },
+        ...BROWSER_SCOPE_PROPERTIES,
         selector: { type: "string" },
         text: { type: "string" },
         timeoutMs: { type: "number" },
@@ -186,7 +193,7 @@ const TOOL_DEFINITIONS = [
       type: "object",
       required: ["selector"],
       properties: {
-        projectId: { type: "string" },
+        ...BROWSER_SCOPE_PROPERTIES,
         selector: { type: "string" },
       },
     },
@@ -198,7 +205,7 @@ const TOOL_DEFINITIONS = [
       type: "object",
       required: ["selector"],
       properties: {
-        projectId: { type: "string" },
+        ...BROWSER_SCOPE_PROPERTIES,
         selector: { type: "string" },
       },
     },
@@ -210,7 +217,7 @@ const TOOL_DEFINITIONS = [
       type: "object",
       required: ["selector", "value"],
       properties: {
-        projectId: { type: "string" },
+        ...BROWSER_SCOPE_PROPERTIES,
         selector: { type: "string" },
         value: { type: "string" },
       },
@@ -223,7 +230,7 @@ const TOOL_DEFINITIONS = [
       type: "object",
       required: ["selector", "text"],
       properties: {
-        projectId: { type: "string" },
+        ...BROWSER_SCOPE_PROPERTIES,
         selector: { type: "string" },
         text: { type: "string" },
       },
@@ -236,7 +243,7 @@ const TOOL_DEFINITIONS = [
       type: "object",
       required: ["key"],
       properties: {
-        projectId: { type: "string" },
+        ...BROWSER_SCOPE_PROPERTIES,
         key: { type: "string" },
       },
     },
@@ -248,7 +255,7 @@ const TOOL_DEFINITIONS = [
       type: "object",
       required: ["expression"],
       properties: {
-        projectId: { type: "string" },
+        ...BROWSER_SCOPE_PROPERTIES,
         expression: { type: "string" },
       },
     },

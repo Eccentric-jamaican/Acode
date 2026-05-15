@@ -5,10 +5,10 @@ export type ComposerPromptSegment =
     }
   | {
       type: "mention";
-      path: string;
+      token: string;
     };
 
-const MENTION_TOKEN_REGEX = /(^|\s)@([^\s@]+)(?=\s)/g;
+const MENTION_TOKEN_REGEX = /(^|\s)([@$])([^\s@$]+)(?=\s|$)/g;
 
 function pushTextSegment(segments: ComposerPromptSegment[], text: string): void {
   if (!text) return;
@@ -30,7 +30,8 @@ export function splitPromptIntoComposerSegments(prompt: string): ComposerPromptS
   for (const match of prompt.matchAll(MENTION_TOKEN_REGEX)) {
     const fullMatch = match[0];
     const prefix = match[1] ?? "";
-    const path = match[2] ?? "";
+    const marker = match[2] ?? "";
+    const value = match[3] ?? "";
     const matchIndex = match.index ?? 0;
     const mentionStart = matchIndex + prefix.length;
     const mentionEnd = mentionStart + fullMatch.length - prefix.length;
@@ -39,8 +40,8 @@ export function splitPromptIntoComposerSegments(prompt: string): ComposerPromptS
       pushTextSegment(segments, prompt.slice(cursor, mentionStart));
     }
 
-    if (path.length > 0) {
-      segments.push({ type: "mention", path });
+    if (marker.length > 0 && value.length > 0) {
+      segments.push({ type: "mention", token: `${marker}${value}` });
     } else {
       pushTextSegment(segments, prompt.slice(mentionStart, mentionEnd));
     }

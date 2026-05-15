@@ -63,6 +63,7 @@ function buildOpenCodeInlineConfig(input: {
         enabled: true,
         timeout: 120_000,
         environment: {
+          ELECTRON_RUN_AS_NODE: "1",
           CODEX_HOME: process.env.CODEX_HOME ?? Path.join(OS.homedir(), ".codex"),
           T3_IMAGEGEN_WORKSPACE: input.workspaceCwd ?? process.cwd(),
         },
@@ -73,6 +74,7 @@ function buildOpenCodeInlineConfig(input: {
         enabled: true,
         timeout: 120_000,
         environment: {
+          ELECTRON_RUN_AS_NODE: "1",
           T3CODE_STATE_DIR: input.stateDir ?? Path.join(OS.homedir(), ".t3", "dev"),
           T3_COMPUTER_PROJECT_ID: "opencode",
           T3_COMPUTER_THREAD_ID: "opencode",

@@ -1,6 +1,12 @@
 import { Schema } from "effect";
 
-import { IsoDateTime, NonNegativeInt, ProjectId, TrimmedNonEmptyString } from "./baseSchemas";
+import {
+  IsoDateTime,
+  NonNegativeInt,
+  ProjectId,
+  ThreadId,
+  TrimmedNonEmptyString,
+} from "./baseSchemas";
 
 export const BrowserSessionId = TrimmedNonEmptyString;
 export type BrowserSessionId = typeof BrowserSessionId.Type;
@@ -88,6 +94,7 @@ export type BrowserInspectCapture = typeof BrowserInspectCapture.Type;
 export const BrowserRuntimeEventPaneRequested = Schema.Struct({
   type: Schema.Literal("pane.requested"),
   projectId: ProjectId,
+  threadId: Schema.optional(ThreadId),
 });
 export type BrowserRuntimeEventPaneRequested = typeof BrowserRuntimeEventPaneRequested.Type;
 

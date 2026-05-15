@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
@@ -22,7 +21,17 @@ import {
   executeTypeText,
   executeWait,
 } from "./computerUse/bridge";
-import { launchComputerUseApp, listComputerUseApps } from "./computerUseService";
+import {
+  attachComputerUseWindow,
+  closeComputerUseWindow,
+  focusComputerUseWindow,
+  getActiveComputerUseWindow,
+  getComputerUseWindowBounds,
+  launchComputerUseApp,
+  listComputerUseApps,
+  moveComputerUseWindow,
+  resizeComputerUseWindow,
+} from "./computerUseService";
 import type {
   AgentToolResult,
   ExtensionContextLike,
@@ -68,6 +77,121 @@ const objectSchema = (properties: Record<string, unknown>, required: string[] = 
   additionalProperties: false,
 });
 
+function parsePositiveInteger(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  const rounded = Math.trunc(value);
+  return rounded > 0 ? rounded : undefined;
+}
+
+function parseInteger(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  return Math.trunc(value);
+}
+
+function parseComputerUseTargetInput(args: Record<string, unknown>): {
+  app?: string;
+  launchId?: string;
+  pid?: number;
+  windowId?: number;
+  windowTitle?: string;
+} {
+  const app = stringArg(args, "app");
+  const launchId = stringArg(args, "launchId");
+  const windowTitle = stringArg(args, "windowTitle");
+  const pid = parsePositiveInteger(args.pid);
+  const windowId = parsePositiveInteger(args.windowId);
+  return {
+    ...(app ? { app } : {}),
+    ...(launchId ? { launchId } : {}),
+    ...(typeof pid === "number" ? { pid } : {}),
+    ...(typeof windowId === "number" ? { windowId } : {}),
+    ...(windowTitle ? { windowTitle } : {}),
+  };
+}
+
+function targetInputForLaunchedApp(launched: {
+  readonly appName: string;
+  readonly launchId: string;
+  readonly pid?: number;
+  readonly windowId?: number;
+  readonly windowTitle?: string;
+}): Record<string, unknown> {
+  return {
+    app: launched.appName,
+    launchId: launched.launchId,
+    ...(typeof launched.pid === "number" && launched.pid > 0 ? { pid: launched.pid } : {}),
+    ...(typeof launched.windowId === "number" && launched.windowId > 0
+      ? { windowId: launched.windowId }
+      : {}),
+    ...(launched.windowTitle ? { windowTitle: launched.windowTitle } : {}),
+  };
+}
+
+async function performWindowToolWithOptionalScreenshot(
+  id: string,
+  tool: string,
+  managed: {
+    readonly appName: string;
+    readonly launchId: string;
+    readonly pid: number;
+    readonly windowId: number;
+    readonly windowTitle: string;
+  },
+  screenshotFallbackText: string,
+): Promise<AgentToolResult<unknown>> {
+  try {
+    const screenshot = await executeScreenshot(
+      `${id}_after_${tool}`,
+      {
+        pid: managed.pid,
+        windowId: managed.windowId,
+        launchId: managed.launchId,
+      },
+      undefined,
+      undefined,
+      context,
+    );
+    const screenshotText =
+      screenshot.content.find((part) => part.type === "text")?.text ??
+      `${screenshotFallbackText} for ${managed.appName} (${managed.windowTitle}).`;
+    return {
+      ...screenshot,
+      content: [
+        {
+          type: "text",
+          text: `${screenshotFallbackText} ${screenshotText}`,
+        },
+        ...screenshot.content.filter((part) => part.type !== "text"),
+      ],
+      details: {
+        ...(typeof screenshot.details === "object" && screenshot.details !== null
+          ? screenshot.details
+          : {}),
+        tool,
+        appName: managed.appName,
+        launchId: managed.launchId,
+        pid: managed.pid,
+        windowId: managed.windowId,
+        windowTitle: managed.windowTitle,
+        attached: true,
+      },
+    } satisfies AgentToolResult<unknown>;
+  } catch {
+    return {
+      content: [{ type: "text", text: screenshotFallbackText }],
+      details: {
+        tool,
+        appName: managed.appName,
+        launchId: managed.launchId,
+        pid: managed.pid,
+        windowId: managed.windowId,
+        windowTitle: managed.windowTitle,
+        attached: true,
+      },
+    } satisfies AgentToolResult<unknown>;
+  }
+}
+
 const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: "screenshot",
@@ -78,6 +202,9 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
         type: "string",
         description: "Optional running app name, such as Visual Studio Code.",
       },
+      launchId: { type: "string", description: "Optional Windows StartApps AppID." },
+      pid: { type: "number", description: "Optional target process id." },
+      windowId: { type: "number", description: "Optional target window id." },
       windowTitle: { type: "string", description: "Optional window title or partial title." },
     }),
   },
@@ -90,6 +217,9 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
         type: "string",
         description: "Optional app name, such as Visual Studio Code.",
       },
+      launchId: { type: "string", description: "Optional Windows StartApps AppID." },
+      pid: { type: "number", description: "Optional target process id." },
+      windowId: { type: "number", description: "Optional target window id." },
       windowTitle: { type: "string", description: "Optional window title or partial title." },
       actionableOnly: { type: "boolean" },
       maxItems: { type: "number" },
@@ -103,10 +233,94 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: "launch_app",
-    description: "Launch an installed Windows desktop app before using screenshot or actions.",
+    description:
+      "Launch an installed Windows desktop app, restore/focus its window when possible, and optionally resize it before using screenshot or actions.",
     inputSchema: objectSchema({
       app: { type: "string", description: "App name, such as Calculator or Visual Studio Code." },
       launchId: { type: "string", description: "Optional Windows StartApps AppID." },
+      width: { type: "number", description: "Optional target window width in screen pixels." },
+      height: { type: "number", description: "Optional target window height in screen pixels." },
+    }),
+  },
+  {
+    name: "attach_app",
+    description:
+      "Attach to a running desktop app window by app, launchId, pid, windowId, or window title.",
+    inputSchema: objectSchema({
+      app: { type: "string", description: "Optional running app name." },
+      launchId: { type: "string", description: "Optional Windows StartApps AppID." },
+      pid: { type: "number", description: "Optional process id." },
+      windowId: { type: "number", description: "Optional window id." },
+      windowTitle: { type: "string", description: "Optional window title or partial title." },
+      x: { type: "number", description: "Optional target window x coordinate in screen coordinates." },
+      y: { type: "number", description: "Optional target window y coordinate in screen coordinates." },
+      width: { type: "number", description: "Optional target window width in screen pixels." },
+      height: { type: "number", description: "Optional target window height in screen pixels." },
+    }),
+  },
+  {
+    name: "focus_app",
+    description: "Attach and bring an existing desktop app window to the foreground.",
+    inputSchema: objectSchema({
+      app: { type: "string", description: "Optional running app name." },
+      launchId: { type: "string", description: "Optional Windows StartApps AppID." },
+      pid: { type: "number", description: "Optional process id." },
+      windowId: { type: "number", description: "Optional window id." },
+      windowTitle: { type: "string", description: "Optional window title or partial title." },
+    }),
+  },
+  {
+    name: "move_window",
+    description: "Move an attached desktop app window.",
+    inputSchema: objectSchema({
+      app: { type: "string", description: "Optional running app name." },
+      launchId: { type: "string", description: "Optional Windows StartApps AppID." },
+      pid: { type: "number", description: "Optional process id." },
+      windowId: { type: "number", description: "Optional window id." },
+      windowTitle: { type: "string", description: "Optional window title or partial title." },
+      x: { type: "number", description: "Target x coordinate in screen pixels." },
+      y: { type: "number", description: "Target y coordinate in screen pixels." },
+    }),
+  },
+  {
+    name: "resize_window",
+    description: "Resize an attached desktop app window.",
+    inputSchema: objectSchema({
+      app: { type: "string", description: "Optional running app name." },
+      launchId: { type: "string", description: "Optional Windows StartApps AppID." },
+      pid: { type: "number", description: "Optional process id." },
+      windowId: { type: "number", description: "Optional window id." },
+      windowTitle: { type: "string", description: "Optional window title or partial title." },
+      width: { type: "number", description: "Target width in screen pixels." },
+      height: { type: "number", description: "Target height in screen pixels." },
+    }),
+  },
+  {
+    name: "close_window",
+    description: "Close a desktop app window.",
+    inputSchema: objectSchema({
+      app: { type: "string", description: "Optional running app name." },
+      launchId: { type: "string", description: "Optional Windows StartApps AppID." },
+      pid: { type: "number", description: "Optional process id." },
+      windowId: { type: "number", description: "Optional window id." },
+      windowTitle: { type: "string", description: "Optional window title or partial title." },
+    }),
+  },
+  {
+    name: "active_window",
+    description: "Get the currently active desktop app window from T3 context.",
+    inputSchema: objectSchema({}),
+  },
+  {
+    name: "window_bounds",
+    description:
+      "Get window bounds for a desktop app or window id; useful before move/resize coordination.",
+    inputSchema: objectSchema({
+      app: { type: "string", description: "Optional running app name." },
+      launchId: { type: "string", description: "Optional Windows StartApps AppID." },
+      pid: { type: "number", description: "Optional process id." },
+      windowId: { type: "number", description: "Optional window id." },
+      windowTitle: { type: "string", description: "Optional window title or partial title." },
     }),
   },
   {
@@ -202,7 +416,8 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
   },
   {
     name: "scroll",
-    description: "Scroll at window-relative screenshot coordinates.",
+    description:
+      "Scroll at window-relative screenshot coordinates. This uses real/global input; set allowGlobalInput true only after the user explicitly approves mouse or keyboard fallback.",
     inputSchema: objectSchema(
       {
         x: { type: "number" },
@@ -243,13 +458,15 @@ const TOOL_DEFINITIONS: ToolDefinition[] = [
 ];
 
 function writeResponse(id: JsonRpcRequest["id"], result: unknown): void {
-  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
+  writeMessage({ jsonrpc: "2.0", id, result });
 }
 
 function writeError(id: JsonRpcRequest["id"], message: string): void {
-  process.stdout.write(
-    `${JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32000, message } })}\n`,
-  );
+  writeMessage({ jsonrpc: "2.0", id, error: { code: -32000, message } });
+}
+
+function writeMessage(payload: unknown): void {
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
 }
 
 function sanitizeSegment(value: string): string {
@@ -364,22 +581,37 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
         return await executeScreenshot(id, args, undefined, undefined, context);
       } catch (error) {
         const appName = stringArg(args, "app");
-        if (!appName) throw error;
-        await launchComputerUseApp({ appName });
+        const launchId = stringArg(args, "launchId");
+        if (!appName && !launchId) throw error;
+        const launched = await launchComputerUseApp({ appName, launchId });
         await delay(1_200);
-        return executeScreenshot(`${id}_after_launch`, args, undefined, undefined, context);
+        return executeScreenshot(
+          `${id}_after_launch`,
+          { ...args, ...targetInputForLaunchedApp(launched) },
+          undefined,
+          undefined,
+          context,
+        );
       }
     case "observe_app": {
       await assertComputerUseAppAllowed(args);
-      if (stringArg(args, "app") || stringArg(args, "windowTitle")) {
+      let screenshot: AgentToolResult<unknown> | null = null;
+      if (stringArg(args, "app") || stringArg(args, "launchId") || stringArg(args, "windowTitle")) {
         try {
-          await executeScreenshot(id, args, undefined, undefined, context);
+          screenshot = await executeScreenshot(id, args, undefined, undefined, context);
         } catch (error) {
           const appName = stringArg(args, "app");
-          if (!appName) throw error;
-          await launchComputerUseApp({ appName });
+          const launchId = stringArg(args, "launchId");
+          if (!appName && !launchId) throw error;
+          const launched = await launchComputerUseApp({ appName, launchId });
           await delay(1_200);
-          await executeScreenshot(`${id}_after_launch`, args, undefined, undefined, context);
+          screenshot = await executeScreenshot(
+            `${id}_after_launch`,
+            { ...args, ...targetInputForLaunchedApp(launched) },
+            undefined,
+            undefined,
+            context,
+          );
         }
       }
       const [visibleText, elements] = await Promise.all([
@@ -408,13 +640,32 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
       const text = [
         visibleText.content.find((part) => part.type === "text")?.text,
         elements.content.find((part) => part.type === "text")?.text,
-      ]
+        ]
         .filter((part): part is string => Boolean(part))
         .join("\n\n");
+      const screenshotText = screenshot?.content
+        .filter(
+          (part): part is Extract<ToolContentPart, { type: "text" }> => part.type === "text",
+        )
+        .map((part) => part.text)
+        .filter((part) => part.length > 0)
+        .join("\n\n");
+      const screenshotImageParts = screenshot?.content?.filter((part): part is ToolContentPart =>
+        ["image", "image_view"].includes(part.type),
+      );
+      const screenshotDetails =
+        screenshot && typeof screenshot.details === "object" && screenshot.details !== null
+          ? screenshot.details
+          : null;
+      const mergedText = [screenshotText, text].filter((part) => Boolean(part)).join("\n\n");
       return {
-        content: [{ type: "text", text }],
+        content: [
+          { type: "text", text: mergedText },
+          ...(screenshotImageParts ?? []),
+        ],
         details: {
           tool: "observe_app",
+          ...(screenshotDetails ? screenshotDetails : {}),
           visibleText: visibleText.details,
           elements: elements.details,
         },
@@ -438,15 +689,211 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
       await assertComputerUseAppAllowed(args);
       const appName = stringArg(args, "app");
       const launchId = stringArg(args, "launchId");
-      await launchComputerUseApp({ appName, launchId });
+      const launched = await launchComputerUseApp({
+        appName,
+        launchId,
+        width: typeof args.width === "number" ? args.width : undefined,
+        height: typeof args.height === "number" ? args.height : undefined,
+      });
+      try {
+        const screenshot = await executeScreenshot(
+          `${id}_after_launch`,
+          targetInputForLaunchedApp(launched),
+          undefined,
+          undefined,
+          context,
+        );
+        const screenshotText =
+          screenshot.content.find((part) => part.type === "text")?.text ??
+          `Attached to ${launched.appName}.`;
+        return {
+          ...screenshot,
+          content: [
+            {
+              type: "text",
+              text: `Launched ${launched.appName}. ${screenshotText}`,
+            },
+            ...screenshot.content.filter((part) => part.type !== "text"),
+          ],
+          details: {
+            ...(typeof screenshot.details === "object" && screenshot.details !== null
+              ? screenshot.details
+              : {}),
+            launchId: launched.launchId,
+            appName: launched.appName,
+            attached: true,
+            tool: "launch_app",
+          },
+        } satisfies AgentToolResult<unknown>;
+      } catch {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Launched ${launched.appName}, but T3 could not yet attach to a controllable window.`,
+            },
+          ],
+          details: {
+            tool: "launch_app",
+            appName: launched.appName,
+            launchId: launched.launchId,
+            attached: false,
+          },
+        } satisfies AgentToolResult<unknown>;
+      }
+    }
+    case "attach_app": {
+      await assertComputerUseAppAllowed(args);
+      const target = parseComputerUseTargetInput(args);
+      const width = parsePositiveInteger(args.width);
+      const height = parsePositiveInteger(args.height);
+      const x = parseInteger(args.x);
+      const y = parseInteger(args.y);
+      const managed = await attachComputerUseWindow({
+        ...target,
+        ...(typeof width === "number" ? { width } : {}),
+        ...(typeof height === "number" ? { height } : {}),
+        ...(typeof x === "number" ? { x } : {}),
+        ...(typeof y === "number" ? { y } : {}),
+      });
+      return performWindowToolWithOptionalScreenshot(
+        id,
+        "attach_app",
+        managed,
+        `Attached to ${managed.appName} (${managed.windowTitle}).`,
+      );
+    }
+    case "focus_app": {
+      await assertComputerUseAppAllowed(args);
+      const target = parseComputerUseTargetInput(args);
+      const managed = await focusComputerUseWindow(target);
+      return performWindowToolWithOptionalScreenshot(
+        id,
+        "focus_app",
+        managed,
+        `Focused ${managed.appName} (${managed.windowTitle}).`,
+      );
+    }
+    case "move_window": {
+      await assertComputerUseAppAllowed(args);
+      const target = parseComputerUseTargetInput(args);
+      const x = parseInteger(args.x);
+      const y = parseInteger(args.y);
+      if (typeof x !== "number" || typeof y !== "number") {
+        throw new Error("move_window requires x and y numbers.");
+      }
+      const managed = await moveComputerUseWindow({
+        ...target,
+        x,
+        y,
+      });
+      return performWindowToolWithOptionalScreenshot(
+        id,
+        "move_window",
+        managed,
+        `Moved ${managed.appName} (${managed.windowTitle}) to (${x}, ${y}).`,
+      );
+    }
+    case "resize_window": {
+      await assertComputerUseAppAllowed(args);
+      const target = parseComputerUseTargetInput(args);
+      const width = parsePositiveInteger(args.width);
+      const height = parsePositiveInteger(args.height);
+      if (typeof width !== "number" || typeof height !== "number") {
+        throw new Error("resize_window requires width and height numbers.");
+      }
+      const managed = await resizeComputerUseWindow({
+        ...target,
+        width,
+        height,
+      });
+      return performWindowToolWithOptionalScreenshot(
+        id,
+        "resize_window",
+        managed,
+        `Resized ${managed.appName} (${managed.windowTitle}) to ${width}x${height}.`,
+      );
+    }
+    case "close_window": {
+      await assertComputerUseAppAllowed(args);
+      const target = parseComputerUseTargetInput(args);
+      const managed = await closeComputerUseWindow(target);
       return {
         content: [
           {
             type: "text",
-            text: `Launched ${appName ?? launchId ?? "desktop app"}.`,
+            text: `Closed ${managed.appName} (${managed.windowTitle}).`,
           },
         ],
-        details: { appName, launchId },
+        details: {
+          tool: "close_window",
+          appName: managed.appName,
+          launchId: managed.launchId,
+          pid: managed.pid,
+          windowId: managed.windowId,
+          windowTitle: managed.windowTitle,
+          attached: false,
+          closed: true,
+        },
+      } satisfies AgentToolResult<unknown>;
+    }
+    case "active_window": {
+      const active = await getActiveComputerUseWindow();
+      if (!active) {
+        return {
+          content: [{ type: "text", text: "No active desktop window was available." }],
+          details: { tool: "active_window", attached: false },
+        } satisfies AgentToolResult<unknown>;
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Active window is ${active.appName} (${active.windowTitle}, pid ${active.pid}, window ${active.windowId}).`,
+          },
+        ],
+        details: {
+          tool: "active_window",
+          appName: active.appName,
+          launchId: active.launchId,
+          pid: active.pid,
+          windowId: active.windowId,
+          windowTitle: active.windowTitle,
+          focused: active.focused,
+          attached: true,
+        },
+      } satisfies AgentToolResult<unknown>;
+    }
+    case "window_bounds": {
+      const target = parseComputerUseTargetInput(args);
+      const bounds = await getComputerUseWindowBounds(target);
+      if (!bounds) {
+        throw new Error("No matching desktop window could be found for bounds inspection.");
+      }
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Window bounds for ${bounds.appName} (${bounds.windowTitle}): x=${bounds.x}, y=${bounds.y}, w=${bounds.width}, h=${bounds.height}.`,
+          },
+        ],
+        details: {
+          tool: "window_bounds",
+          appName: bounds.appName,
+          launchId: bounds.launchId,
+          pid: bounds.pid,
+          windowId: bounds.windowId,
+          windowTitle: bounds.windowTitle,
+          x: bounds.x,
+          y: bounds.y,
+          width: bounds.width,
+          height: bounds.height,
+          isFocused: bounds.isFocused,
+          isMinimized: bounds.isMinimized,
+          isOnscreen: bounds.isOnscreen,
+          isMain: bounds.isMain,
+          attached: true,
+        },
       } satisfies AgentToolResult<unknown>;
     }
     case "list_windows":
@@ -565,25 +1012,56 @@ async function handleRequest(request: JsonRpcRequest): Promise<void> {
   }
 }
 
-let inputBuffer = "";
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk: string) => {
-  inputBuffer += chunk;
-  while (true) {
-    const newlineIndex = inputBuffer.indexOf("\n");
-    if (newlineIndex < 0) break;
-    const line = inputBuffer.slice(0, newlineIndex).trim();
-    inputBuffer = inputBuffer.slice(newlineIndex + 1);
-    if (!line) continue;
-    void (async () => {
-      let requestId: JsonRpcRequest["id"] = null;
-      try {
-        const request = JSON.parse(line) as JsonRpcRequest;
-        requestId = request.id ?? null;
-        await handleRequest(request);
-      } catch (error) {
-        writeError(requestId, error instanceof Error ? error.message : String(error));
+function dispatchJsonRpcBody(bodyText: string): void {
+  void (async () => {
+    let requestId: JsonRpcRequest["id"] = null;
+    try {
+      const request = JSON.parse(bodyText) as JsonRpcRequest;
+      requestId = request.id ?? null;
+      await handleRequest(request);
+    } catch (error) {
+      writeError(requestId, error instanceof Error ? error.message : String(error));
+    }
+  })();
+}
+
+let inputBuffer = Buffer.alloc(0);
+process.stdin.on("data", (chunk: string | Buffer) => {
+  inputBuffer = Buffer.concat([inputBuffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
+  while (inputBuffer.length > 0) {
+    const prefix = inputBuffer.slice(0, Math.min(inputBuffer.length, 32)).toString("utf8");
+    if (/^Content-Length:/i.test(prefix)) {
+      const separatorIndex = inputBuffer.indexOf("\r\n\r\n");
+      if (separatorIndex < 0) {
+        return;
       }
-    })();
+      const headerText = inputBuffer.slice(0, separatorIndex).toString("utf8");
+      const lengthMatch = /Content-Length:\s*(\d+)/i.exec(headerText);
+      if (!lengthMatch?.[1]) {
+        inputBuffer = Buffer.alloc(0);
+        return;
+      }
+      const contentLength = Number.parseInt(lengthMatch[1], 10);
+      const bodyStart = separatorIndex + 4;
+      const bodyEnd = bodyStart + contentLength;
+      if (inputBuffer.length < bodyEnd) {
+        return;
+      }
+      const bodyText = inputBuffer.slice(bodyStart, bodyEnd).toString("utf8");
+      inputBuffer = inputBuffer.slice(bodyEnd);
+      dispatchJsonRpcBody(bodyText);
+      continue;
+    }
+
+    const newlineIndex = inputBuffer.indexOf("\n");
+    if (newlineIndex < 0) {
+      return;
+    }
+    const lineText = inputBuffer.slice(0, newlineIndex).toString("utf8").trim();
+    inputBuffer = inputBuffer.slice(newlineIndex + 1);
+    if (lineText.length === 0) {
+      continue;
+    }
+    dispatchJsonRpcBody(lineText);
   }
 });

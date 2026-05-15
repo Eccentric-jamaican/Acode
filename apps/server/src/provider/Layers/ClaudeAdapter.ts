@@ -593,6 +593,7 @@ function buildT3ImagegenMcpServer(
     command: process.execPath,
     args: [resolveImagegenMcpServerPath()],
     env: {
+      ELECTRON_RUN_AS_NODE: "1",
       CODEX_HOME: process.env.CODEX_HOME ?? Path.join(OS.homedir(), ".codex"),
       T3_IMAGEGEN_WORKSPACE: cwd ?? process.cwd(),
     },

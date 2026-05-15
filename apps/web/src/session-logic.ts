@@ -198,6 +198,81 @@ function requestKindFromRequestType(requestType: unknown): PendingApproval["requ
   }
 }
 
+type ActivityPayload = Record<string, unknown> | null;
+
+function asRecord(value: unknown): ActivityPayload {
+  return value && typeof value === "object" ? (value as ActivityPayload) : null;
+}
+
+function toRequestId(value: unknown): ApprovalRequestId | null {
+  return typeof value === "string" && value.trim().length > 0
+    ? ApprovalRequestId.makeUnsafe(value.trim())
+    : null;
+}
+
+function extractRequestIdFromRecord(record: ActivityPayload): ApprovalRequestId | null {
+  if (!record) return null;
+  const nested = asRecord(record.request);
+  return (
+    toRequestId(record.requestId) ??
+    toRequestId(record.id) ??
+    toRequestId(record.requestID) ??
+    toRequestId(record.request_id) ??
+    toRequestId(nested?.requestId) ??
+    toRequestId(nested?.id) ??
+    toRequestId(nested?.requestID) ??
+    toRequestId(nested?.request_id)
+  );
+}
+
+function extractRequestId(payload: ActivityPayload): ApprovalRequestId | null {
+  const candidates = [
+    payload,
+    asRecord(payload?.request),
+    asRecord(payload?.resolution),
+    asRecord(payload?.data),
+    asRecord(payload?.metadata),
+    asRecord(asRecord(payload?.request)?.request),
+  ];
+  for (const candidate of candidates) {
+    const requestId = extractRequestIdFromRecord(candidate);
+    if (requestId) return requestId;
+  }
+  return null;
+}
+
+function extractRequestKind(payload: ActivityPayload): PendingApproval["requestKind"] | null {
+  const rawRequestKind =
+    payload?.requestKind === "command" ||
+    payload?.requestKind === "file-read" ||
+    payload?.requestKind === "file-change"
+      ? payload.requestKind
+      : asRecord(payload?.request)?.requestKind;
+  if (
+    rawRequestKind === "command" ||
+    rawRequestKind === "file-read" ||
+    rawRequestKind === "file-change"
+  ) {
+    return rawRequestKind;
+  }
+
+  const fromRequestType =
+    requestKindFromRequestType(payload?.requestType) ??
+    requestKindFromRequestType(asRecord(payload?.request)?.requestType) ??
+    requestKindFromRequestType(asRecord(payload?.resolution)?.requestType) ??
+    requestKindFromRequestType(asRecord(payload?.metadata)?.requestType);
+  return fromRequestType;
+}
+
+function extractDetail(payload: ActivityPayload): string | undefined {
+  if (payload === null) return undefined;
+  return typeof payload.detail === "string" && payload.detail.length > 0 ? payload.detail : undefined;
+}
+
+function extractQuestions(payload: ActivityPayload): ReadonlyArray<UserInputQuestion> | null {
+  return parseUserInputQuestions(payload) ?? parseUserInputQuestions(asRecord(payload?.request));
+}
+
 export function derivePendingApprovals(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): PendingApproval[] {
@@ -209,20 +284,10 @@ export function derivePendingApprovals(
       activity.payload && typeof activity.payload === "object"
         ? (activity.payload as Record<string, unknown>)
         : null;
-    const requestId =
-      payload && typeof payload.requestId === "string"
-        ? ApprovalRequestId.makeUnsafe(payload.requestId)
-        : null;
-    const requestKind =
-      payload &&
-      (payload.requestKind === "command" ||
-        payload.requestKind === "file-read" ||
-        payload.requestKind === "file-change")
-        ? payload.requestKind
-        : payload
-          ? requestKindFromRequestType(payload.requestType)
-          : null;
-    const detail = payload && typeof payload.detail === "string" ? payload.detail : undefined;
+    const payloadRecord = asRecord(payload);
+    const requestId = extractRequestId(payloadRecord);
+    const requestKind = extractRequestKind(payloadRecord);
+    const detail = extractDetail(payloadRecord);
 
     if (activity.kind === "approval.requested" && requestId && requestKind) {
       openByRequestId.set(requestId, {
@@ -314,13 +379,12 @@ export function derivePendingUserInputs(
       activity.payload && typeof activity.payload === "object"
         ? (activity.payload as Record<string, unknown>)
         : null;
-    const requestId =
-      payload && typeof payload.requestId === "string"
-        ? ApprovalRequestId.makeUnsafe(payload.requestId)
-        : null;
+    const payloadRecord = asRecord(payload);
+    const requestId = extractRequestId(payloadRecord);
+    const detail = extractDetail(payloadRecord);
 
     if (activity.kind === "user-input.requested" && requestId) {
-      const questions = parseUserInputQuestions(payload);
+      const questions = extractQuestions(payloadRecord);
       if (!questions) {
         continue;
       }
@@ -333,6 +397,15 @@ export function derivePendingUserInputs(
     }
 
     if (activity.kind === "user-input.resolved" && requestId) {
+      openByRequestId.delete(requestId);
+      continue;
+    }
+
+    if (
+      activity.kind === "provider.user-input.respond.failed" &&
+      requestId &&
+      detail?.includes("Unknown pending")
+    ) {
       openByRequestId.delete(requestId);
     }
   }
@@ -537,10 +610,6 @@ export function deriveWorkLogEntries(
       return entry;
     });
   return mergeWorkLogEntriesByProviderItem(entries);
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
 }
 
 function asTrimmedString(value: unknown): string | null {

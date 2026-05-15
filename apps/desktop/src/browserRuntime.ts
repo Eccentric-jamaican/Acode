@@ -15,6 +15,7 @@ import type {
   BrowserUseSettings,
   BrowserUseSettingsPatch,
   ProjectId,
+  ThreadId,
 } from "@t3tools/contracts";
 import { BrowserWindow, session as electronSession, WebContentsView } from "electron";
 
@@ -301,6 +302,7 @@ const WAIT_POLL_INTERVAL_MS = 100;
 const ATTACHED_BOUNDS_REAPPLY_DELAYS_MS = [0, 75, 200, 500] as const;
 const INTEGRATED_BROWSER_VIEWPORT_SELECTOR = '[data-integrated-browser-native-viewport="true"]';
 const DEFAULT_NEW_TAB_URL = "https://www.google.com";
+export const BROWSER_HIDDEN_RUNTIME_IDLE_TTL_MS = 15_000;
 export const BROWSER_STORAGE_PARTITION = "persist:t3-browser-default";
 
 const DEFAULT_BROWSER_USE_SETTINGS: BrowserUseSettings = {
@@ -503,6 +505,10 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
   private paneProjectId: ProjectId | null = null;
   private paneBounds: BrowserPaneBounds | null = null;
   private paneRequestVersion = 0;
+  private readonly hiddenRuntimeCleanupTimers = new Map<
+    ProjectId,
+    ReturnType<typeof globalThis.setTimeout>
+  >();
 
   constructor(options: BrowserRuntimeRegistryOptions) {
     super();
@@ -522,7 +528,10 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     }
     this.window = window;
     if (window && this.paneOpen && this.paneProjectId && this.paneBounds) {
+      this.cancelHiddenRuntimeCleanup(this.paneProjectId);
       this.attachActiveTab(window, this.paneProjectId, this.paneBounds);
+    } else if (!window) {
+      this.killAll();
     }
   }
 
@@ -557,9 +566,14 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
 
   async open(projectId: ProjectId, bounds: BrowserPaneBounds): Promise<BrowserSessionSnapshot> {
     const requestVersion = ++this.paneRequestVersion;
+    const previousPaneProjectId = this.paneProjectId;
+    this.cancelHiddenRuntimeCleanup(projectId);
     this.paneOpen = true;
     this.paneProjectId = projectId;
     this.paneBounds = normalizeBounds(bounds);
+    if (previousPaneProjectId && previousPaneProjectId !== projectId) {
+      this.scheduleHiddenRuntimeCleanup(previousPaneProjectId);
+    }
     const projectRuntime = await this.ensureRuntime(projectId);
     if (
       requestVersion !== this.paneRequestVersion ||
@@ -601,21 +615,24 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
 
   async closePane(): Promise<void> {
     this.paneRequestVersion += 1;
+    const projectId = this.paneProjectId;
     this.paneOpen = false;
     this.paneBounds = null;
     if (this.window) {
       this.detachAttachedView(this.window);
     }
-    if (this.paneProjectId) {
-      this.emitStateUpdated(this.paneProjectId);
+    if (projectId) {
+      this.scheduleHiddenRuntimeCleanup(projectId);
+      this.emitStateUpdated(projectId);
     }
     this.paneProjectId = null;
   }
 
-  async requestPane(projectId: ProjectId): Promise<void> {
+  async requestPane(projectId: ProjectId, threadId?: ThreadId): Promise<void> {
     this.emit("event", {
       type: "pane.requested",
       projectId,
+      ...(threadId ? { threadId } : {}),
     });
   }
 
@@ -665,7 +682,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
 
     projectRuntime.tabs.delete(tabId);
     projectRuntime.tabOrder = projectRuntime.tabOrder.filter((entry) => entry !== tabId);
-    tab.view.webContents.close({ waitForBeforeUnload: false });
+    this.closeTabWebContents(tab);
 
     if (projectRuntime.tabOrder.length === 0) {
       await this.createTab(projectRuntime, { url: DEFAULT_NEW_TAB_URL, activate: true });
@@ -729,6 +746,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
   }
 
   async kill(projectId: ProjectId): Promise<void> {
+    this.cancelHiddenRuntimeCleanup(projectId);
     const projectRuntime = this.runtimes.get(projectId);
     if (!projectRuntime) {
       return;
@@ -737,7 +755,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
       this.detachAttachedView(this.window);
     }
     for (const tab of projectRuntime.tabs.values()) {
-      tab.view.webContents.close({ waitForBeforeUnload: false });
+      this.closeTabWebContents(tab);
     }
     this.runtimes.delete(projectId);
     if (this.paneProjectId === projectId) {
@@ -746,6 +764,17 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
       this.paneBounds = null;
     }
     this.emitStateUpdated(projectId);
+  }
+
+  killAll(): void {
+    const projectIds = Array.from(this.runtimes.keys());
+    const timerProjectIds = Array.from(this.hiddenRuntimeCleanupTimers.keys());
+    for (const projectId of projectIds) {
+      void this.kill(projectId).catch(() => undefined);
+    }
+    for (const projectId of timerProjectIds) {
+      this.cancelHiddenRuntimeCleanup(projectId);
+    }
   }
 
   async getSettings(): Promise<BrowserUseSettings> {
@@ -1018,6 +1047,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
   }
 
   private async ensureRuntime(projectId: ProjectId): Promise<BrowserProjectRuntimeRecord> {
+    this.cancelHiddenRuntimeCleanup(projectId);
     const existing = this.runtimes.get(projectId);
     if (existing) {
       return existing;
@@ -1104,7 +1134,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
       if (projectRuntime.activeTabId === tabId) {
         projectRuntime.activeTabId = projectRuntime.tabOrder[0] ?? null;
       }
-      tab.view.webContents.close({ waitForBeforeUnload: false });
+      this.closeTabWebContents(tab);
       throw error;
     }
   }
@@ -1242,11 +1272,16 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     if (!sameAttachment && this.attachedProjectId && this.attachedTabId) {
       const attachedProjectRuntime = this.runtimes.get(this.attachedProjectId);
       const attachedTab = attachedProjectRuntime?.tabs.get(this.attachedTabId) ?? null;
+      const detachedProjectId = this.attachedProjectId;
       if (attachedTab) {
         contentView.removeChildView(attachedTab.view);
       }
+      if (detachedProjectId !== projectId) {
+        this.scheduleHiddenRuntimeCleanup(detachedProjectId);
+      }
     }
     if (!sameAttachment) {
+      this.cancelHiddenRuntimeCleanup(projectId);
       contentView.addChildView(activeTab.view);
     }
 
@@ -1327,6 +1362,49 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     } finally {
       this.attachedProjectId = null;
       this.attachedTabId = null;
+    }
+  }
+
+  private scheduleHiddenRuntimeCleanup(projectId: ProjectId): void {
+    if (!this.runtimes.has(projectId)) {
+      this.cancelHiddenRuntimeCleanup(projectId);
+      return;
+    }
+    if (this.window && this.paneOpen && this.paneProjectId === projectId) {
+      this.cancelHiddenRuntimeCleanup(projectId);
+      return;
+    }
+
+    this.cancelHiddenRuntimeCleanup(projectId);
+    const timer = globalThis.setTimeout(() => {
+      this.hiddenRuntimeCleanupTimers.delete(projectId);
+      if (this.window && this.paneOpen && this.paneProjectId === projectId) {
+        return;
+      }
+      void this.kill(projectId).catch(() => undefined);
+    }, BROWSER_HIDDEN_RUNTIME_IDLE_TTL_MS);
+    this.hiddenRuntimeCleanupTimers.set(projectId, timer);
+  }
+
+  private cancelHiddenRuntimeCleanup(projectId: ProjectId): void {
+    const timer = this.hiddenRuntimeCleanupTimers.get(projectId);
+    if (!timer) {
+      return;
+    }
+    globalThis.clearTimeout(timer);
+    this.hiddenRuntimeCleanupTimers.delete(projectId);
+  }
+
+  private closeTabWebContents(tab: BrowserTabRuntimeRecord): void {
+    try {
+      if (tab.view.webContents.isDestroyed()) {
+        return;
+      }
+      tab.view.webContents.close({ waitForBeforeUnload: false });
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("Object has been destroyed")) {
+        throw error;
+      }
     }
   }
 

@@ -19,7 +19,7 @@ import {
   getDocument,
   type PDFDocumentProxy,
 } from "pdfjs-dist";
-import pdfWorkerUrl from "../pdfWorkerCompat.mjs?worker&url";
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import {
   EllipsisIcon,
   XIcon,
