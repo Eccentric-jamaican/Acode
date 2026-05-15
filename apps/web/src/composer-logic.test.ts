@@ -87,7 +87,7 @@ describe("expandCollapsedComposerCursor", () => {
 
   it("maps collapsed mention cursor to expanded text cursor", () => {
     const text = "what's in my @AGENTS.md fsfdas";
-    const collapsedCursorAfterMention = "what's in my ".length + "@AGENTS.md".length;
+    const collapsedCursorAfterMention = "what's in my @AGENTS.md ".length;
     const expandedCursorAfterMention = "what's in my @AGENTS.md ".length;
 
     expect(expandCollapsedComposerCursor(text, collapsedCursorAfterMention)).toBe(
@@ -97,7 +97,7 @@ describe("expandCollapsedComposerCursor", () => {
 
   it("allows path trigger detection to close after selecting a mention", () => {
     const text = "what's in my @AGENTS.md ";
-    const collapsedCursorAfterMention = "what's in my ".length + "@AGENTS.md".length;
+    const collapsedCursorAfterMention = "what's in my @AGENTS.md ".length;
     const expandedCursor = expandCollapsedComposerCursor(text, collapsedCursorAfterMention);
 
     expect(detectComposerTrigger(text, expandedCursor)).toBeNull();
