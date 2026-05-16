@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.52] - 2026-05-16
+
+### Fixed
+- Fixed OpenCode binary-path resolution so persisted empty settings still fall back to the default `opencode` command when PATH discovery fails, preventing release preflight and local startup regressions.
+
 ## [0.2.51] - 2026-05-16
 
 ### Added

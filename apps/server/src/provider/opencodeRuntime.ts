@@ -652,18 +652,20 @@ export function resolveOpenCodeBinaryPath(binaryPath: string): string {
   if (Path.isAbsolute(normalizedBinaryPath)) {
     return normalizedBinaryPath;
   }
-  const candidates = execFileSync(
-    process.platform === "win32" ? "where" : "which",
-    [normalizedBinaryPath],
-    {
-      encoding: "utf8",
-      timeout: 3_000,
-      shell: process.platform === "win32",
-    },
-  )
-    .split(/\r?\n/u)
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0);
+  const candidates = (() => {
+    try {
+      return execFileSync(process.platform === "win32" ? "where" : "which", [normalizedBinaryPath], {
+        encoding: "utf8",
+        timeout: 3_000,
+        shell: process.platform === "win32",
+      })
+        .split(/\r?\n/u)
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0);
+    } catch {
+      return [];
+    }
+  })();
   if (process.platform === "win32") {
     return (
       candidates.find((entry) => entry.toLowerCase().endsWith(".cmd")) ??
