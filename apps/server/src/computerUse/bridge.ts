@@ -386,25 +386,40 @@ const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 
 export const HELPER_STABLE_PATH =
   HELPER_STABLE_PATH_OVERRIDE || path.join(T3_STATE_DIR, "helpers", "t3-computer-use", HELPER_FILE_NAME);
 
-function bundledHelperCandidates(): string[] {
-  const platform = process.platform === "win32" ? "windows" : process.platform;
-  const arch = process.arch === "x64" ? "x64" : process.arch;
-  const override = process.env.T3_COMPUTER_USE_BUNDLED_HELPER_PATH?.trim();
+export function bundledHelperCandidatesForRoot(input: {
+  readonly packageRoot: string;
+  readonly helperFileName?: string;
+  readonly platform?: NodeJS.Platform;
+  readonly arch?: string;
+  readonly override?: string;
+}): string[] {
+  const platform = (input.platform ?? process.platform) === "win32" ? "windows" : (input.platform ?? process.platform);
+  const arch = (input.arch ?? process.arch) === "x64" ? "x64" : (input.arch ?? process.arch);
+  const helperFileName = input.helperFileName ?? HELPER_FILE_NAME;
+  const override = input.override?.trim();
   return [
     ...(override ? [override] : []),
-    path.join(PACKAGE_ROOT, "computer-use", "prebuilt", platform, arch, HELPER_FILE_NAME),
-    path.join(PACKAGE_ROOT, "..", "computer-use", "prebuilt", platform, arch, HELPER_FILE_NAME),
+    path.join(input.packageRoot, "dist", "computer-use", "prebuilt", platform, arch, helperFileName),
+    path.join(input.packageRoot, "computer-use", "prebuilt", platform, arch, helperFileName),
+    path.join(input.packageRoot, "..", "computer-use", "prebuilt", platform, arch, helperFileName),
     path.join(
-      PACKAGE_ROOT,
+      input.packageRoot,
       "..",
       "..",
       "computer-use",
       "prebuilt",
       platform,
       arch,
-      HELPER_FILE_NAME,
+      helperFileName,
     ),
   ];
+}
+
+function bundledHelperCandidates(): string[] {
+  return bundledHelperCandidatesForRoot({
+    packageRoot: PACKAGE_ROOT,
+    override: process.env.T3_COMPUTER_USE_BUNDLED_HELPER_PATH?.trim(),
+  });
 }
 
 const runtimeState: RuntimeState = {

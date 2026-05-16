@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.55] - 2026-05-16
+
+### Fixed
+- Fixed packaged desktop releases failing to find the bundled Windows T3 Computer Use helper by teaching runtime helper discovery to check the staged `apps/server/dist/computer-use` path used in release artifacts.
+
 ## [0.2.54] - 2026-05-16
 
 ### Fixed
