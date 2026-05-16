@@ -379,12 +379,12 @@ const DEFAULT_T3_STATE_DIR = path.join(os.homedir(), ".t3", "dev");
 const T3_STATE_DIR = process.env.T3CODE_STATE_DIR?.trim() || DEFAULT_T3_STATE_DIR;
 const DESKTOP_BRIDGE_URL = process.env.T3CODE_DESKTOP_BROWSER_BRIDGE_URL?.trim() || "";
 const DESKTOP_BRIDGE_TOKEN = process.env.T3CODE_DESKTOP_BROWSER_BRIDGE_TOKEN?.trim() || "";
+const HELPER_STABLE_PATH_OVERRIDE = process.env.T3_COMPUTER_USE_HELPER_PATH?.trim() || "";
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 export const HELPER_STABLE_PATH =
-  process.env.T3_COMPUTER_USE_HELPER_PATH?.trim() ||
-  path.join(T3_STATE_DIR, "helpers", "t3-computer-use", HELPER_FILE_NAME);
+  HELPER_STABLE_PATH_OVERRIDE || path.join(T3_STATE_DIR, "helpers", "t3-computer-use", HELPER_FILE_NAME);
 
 function bundledHelperCandidates(): string[] {
   const platform = process.platform === "win32" ? "windows" : process.platform;
@@ -438,6 +438,22 @@ class HelperCommandError extends Error {
 function normalizeError(error: unknown): Error {
   if (error instanceof Error) return error;
   return new Error(String(error));
+}
+
+function isIgnorableHelperRefreshError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const code = "code" in error ? (error as NodeJS.ErrnoException).code : undefined;
+  if (code === "EBUSY" || code === "EPERM" || code === "EACCES") {
+    return true;
+  }
+  const message = normalizeError(error).message.toLowerCase();
+  return (
+    message.includes("resource busy") ||
+    message.includes("used by another process") ||
+    message.includes("access is denied")
+  );
 }
 
 function isRecoverableScreenshotError(error: unknown): error is HelperCommandError {
@@ -653,7 +669,7 @@ function handleHelperStdoutChunk(chunk: string): void {
 
 async function isExecutable(filePath: string): Promise<boolean> {
   try {
-    await access(filePath, fsConstants.X_OK);
+    await access(filePath, process.platform === "win32" ? fsConstants.R_OK : fsConstants.X_OK);
     return true;
   } catch {
     return false;
@@ -679,16 +695,29 @@ async function ensureHelperInstalled(signal?: AbortSignal): Promise<void> {
   }
 
   throwIfAborted(signal);
+  const source =
+    HELPER_STABLE_PATH_OVERRIDE.length > 0 ? undefined : await firstExistingPath(bundledHelperCandidates());
   if (!helperAlreadyPresent) {
-    const candidates = bundledHelperCandidates();
-    const source = await firstExistingPath(candidates);
     if (!source) {
       throw new Error(
-        `T3 Computer Use helper is not bundled for ${process.platform}/${process.arch}. Checked: ${candidates.join(", ")}`,
+        `T3 Computer Use helper is not bundled for ${process.platform}/${process.arch}. Checked: ${bundledHelperCandidates().join(", ")}`,
       );
     }
     await mkdir(path.dirname(HELPER_STABLE_PATH), { recursive: true });
     await copyFile(source, HELPER_STABLE_PATH);
+  } else if (source) {
+    // Refresh the stable helper from the bundled artifact on each app start so
+    // packaged upgrades replace stale helpers that may require old runtimes.
+    await mkdir(path.dirname(HELPER_STABLE_PATH), { recursive: true });
+    try {
+      await copyFile(source, HELPER_STABLE_PATH);
+    } catch (error) {
+      // On Windows the existing helper can be locked by another live T3 process.
+      // Keep using the installed helper instead of taking computer use offline.
+      if (!isIgnorableHelperRefreshError(error)) {
+        throw error;
+      }
+    }
   }
   runtimeState.helperInstallChecked = true;
 

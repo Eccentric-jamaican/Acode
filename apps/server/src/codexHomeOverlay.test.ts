@@ -1,11 +1,17 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { ProjectId, ThreadId } from "@t3tools/contracts";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createCodexHomeOverlay, shouldCopyCodexHomeEntry } from "./codexHomeOverlay";
+import {
+  createCodexHomeOverlay,
+  isIgnorableOverlayRemovalError,
+  pruneStaleCodexHomeOverlays,
+  removeCodexHomeOverlay,
+  shouldCopyCodexHomeEntry,
+} from "./codexHomeOverlay";
 
 function makeTempDir(prefix: string): string {
   return mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -25,6 +31,58 @@ afterEach(() => {
 });
 
 describe("createCodexHomeOverlay", () => {
+  it("removes stale managed overlays while preserving recent ones", () => {
+    const stateDir = trackTempDir(makeTempDir("t3-codex-overlay-state-"));
+    const overlayRoot = path.join(stateDir, "codex-home-overlays");
+    const staleDir = path.join(overlayRoot, "thread-old-1");
+    const recentDir = path.join(overlayRoot, "thread-new-1");
+    mkdirSync(staleDir, { recursive: true });
+    mkdirSync(recentDir, { recursive: true });
+    writeFileSync(path.join(staleDir, "config.toml"), "", "utf8");
+    writeFileSync(path.join(recentDir, "config.toml"), "", "utf8");
+
+    const now = new Date("2026-05-16T00:00:00.000Z");
+    const staleTime = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000);
+    utimesSync(staleDir, staleTime, staleTime);
+    utimesSync(recentDir, now, now);
+
+    pruneStaleCodexHomeOverlays({
+      stateDir,
+      nowMs: now.getTime(),
+      maxAgeMs: 24 * 60 * 60 * 1000,
+    });
+
+    expect(existsSync(staleDir)).toBe(false);
+    expect(existsSync(recentDir)).toBe(true);
+  });
+
+  it("treats transient Windows-style permission errors as ignorable", () => {
+    expect(
+      isIgnorableOverlayRemovalError(
+        Object.assign(new Error("EPERM, Permission denied"), { code: "EPERM" }),
+      ),
+    ).toBe(true);
+    expect(
+      isIgnorableOverlayRemovalError(
+        Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" }),
+      ),
+    ).toBe(true);
+    expect(isIgnorableOverlayRemovalError(new Error("ENOENT, no such file or directory"))).toBe(
+      false,
+    );
+  });
+
+  it("removes a managed overlay recursively", () => {
+    const stateDir = trackTempDir(makeTempDir("t3-codex-overlay-state-"));
+    const overlayDir = path.join(stateDir, "codex-home-overlays", "thread-1");
+    mkdirSync(path.join(overlayDir, "nested"), { recursive: true });
+    writeFileSync(path.join(overlayDir, "nested", "config.toml"), "", "utf8");
+
+    removeCodexHomeOverlay(overlayDir);
+
+    expect(existsSync(overlayDir)).toBe(false);
+  });
+
   it("skips Codex plugin cache latest pointers when copying the base home", () => {
     const baseHomePath = trackTempDir(makeTempDir("t3-codex-overlay-home-"));
     const latestPath = path.join(

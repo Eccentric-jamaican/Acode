@@ -29,395 +29,51 @@ import { useComposerDraftStore } from "~/composerDraftStore";
 import { inspectCaptureLabel } from "~/browserInspectCapture";
 import { readNativeApi } from "~/nativeApi";
 import { cn } from "~/lib/utils";
+import {
+  resolveBrowserNavigationUrl,
+} from "./IntegratedBrowserPane.logic";
 
 const BOUNDS_SETTLE_DELAYS_MS = [0, 50, 150, 300] as const;
 const CHAT_MIN_WIDTH_PX = 540;
 const BROWSER_MIN_EFFECTIVE_WIDTH_PX = 280;
-const BROWSER_URL_HISTORY_STORAGE_KEY = "t3code:browser-url-history:v1";
-const BROWSER_URL_SUGGESTION_LIMIT = 5;
-const BROWSER_URL_HISTORY_LIMIT = 100;
 const EMPTY_BROWSER_TABS: ReadonlyArray<NonNullable<BrowserSessionSnapshot["tabs"]>[number]> = [];
-
-type BrowserUrlSuggestion = {
-  url: string;
-  title?: string;
-  source?: "history" | "session" | "tab" | "direct" | "search";
-};
-
-function normalizeSuggestionUrl(url: string | null | undefined): string | null {
-  if (!url) {
-    return null;
-  }
-  const trimmed = url.trim();
-  if (trimmed.length === 0 || trimmed === "about:blank") {
-    return null;
-  }
-  return trimmed;
-}
-
-function readBrowserUrlHistory(): ReadonlyArray<string> {
-  if (typeof window === "undefined") {
-    return [];
-  }
-  try {
-    const raw = window.localStorage.getItem(BROWSER_URL_HISTORY_STORAGE_KEY);
-    if (!raw) {
-      return [];
-    }
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-    return parsed.filter((entry): entry is string => typeof entry === "string");
-  } catch {
-    return [];
-  }
-}
-
-function persistBrowserUrlHistory(history: ReadonlyArray<string>): void {
-  if (typeof window === "undefined") {
-    return;
-  }
-  try {
-    window.localStorage.setItem(BROWSER_URL_HISTORY_STORAGE_KEY, JSON.stringify(history));
-  } catch {
-    // Best-effort persistence only.
-  }
-}
-
-function rememberBrowserUrl(history: ReadonlyArray<string>, url: string): ReadonlyArray<string> {
-  const normalized = normalizeSuggestionUrl(url);
-  if (!normalized) {
-    return history;
-  }
-  const key = normalized.toLowerCase();
-  const deduped = history.filter((entry) => entry.trim().toLowerCase() !== key);
-  return [normalized, ...deduped].slice(0, BROWSER_URL_HISTORY_LIMIT);
-}
-
-function canonicalizeSuggestionUrl(url: string): string {
-  try {
-    const parsed = new URL(url);
-    parsed.hash = "";
-    const host = parsed.hostname.toLowerCase();
-    const trackingPrefixes = ["utm_"];
-    const trackingKeys = new Set([
-      "gclid",
-      "fbclid",
-      "ved",
-      "ei",
-      "oq",
-      "sei",
-      "sclient",
-      "sourceid",
-      "ie",
-    ]);
-    const keepOnlyQ =
-      (host.includes("google.") && parsed.pathname === "/search") ||
-      (host.includes("bing.com") && parsed.pathname === "/search") ||
-      (host.includes("duckduckgo.com") && parsed.pathname === "/");
-
-    const nextParams = new URLSearchParams();
-    if (keepOnlyQ) {
-      const q = parsed.searchParams.get("q");
-      if (q) {
-        nextParams.set("q", q);
-      }
-    } else {
-      const entries = [...parsed.searchParams.entries()].toSorted(([left], [right]) =>
-        left.localeCompare(right),
-      );
-      for (const [key, value] of entries) {
-        const lower = key.toLowerCase();
-        if (trackingKeys.has(lower)) {
-          continue;
-        }
-        if (trackingPrefixes.some((prefix) => lower.startsWith(prefix))) {
-          continue;
-        }
-        nextParams.append(key, value);
-      }
-    }
-    parsed.search = nextParams.toString();
-    return parsed.toString();
-  } catch {
-    return url.trim();
-  }
-}
-
-function buildBrowserUrlSuggestions(input: {
-  tabs: ReadonlyArray<{ navigation: { url: string | null; title: string | null } }>;
-  sessionUrl: string | null;
-  history: ReadonlyArray<string>;
-}): ReadonlyArray<BrowserUrlSuggestion> {
-  const byUrl = new Map<string, BrowserUrlSuggestion>();
-  const pushSuggestion = (url: string | null | undefined, title?: string | null) => {
-    const normalized = normalizeSuggestionUrl(url);
-    if (!normalized) {
-      return;
-    }
-    const canonical = canonicalizeSuggestionUrl(normalized);
-    const key = canonical.toLowerCase();
-    const existing = byUrl.get(key);
-    if (existing) {
-      if (!existing.title && title?.trim()) {
-        byUrl.set(key, { ...existing, title: title.trim() });
-      }
-      return;
-    }
-    byUrl.set(key, { url: canonical, ...(title?.trim() ? { title: title.trim() } : {}) });
-  };
-
-  for (const tab of input.tabs) {
-    pushSuggestion(tab.navigation.url, tab.navigation.title);
-  }
-  pushSuggestion(input.sessionUrl, null);
-  for (const historicalUrl of input.history) {
-    pushSuggestion(historicalUrl, null);
-  }
-  return [...byUrl.values()];
-}
-
-function looksLikeSearchQuery(value: string): boolean {
-  return /\s/.test(value.trim());
-}
-
-function hasUrlScheme(value: string): boolean {
-  return /^[a-z][a-z\d+.-]*:/i.test(value);
-}
-
-function toNavigableUrl(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed.length === 0) {
-    return trimmed;
-  }
-  if (hasUrlScheme(trimmed)) {
-    return trimmed;
-  }
-  return `https://${trimmed}`;
-}
-
-function buildQueryBasedSuggestions(query: string): ReadonlyArray<BrowserUrlSuggestion> {
-  const trimmed = query.trim();
-  if (trimmed.length === 0) {
-    return [];
-  }
-
-  const suggestions: BrowserUrlSuggestion[] = [];
-  if (looksLikeSearchQuery(trimmed)) {
-    suggestions.push({
-      source: "search",
-      title: `Search for "${trimmed}"`,
-      url: `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`,
-    });
-    return suggestions;
-  }
-
-  if (!trimmed.includes(".") && !hasUrlScheme(trimmed)) {
-    const wwwUrl = `https://www.${trimmed}.com`;
-    suggestions.push({
-      source: "direct",
-      title: `Go to ${wwwUrl}`,
-      url: wwwUrl,
-    });
-  } else {
-    const directUrl = toNavigableUrl(trimmed);
-    suggestions.push({
-      source: "direct",
-      title: `Go to ${directUrl}`,
-      url: directUrl,
-    });
-  }
-
-  suggestions.push({
-    source: "search",
-    title: `Search for "${trimmed}"`,
-    url: `https://www.google.com/search?q=${encodeURIComponent(trimmed)}`,
-  });
-
-  return suggestions;
-}
-
-function filterBrowserUrlSuggestions(
-  suggestions: ReadonlyArray<BrowserUrlSuggestion>,
-  query: string,
-): ReadonlyArray<BrowserUrlSuggestion> {
-  const normalizedQuery = query.trim().toLowerCase();
-  if (normalizedQuery.length === 0) {
-    return suggestions.slice(0, BROWSER_URL_SUGGESTION_LIMIT);
-  }
-  const scored = suggestions
-    .filter((entry) => {
-      const title = entry.title?.toLowerCase() ?? "";
-      return entry.url.toLowerCase().includes(normalizedQuery) || title.includes(normalizedQuery);
-    })
-    .map((entry) => {
-      const lowerUrl = entry.url.toLowerCase();
-      const lowerTitle = entry.title?.toLowerCase() ?? "";
-      let score = 0;
-      if (
-        lowerUrl.startsWith(`https://${normalizedQuery}`) ||
-        lowerUrl.startsWith(`http://${normalizedQuery}`)
-      ) {
-        score += 80;
-      } else if (lowerUrl.includes(normalizedQuery)) {
-        score += 35;
-      }
-      if (lowerTitle.startsWith(normalizedQuery)) {
-        score += 60;
-      } else if (lowerTitle.includes(normalizedQuery)) {
-        score += 25;
-      }
-      if (entry.source === "tab" || entry.source === "session") {
-        score += 5;
-      }
-      return { entry, score };
-    })
-    .toSorted((left, right) => right.score - left.score)
-    .map((item) => item.entry)
-    .slice(0, BROWSER_URL_SUGGESTION_LIMIT);
-
-  const byUrl = new Set(scored.map((entry) => entry.url.toLowerCase()));
-  const queryBased = buildQueryBasedSuggestions(query).filter((entry) => {
-    const key = entry.url.toLowerCase();
-    if (byUrl.has(key)) {
-      return false;
-    }
-    byUrl.add(key);
-    return true;
-  });
-
-  return [...scored, ...queryBased].slice(0, BROWSER_URL_SUGGESTION_LIMIT);
-}
 
 interface BrowserUrlInputProps {
   value: string;
   onChange: (nextValue: string) => void;
   onSubmit: (nextValue: string) => void;
-  suggestions: ReadonlyArray<BrowserUrlSuggestion>;
   disabled: boolean;
   className?: string;
   ariaLabel: string;
 }
 
 function BrowserUrlInput(props: BrowserUrlInputProps) {
-  const { value, onChange, onSubmit, suggestions, disabled, className, ariaLabel } = props;
-  const [isFocused, setIsFocused] = useState(false);
-  const [highlightedIndex, setHighlightedIndex] = useState(-1);
-  const filteredSuggestions = useMemo(
-    () => filterBrowserUrlSuggestions(suggestions, value),
-    [suggestions, value],
-  );
-  const menuOpen = isFocused && filteredSuggestions.length > 0 && !disabled;
-
-  useEffect(() => {
-    if (!menuOpen) {
-      setHighlightedIndex(-1);
-      return;
-    }
-    if (filteredSuggestions.length === 0) {
-      setHighlightedIndex(-1);
-      return;
-    }
-    setHighlightedIndex((existing) =>
-      existing >= 0 && existing < filteredSuggestions.length ? existing : 0,
-    );
-  }, [filteredSuggestions, menuOpen]);
-
-  const applySuggestion = useCallback(
-    (suggestionUrl: string) => {
-      onChange(suggestionUrl);
-      onSubmit(suggestionUrl);
-      setIsFocused(false);
-    },
-    [onChange, onSubmit],
-  );
+  const { value, onChange, onSubmit, disabled, className, ariaLabel } = props;
 
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLInputElement>) => {
-      if (event.key === "ArrowDown") {
-        if (filteredSuggestions.length === 0) {
-          return;
-        }
-        event.preventDefault();
-        setHighlightedIndex((existing) =>
-          existing < 0 ? 0 : Math.min(existing + 1, filteredSuggestions.length - 1),
-        );
-        return;
-      }
-      if (event.key === "ArrowUp") {
-        if (filteredSuggestions.length === 0) {
-          return;
-        }
-        event.preventDefault();
-        setHighlightedIndex((existing) => (existing <= 0 ? 0 : existing - 1));
-        return;
-      }
-      if (event.key === "Escape") {
-        setIsFocused(false);
-        return;
-      }
       if (event.key !== "Enter") {
         return;
       }
       event.preventDefault();
-      if (menuOpen && highlightedIndex >= 0 && highlightedIndex < filteredSuggestions.length) {
-        applySuggestion(filteredSuggestions[highlightedIndex]!.url);
-        return;
-      }
       onSubmit(value);
-      setIsFocused(false);
     },
-    [applySuggestion, filteredSuggestions, highlightedIndex, menuOpen, onSubmit, value],
+    [onSubmit, value],
   );
 
   return (
-    <div className="relative min-w-[120px] flex-1 basis-0">
+    <div className="min-w-[120px] flex-1 basis-0">
       <Input
         value={value}
         onChange={(event) => {
           onChange(event.target.value);
         }}
-        onFocus={() => setIsFocused(true)}
-        onBlur={() => setIsFocused(false)}
         onKeyDown={handleKeyDown}
         className={className}
         spellCheck={false}
         aria-label={ariaLabel}
         disabled={disabled}
       />
-      {menuOpen && filteredSuggestions.length > 0 ? (
-        <div className="absolute bottom-[calc(100%+6px)] left-0 right-0 z-[80] overflow-hidden rounded-lg border border-border bg-popover shadow-lg">
-          <div className="max-h-56 overflow-x-hidden overflow-y-auto p-1">
-            {filteredSuggestions.map((entry, index) => {
-              const isHighlighted = index === highlightedIndex;
-              return (
-                <button
-                  key={entry.url}
-                  type="button"
-                  className={cn(
-                    "flex min-w-0 w-full flex-col items-start rounded px-2 py-1 text-left",
-                    isHighlighted
-                      ? "bg-accent text-accent-foreground"
-                      : "hover:bg-accent/60 hover:text-accent-foreground",
-                  )}
-                  onMouseDown={(event) => {
-                    event.preventDefault();
-                    applySuggestion(entry.url);
-                  }}
-                >
-                  {entry.title ? (
-                    <span className="block w-full truncate text-xs font-medium">{entry.title}</span>
-                  ) : null}
-                  <span className="block w-full truncate text-[11px] text-muted-foreground">
-                    {entry.url}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -563,9 +219,6 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [snapshot, setSnapshot] = useState<BrowserSessionSnapshot | null>(null);
   const [urlInput, setUrlInput] = useState("");
-  const [urlHistory, setUrlHistory] = useState<ReadonlyArray<string>>(() =>
-    readBrowserUrlHistory(),
-  );
   const [containerWidth, setContainerWidth] = useState(() =>
     typeof window === "undefined" ? 0 : window.innerWidth,
   );
@@ -731,35 +384,6 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
     setUrlInput(nextUrl);
   }, [activeTab?.navigation.url, session?.navigation.url]);
 
-  const rememberVisitedUrl = useCallback((url: string | null | undefined) => {
-    const normalized = normalizeSuggestionUrl(url);
-    if (!normalized) {
-      return;
-    }
-    setUrlHistory((previous) => {
-      const next = rememberBrowserUrl(previous, normalized);
-      if (next === previous) {
-        return previous;
-      }
-      persistBrowserUrlHistory(next);
-      return next;
-    });
-  }, []);
-
-  useEffect(() => {
-    rememberVisitedUrl(activeTab?.navigation.url ?? session?.navigation.url ?? null);
-  }, [activeTab?.navigation.url, rememberVisitedUrl, session?.navigation.url]);
-
-  const browserUrlSuggestions = useMemo(
-    () =>
-      buildBrowserUrlSuggestions({
-        tabs,
-        sessionUrl: session?.navigation.url ?? null,
-        history: urlHistory,
-      }),
-    [session?.navigation.url, tabs, urlHistory],
-  );
-
   useEffect(() => {
     if (!open || !activeProjectId) {
       lastDispatchedBoundsRef.current = null;
@@ -918,10 +542,11 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
   };
 
   const navigate = async (nextInput?: string) => {
-    const targetUrl = (nextInput ?? urlInput).trim();
-    if (!api?.browser || !activeProjectId || targetUrl.length === 0) {
+    const rawTarget = (nextInput ?? urlInput).trim();
+    if (!api?.browser || !activeProjectId || rawTarget.length === 0) {
       return;
     }
+    const targetUrl = resolveBrowserNavigationUrl(rawTarget);
     const nextSnapshot = await runBrowserAction("navigate browser", () =>
       api.browser.navigate({
         projectId: activeProjectId,
@@ -930,11 +555,6 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
     );
     if (nextSnapshot) {
       setSnapshot(nextSnapshot);
-      const nextUrl =
-        nextSnapshot.tabs?.find((tab) => tab.tabId === nextSnapshot.activeTabId)?.navigation.url ??
-        nextSnapshot.session?.navigation.url ??
-        targetUrl;
-      rememberVisitedUrl(nextUrl);
     }
   };
 
@@ -1083,7 +703,6 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
                 onSubmit={(nextValue) => {
                   void navigate(nextValue);
                 }}
-                suggestions={browserUrlSuggestions}
                 disabled={controlsDisabled}
                 className="h-8 min-w-[120px] flex-1 basis-0 rounded-md border-border bg-muted/40 text-xs"
                 ariaLabel="Browser URL"
@@ -1253,7 +872,6 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
                 onSubmit={(nextValue) => {
                   void navigate(nextValue);
                 }}
-                suggestions={browserUrlSuggestions}
                 disabled={controlsDisabled}
                 className="h-8 min-w-[120px] flex-1 basis-0 rounded-md border-border bg-muted/40 text-xs"
                 ariaLabel="Browser URL"

@@ -65,6 +65,7 @@ import { resolveProviderDiscoveryCwd } from "~/lib/providerDiscovery";
 import {
   providerCommandsQueryOptions,
   providerComposerCapabilitiesQueryOptions,
+  providerDiscoveryQueryKeys,
   providerModelsQueryOptions,
   providerPluginsQueryOptions,
   providerSkillsQueryOptions,
@@ -312,6 +313,8 @@ const HEADER_COMPACT_BREAKPOINT = 480;
 const HANDOFF_WHEEL_SNAP_DELTA = 36;
 const HANDOFF_WHEEL_RESET_GAP_MS = 220;
 const HANDOFF_WHEEL_COOLDOWN_MS = 180;
+const DESKTOP_APP_RESOLUTION_TIMEOUT_MS = 2_500;
+const DESKTOP_APP_ICON_PREWARM_COUNT = 10;
 const THREAD_CONTEXT_ARTIFACT_EXTENSIONS = new Set([
   "avif",
   "bmp",
@@ -924,6 +927,55 @@ function promptContainsSelectedComposerExtensionToken(
   return false;
 }
 
+function desktopAppMentionNamesInPrompt(prompt: string): string[] {
+  const mentionPattern = /(^|\s)(@)([^\s]+)(?=\s|$)/g;
+  const names = new Set<string>();
+  let match: RegExpExecArray | null;
+  while ((match = mentionPattern.exec(prompt)) !== null) {
+    const rawName = match[3]?.trim();
+    if (!rawName) continue;
+    names.add(rawName.replace(/^\[|\]$/g, "").toLowerCase());
+  }
+  return [...names];
+}
+
+async function resolveDesktopAppsForPrompt(input: {
+  prompt: string;
+  desktopApps: readonly ComputerUseAppSummary[];
+  computerUseSettings: ComputerUseSettings;
+  api: NonNullable<ReturnType<typeof readNativeApi>>;
+}): Promise<readonly ComputerUseAppSummary[]> {
+  const mentionNames = desktopAppMentionNamesInPrompt(input.prompt);
+  if (mentionNames.length === 0) {
+    return input.desktopApps;
+  }
+
+  const resolvedNames = new Set(
+    input.desktopApps.map((app) => desktopAppMentionName(app).toLowerCase()),
+  );
+  const hasAllMentionedApps = mentionNames.every((name) => resolvedNames.has(name));
+  if (hasAllMentionedApps) {
+    return input.desktopApps;
+  }
+
+  try {
+    const result = await Promise.race([
+      input.api.computerUse.listApps(),
+      new Promise<null>((resolve) => {
+        setTimeout(() => resolve(null), DESKTOP_APP_RESOLUTION_TIMEOUT_MS);
+      }),
+    ]);
+    if (!result) {
+      return input.desktopApps;
+    }
+    return (result.apps ?? []).filter((app) =>
+      isComputerUseAppAllowed(app, input.computerUseSettings),
+    );
+  } catch {
+    return input.desktopApps;
+  }
+}
+
 function promptWithSelectedComposerExtensions(input: {
   prompt: string;
   selectedExtensions: readonly SelectedComposerExtension[];
@@ -944,8 +996,11 @@ function promptWithSelectedComposerExtensions(input: {
   const cleanPrompt = input.prompt.trim();
   const computerUseContext =
     desktopApps.length > 0
-      ? desktopApps
-          .map((extension) => {
+      ? [
+          "The user explicitly selected desktop app target(s). You must use the t3_computer MCP for this request.",
+          "Do not answer from reasoning alone and do not substitute unrelated tools while fulfilling an explicit desktop-app request.",
+          "If the selected app is not running, launch or attach it first, then perform the requested action in that app.",
+          ...desktopApps.map((extension) => {
             const app = extension.desktopApp!;
             const window = app.windows.find((candidate) => candidate.isFocused || candidate.isMain);
             const windowText = window?.title ? `, window: ${window.title}` : "";
@@ -953,8 +1008,8 @@ function promptWithSelectedComposerExtensions(input: {
             const launchText = app.launchId ? `, launchId: ${app.launchId}` : "";
             const runningText = app.isRunning === false ? ", not running" : "";
             return `Use t3_computer MCP - ${app.name} (appId: ${app.appId}${pidText}${launchText}${windowText}${runningText})`;
-          })
-          .join("\n")
+          }),
+        ].join("\n")
       : "";
   const visiblePrompt = cleanPrompt
     ? [selectedPrompt, cleanPrompt].filter(Boolean).join(" ")
@@ -1471,6 +1526,9 @@ export default function ChatView({
     SelectedComposerShortcut[]
   >([]);
   const [queuedComposerTurns, setQueuedComposerTurns] = useState<QueuedComposerTurn[]>([]);
+  const [disabledOpencodeModelSlugs, setDisabledOpencodeModelSlugs] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
   const [lastInvokedScriptByProjectId, setLastInvokedScriptByProjectId] = useState<
     Record<string, string>
   >(() => readLastInvokedScriptByProjectFromStorage());
@@ -1502,6 +1560,7 @@ export default function ChatView({
   const queuedComposerTurnsRef = useRef<QueuedComposerTurn[]>([]);
   const autoDispatchingQueuedTurnRef = useRef(false);
   const activeComposerMenuItemRef = useRef<ComposerCommandItem | null>(null);
+  const handledDisabledOpencodeModelKeysRef = useRef<Set<string>>(new Set());
   const attachmentPreviewHandoffByMessageIdRef = useRef<Record<string, string[]>>({});
   const attachmentPreviewHandoffTimeoutByMessageIdRef = useRef<Record<string, number>>({});
   const sendInFlightRef = useRef(false);
@@ -1685,6 +1744,13 @@ export default function ChatView({
       enabled: true,
     }),
   );
+  const filteredOpencodeRuntimeModels = useMemo(
+    () =>
+      (opencodeRuntimeModelsQuery.data?.models ?? []).filter(
+        (model) => !disabledOpencodeModelSlugs.has(model.slug),
+      ),
+    [disabledOpencodeModelSlugs, opencodeRuntimeModelsQuery.data?.models],
+  );
   const codexRuntimeModelsQuery = useQuery(
     providerModelsQueryOptions({
       provider: "codex",
@@ -1697,11 +1763,11 @@ export default function ChatView({
         settings,
         providerStatuses,
         codexRuntimeModelsQuery.data?.models ?? [],
-        opencodeRuntimeModelsQuery.data?.models ?? [],
+        filteredOpencodeRuntimeModels,
       ),
     [
       codexRuntimeModelsQuery.data?.models,
-      opencodeRuntimeModelsQuery.data?.models,
+      filteredOpencodeRuntimeModels,
       providerStatuses,
       settings,
     ],
@@ -1709,16 +1775,15 @@ export default function ChatView({
   const selectedModel = useMemo(() => {
     const draftModel = composerDraft.model;
     const providerOptions = modelOptionsByProvider[selectedProvider];
+    const firstAvailableModel = providerOptions[0]?.slug as ModelSlug | undefined;
+    const fallbackModel =
+      resolveModelForProviderPicker(selectedProvider, baseThreadModel, providerOptions) ??
+      firstAvailableModel ??
+      (getDefaultModel(selectedProvider) as ModelSlug);
     if (!draftModel) {
-      return (
-        resolveModelForProviderPicker(selectedProvider, baseThreadModel, providerOptions) ??
-        (baseThreadModel as ModelSlug)
-      );
+      return fallbackModel;
     }
-    return (
-      resolveModelForProviderPicker(selectedProvider, draftModel, providerOptions) ??
-      (baseThreadModel as ModelSlug)
-    );
+    return resolveModelForProviderPicker(selectedProvider, draftModel, providerOptions) ?? fallbackModel;
   }, [baseThreadModel, composerDraft.model, modelOptionsByProvider, selectedProvider]);
   const selectedOpencodeModelCapabilities =
     selectedProvider === "opencode"
@@ -1784,6 +1849,67 @@ export default function ChatView({
       ? selectedModelForPicker
       : (normalizeModelSlug(selectedModelForPicker, selectedProvider) ?? selectedModelForPicker);
   }, [modelOptionsByProvider, selectedModelForPicker, selectedProvider]);
+  useEffect(() => {
+    const disabledModelMatch = /OpenCode model '([^']+)' is disabled/i.exec(activeThread?.error ?? "");
+    const disabledModelSlug = disabledModelMatch?.[1];
+    if (!activeThread?.id || !disabledModelSlug) {
+      return;
+    }
+
+    const handledKey = `${activeThread.id}:${disabledModelSlug}`;
+    if (handledDisabledOpencodeModelKeysRef.current.has(handledKey)) {
+      return;
+    }
+    handledDisabledOpencodeModelKeysRef.current.add(handledKey);
+
+    setDisabledOpencodeModelSlugs((current) => {
+      if (current.has(disabledModelSlug)) {
+        return current;
+      }
+      return new Set([...current, disabledModelSlug]);
+    });
+
+    void queryClient.invalidateQueries({
+      queryKey: providerDiscoveryQueryKeys.models("opencode"),
+    });
+
+    const fallbackOptions = modelOptionsByProvider.opencode.filter(
+      (option) => option.slug !== disabledModelSlug,
+    );
+    const fallbackModel =
+      resolveModelForProviderPicker("opencode", baseThreadModel, fallbackOptions) ??
+      resolveModelForProviderPicker("opencode", selectedModel, fallbackOptions) ??
+      (fallbackOptions[0]?.slug as ModelSlug | undefined) ??
+      (getDefaultModel("opencode") as ModelSlug);
+
+    setComposerDraftModel(activeThread.id, fallbackModel);
+    toastManager.add({
+      type: "warning",
+      title: "OpenCode model unavailable",
+      description: `${disabledModelSlug} was disabled upstream. Switched this thread to ${fallbackModel}.`,
+    });
+
+    if (serverThread?.model === disabledModelSlug) {
+      const api = readNativeApi();
+      if (api) {
+        void api.orchestration.dispatchCommand({
+          type: "thread.meta.update",
+          commandId: newCommandId(),
+          threadId: activeThread.id,
+          model: fallbackModel,
+        });
+      }
+    }
+  }, [
+    activeThread?.error,
+    activeThread?.id,
+    baseThreadModel,
+    modelOptionsByProvider,
+    queryClient,
+    selectedModel,
+    serverThread?.model,
+    setComposerDraftModel,
+  ]);
   const searchableModelOptions = useMemo(
     () =>
       AVAILABLE_PROVIDER_OPTIONS.filter(
@@ -2379,6 +2505,22 @@ export default function ChatView({
       ),
     [computerUseAppsQuery.data?.apps, computerUseSettings],
   );
+  const prewarmedDesktopAppIconUrlsRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    for (const app of desktopApps.slice(0, DESKTOP_APP_ICON_PREWARM_COUNT)) {
+      const iconUrl = app.iconUrl;
+      if (!iconUrl || prewarmedDesktopAppIconUrlsRef.current.has(iconUrl)) {
+        continue;
+      }
+      prewarmedDesktopAppIconUrlsRef.current.add(iconUrl);
+      const image = new Image();
+      image.decoding = "async";
+      image.src = iconUrl;
+    }
+  }, [desktopApps]);
   const userMessageMentionDescriptors = useMemo<UserMessageMentionDescriptor[]>(() => {
     const desktopAppDescriptors = desktopApps.map((app) => {
       const descriptor: UserMessageMentionDescriptor = {
@@ -3647,11 +3789,16 @@ export default function ChatView({
   }, [activeThread]);
 
   const clearComposerInput = useCallback(
-    (targetThreadId: ThreadId) => {
+    (
+      targetThreadId: ThreadId,
+      options?: {
+        preserveSelectedExtensions?: SelectedComposerExtension[];
+      },
+    ) => {
       promptRef.current = "";
       clearComposerDraftContent(targetThreadId);
       clearFilePanelComments(targetThreadId);
-      setSelectedComposerExtensions([]);
+      setSelectedComposerExtensions(options?.preserveSelectedExtensions ?? []);
       setSelectedComposerShortcuts([]);
       setComposerHighlightedItemId(null);
       setComposerCursor(0);
@@ -3748,18 +3895,31 @@ export default function ChatView({
       queuedChatTurn?.inspectCaptures ?? composerInspectCaptures;
     const selectedProviderForSend = queuedChatTurn?.selectedProvider ?? selectedProvider;
     const rawPromptForSend = queuedChatTurn?.displayText ?? promptRef.current;
+    const desktopAppsForSend =
+      queuedChatTurn === null
+        ? await resolveDesktopAppsForPrompt({
+            prompt: rawPromptForSend,
+            desktopApps,
+            computerUseSettings,
+            api,
+          })
+        : desktopApps;
     const inlineSelectedComposerExtensions =
       queuedChatTurn === null
         ? selectedComposerExtensionsFromPrompt({
             prompt: rawPromptForSend,
             plugins: providerPlugins,
             skills: providerSkills,
-            desktopApps,
+            desktopApps: desktopAppsForSend,
           })
         : [];
     const selectedComposerExtensionsForSend = mergeSelectedComposerExtensions(
       selectedComposerExtensions,
       inlineSelectedComposerExtensions,
+    );
+    const persistentDesktopAppExtensionsForSend = selectedComposerExtensionsForSend.filter(
+      (extension): extension is SelectedComposerExtension & { type: "desktop-app" } =>
+        extension.type === "desktop-app",
     );
     const basePromptForSend =
       queuedChatTurn?.prompt ??
@@ -3901,7 +4061,9 @@ export default function ChatView({
         interactionMode: interactionModeForSend,
         envMode: envModeForSend,
       };
-      clearComposerInput(activeThread.id);
+      clearComposerInput(activeThread.id, {
+        preserveSelectedExtensions: persistentDesktopAppExtensionsForSend,
+      });
       setQueuedComposerTurns((existing) =>
         dispatchMode === "steer"
           ? [queuedTurnFromComposer, ...existing]
@@ -3970,7 +4132,9 @@ export default function ChatView({
     forceStickToBottom();
 
     setThreadError(threadIdForSend, null);
-    clearComposerInput(threadIdForSend);
+      clearComposerInput(threadIdForSend, {
+        preserveSelectedExtensions: persistentDesktopAppExtensionsForSend,
+      });
 
     let createdServerThreadForLocalDraft = false;
     let turnStartSucceeded = false;
@@ -7023,7 +7187,6 @@ const ChatHeader = memo(function ChatHeader({
       : surfaceMode === "split" && isFocusedPane && onMaximizeSurface
         ? { kind: "maximize" as const, label: "Expand this chat", onClick: onMaximizeSurface }
         : null;
-  const hasCollapsibleControls = Boolean(activeProjectScripts || activeProjectName || onOpenTask);
   const [handoffFlipDirection, setHandoffFlipDirection] = useState<1 | -1 | 0>(0);
   const handoffWheelAccumRef = useRef(0);
   const handoffWheelCooldownUntilRef = useRef(0);
@@ -7127,23 +7290,6 @@ const ChatHeader = memo(function ChatHeader({
     }
     return <OpenAI className={cn("text-muted-foreground/75", className)} />;
   };
-  const preferredEditor = useMemo<EditorId | null>(() => {
-    const stored =
-      typeof window !== "undefined"
-        ? (localStorage.getItem(LAST_EDITOR_KEY) as EditorId | null)
-        : null;
-    if (stored && availableEditors.includes(stored)) {
-      return stored;
-    }
-    return availableEditors[0] ?? null;
-  }, [availableEditors]);
-  const openInPreferredEditor = useCallback(() => {
-    const api = readNativeApi();
-    if (!api || !openInCwd || !preferredEditor) return;
-    void api.shell.openInEditor(openInCwd, preferredEditor);
-    localStorage.setItem(LAST_EDITOR_KEY, preferredEditor);
-  }, [openInCwd, preferredEditor]);
-
   useEffect(() => {
     const el = headerRef.current;
     if (!el) return;
@@ -7204,9 +7350,34 @@ const ChatHeader = memo(function ChatHeader({
         ) : null}
       </div>
       <div
-        className="flex shrink-0 items-center gap-1.5 @lg/header-actions:gap-2"
+        className={cn(
+          "flex shrink-0 items-center",
+          compact ? "gap-1" : "gap-1.5 @lg/header-actions:gap-2",
+        )}
         data-testid="chat-header-actions"
       >
+        <OpenInPicker
+          keybindings={keybindings}
+          availableEditors={availableEditors}
+          openInCwd={openInCwd}
+        />
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Toggle
+                className="shrink-0"
+                pressed={filesRailOpen}
+                onPressedChange={onToggleFiles}
+                aria-label="Toggle files rail"
+                variant="outline"
+                size="xs"
+              >
+                <FilesIcon className="size-3.5" />
+              </Toggle>
+            }
+          />
+          <TooltipPopup side="bottom">Toggle files rail</TooltipPopup>
+        </Tooltip>
         <Tooltip>
           <TooltipTrigger
             render={
@@ -8672,6 +8843,7 @@ const OpenInPicker = memo(function OpenInPicker({
         variant="outline"
         disabled={!effectiveEditor || !openInCwd}
         onClick={() => openInEditor(effectiveEditor)}
+        aria-label="Open in editor"
       >
         {primaryOption?.Icon && <primaryOption.Icon aria-hidden="true" className="size-3.5" />}
         <span className="sr-only @lg/header-actions:not-sr-only @lg/header-actions:ml-0.5">
@@ -8680,7 +8852,9 @@ const OpenInPicker = memo(function OpenInPicker({
       </Button>
       <GroupSeparator className="hidden @lg/header-actions:block" />
       <Menu>
-        <MenuTrigger render={<Button aria-label="Copy options" size="icon-xs" variant="outline" />}>
+        <MenuTrigger
+          render={<Button aria-label="Choose editor" size="icon-xs" variant="outline" />}
+        >
           <ChevronDownIcon aria-hidden="true" className="size-4" />
         </MenuTrigger>
         <MenuPopup align="end">

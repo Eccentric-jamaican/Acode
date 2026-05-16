@@ -571,6 +571,34 @@ function ComposerMentionArrowPlugin() {
   return null;
 }
 
+function isSelectionAdjacentToActualMention(selection: ReturnType<typeof $getSelection>): boolean {
+  if (!$isRangeSelection(selection) || !selection.isCollapsed()) {
+    return false;
+  }
+
+  const anchorNode = selection.anchor.getNode();
+  if (anchorNode instanceof ComposerMentionNode) {
+    return true;
+  }
+
+  if ($isTextNode(anchorNode)) {
+    if (
+      selection.anchor.offset === 0 &&
+      anchorNode.getPreviousSibling() instanceof ComposerMentionNode
+    ) {
+      return true;
+    }
+    if (
+      selection.anchor.offset === anchorNode.getTextContentSize() &&
+      anchorNode.getNextSibling() instanceof ComposerMentionNode
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function ComposerMentionSelectionNormalizePlugin() {
   const [editor] = useLexicalComposerContext();
 
@@ -779,9 +807,8 @@ function ComposerPromptEditorInner({
         value: nextValue,
         cursor: nextCursor,
       };
-      const cursorAdjacentToMention =
-        isCollapsedCursorAdjacentToMention(nextValue, nextCursor, "left") ||
-        isCollapsedCursorAdjacentToMention(nextValue, nextCursor, "right");
+      const selection = $getSelection();
+      const cursorAdjacentToMention = isSelectionAdjacentToActualMention(selection);
       onChangeRef.current(nextValue, nextCursor, cursorAdjacentToMention);
     });
   }, []);

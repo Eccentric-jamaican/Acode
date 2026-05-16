@@ -41,6 +41,7 @@ const ORCHESTRATION_COMMAND_RECEIPT_LOOKUP_ATTEMPTS = 3;
 const ORCHESTRATION_COMMAND_RECEIPT_LOOKUP_DELAY_MS = 500;
 const COMMAND_ACK_CACHE_TTL_MS = 10 * 60_000;
 const COMMAND_ACK_CACHE_MAX = 5_000;
+const CONNECTION_READY_CHECK_TIMEOUT_MS = 1_000;
 const RECONNECT_DELAYS_MS = [500, 1_000, 2_000, 4_000, 8_000];
 const decodeWsResponseFromJson = Schema.decodeUnknownExit(Schema.fromJsonString(WsResponse));
 const isWsPushEnvelope = Schema.is(WsPush);
@@ -98,6 +99,24 @@ interface WsRequestEnvelope {
   };
 }
 
+function toHttpProbeUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    parsed.protocol =
+      parsed.protocol === "wss:"
+        ? "https:"
+        : parsed.protocol === "ws:"
+          ? "http:"
+          : parsed.protocol;
+    parsed.pathname = "/";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
 export class WsTransport {
   private ws: WebSocket | null = null;
   private nextId = 1;
@@ -109,6 +128,9 @@ export class WsTransport {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
   private readonly url: string;
+  private readonly shouldPreflightConnection: boolean;
+  private readonly httpProbeUrl: string | null;
+  private connectionAttemptInFlight = false;
 
   constructor(url?: string) {
     const desktopBridge = window.desktopBridge;
@@ -117,6 +139,8 @@ export class WsTransport {
     // In dev mode, VITE_WS_URL points to the server's WebSocket endpoint.
     // In production, the page is served by the WS server on the same host:port.
     const envUrl = import.meta.env.VITE_WS_URL as string | undefined;
+    this.shouldPreflightConnection = !(url && url.length > 0);
+
     if (url && url.length > 0) {
       this.url = url;
     } else if (hasDesktopBridge) {
@@ -131,6 +155,7 @@ export class WsTransport {
     } else {
       this.url = `ws://${window.location.hostname}:${window.location.port}`;
     }
+    this.httpProbeUrl = this.shouldPreflightConnection ? toHttpProbeUrl(this.url) : null;
     this.connect();
   }
 
@@ -197,7 +222,7 @@ export class WsTransport {
         ) {
           return;
         }
-        reject(new Error(`Request timed out: ${method}`));
+        reject(new Error(this.timeoutMessageForRequest(method)));
       }, timeoutMs);
 
       this.pending.set(id, {
@@ -249,27 +274,17 @@ export class WsTransport {
   }
 
   private connect() {
-    if (this.disposed) return;
+    if (this.disposed || this.ws || this.connectionAttemptInFlight || this.reconnectTimer !== null)
+      return;
 
-    const ws = new WebSocket(this.url);
+    if (!this.shouldPreflightConnection) {
+      this.createSocketConnection();
+      return;
+    }
 
-    ws.addEventListener("open", () => {
-      this.ws = ws;
-      this.reconnectAttempt = 0;
-    });
-
-    ws.addEventListener("message", (event) => {
-      this.handleMessage(event.data);
-    });
-
-    ws.addEventListener("close", () => {
-      this.ws = null;
-      this.rejectPendingRequests("Connection to the T3 Code server was lost.", { onlySent: true });
-      this.scheduleReconnect();
-    });
-
-    ws.addEventListener("error", () => {
-      // close event will fire after error
+    this.connectionAttemptInFlight = true;
+    void this.openSocketWhenReady().finally(() => {
+      this.connectionAttemptInFlight = false;
     });
   }
 
@@ -333,6 +348,8 @@ export class WsTransport {
       return;
     }
 
+    this.connect();
+
     // If not connected, wait for connection
     const waitForOpen = () => {
       const check = setInterval(() => {
@@ -351,6 +368,17 @@ export class WsTransport {
       setTimeout(() => clearInterval(check), timeoutMs);
     };
     waitForOpen();
+  }
+
+  private timeoutMessageForRequest(method: string): string {
+    const pendingHint =
+      import.meta.env.DEV && typeof window !== "undefined" && !window.desktopBridge
+        ? " If you started `bun run dev:web`, note that it only starts the frontend; start `bun run dev -- --no-browser` or `bun run dev:server` too."
+        : "";
+    if (!this.ws) {
+      return `Unable to reach the T3 Code server at ${this.url}. Request timed out: ${method}.${pendingHint}`;
+    }
+    return `Request timed out: ${method}`;
   }
 
   private recordDispatchCommandAckFromPush(channel: string, data: unknown): void {
@@ -502,6 +530,7 @@ export class WsTransport {
 
   private scheduleReconnect() {
     if (this.disposed) return;
+    if (this.reconnectTimer !== null) return;
 
     const delay =
       RECONNECT_DELAYS_MS[Math.min(this.reconnectAttempt, RECONNECT_DELAYS_MS.length - 1)] ??
@@ -512,5 +541,67 @@ export class WsTransport {
       this.reconnectTimer = null;
       this.connect();
     }, delay);
+  }
+
+  private async openSocketWhenReady(): Promise<void> {
+    if (!(await this.isServerReadyForWebSocket())) {
+      if (!this.disposed) {
+        this.scheduleReconnect();
+      }
+      return;
+    }
+    if (this.disposed || this.ws) {
+      return;
+    }
+
+    this.createSocketConnection();
+  }
+
+  private async isServerReadyForWebSocket(): Promise<boolean> {
+    if (!this.shouldPreflightConnection || !this.httpProbeUrl || typeof fetch !== "function") {
+      return true;
+    }
+
+    const abortController = typeof AbortController === "function" ? new AbortController() : null;
+    const timeout = setTimeout(() => {
+      abortController?.abort();
+    }, CONNECTION_READY_CHECK_TIMEOUT_MS);
+
+    try {
+      await fetch(this.httpProbeUrl, {
+        method: "HEAD",
+        cache: "no-store",
+        mode: "no-cors",
+        ...(abortController ? { signal: abortController.signal } : {}),
+      });
+      return true;
+    } catch {
+      return false;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private createSocketConnection(): void {
+    const ws = new WebSocket(this.url);
+    this.ws = ws;
+
+    ws.addEventListener("open", () => {
+      this.reconnectAttempt = 0;
+    });
+
+    ws.addEventListener("message", (event) => {
+      this.handleMessage(event.data);
+    });
+
+    ws.addEventListener("close", () => {
+      this.ws = null;
+      this.rejectPendingRequests("Connection to the T3 Code server was lost.", { onlySent: true });
+      this.scheduleReconnect();
+    });
+
+    ws.addEventListener("error", () => {
+      // close event will fire after error
+    });
   }
 }

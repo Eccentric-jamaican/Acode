@@ -41,7 +41,11 @@ import {
   CodexAppServerManager,
   type CodexAppServerStartSessionInput,
 } from "../../codexAppServerManager.ts";
-import { createCodexHomeOverlay } from "../../codexHomeOverlay.ts";
+import {
+  createCodexHomeOverlay,
+  pruneStaleCodexHomeOverlays,
+  removeCodexHomeOverlay,
+} from "../../codexHomeOverlay.ts";
 import { isNonFatalCodexErrorMessage } from "../../codexErrorClassification.ts";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
@@ -1384,6 +1388,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
             stream: "native",
           })
         : undefined);
+    const overlayHomePathByThreadId = new Map<ThreadId, string>();
 
     const manager = yield* Effect.acquireRelease(
       Effect.gen(function* () {
@@ -1397,11 +1402,28 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         Effect.sync(() => {
           try {
             manager.stopAll();
+            for (const overlayPath of overlayHomePathByThreadId.values()) {
+              removeCodexHomeOverlay(overlayPath);
+            }
+            overlayHomePathByThreadId.clear();
           } catch {
             // Finalizers should never fail and block shutdown.
           }
         }),
     );
+
+    const releaseOverlay = (threadId: ThreadId) => {
+      const overlayPath = overlayHomePathByThreadId.get(threadId);
+      if (!overlayPath) {
+        return;
+      }
+      overlayHomePathByThreadId.delete(threadId);
+      try {
+        removeCodexHomeOverlay(overlayPath);
+      } catch {
+        // A transient Windows file lock should not break session stop/cleanup.
+      }
+    };
 
     const startSession: CodexAdapterShape["startSession"] = (input) => {
       if (input.provider !== undefined && input.provider !== PROVIDER) {
@@ -1414,6 +1436,11 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         );
       }
 
+      releaseOverlay(input.threadId);
+      pruneStaleCodexHomeOverlays({
+        stateDir: serverConfig.stateDir,
+        preservePaths: Array.from(overlayHomePathByThreadId.values()),
+      });
       const overlayHomePath = createCodexHomeOverlay({
         threadId: input.threadId,
         projectId: T3_COMPUTER_OVERLAY_PROJECT_ID,
@@ -1456,7 +1483,23 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
             detail: toMessage(cause, "Failed to start Codex adapter session."),
             cause,
           }),
-      }).pipe(Effect.map((session) => session));
+      }).pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            if (overlayHomePath) {
+              overlayHomePathByThreadId.set(input.threadId, overlayHomePath);
+            }
+          }),
+        ),
+        Effect.tapError(() =>
+          Effect.sync(() => {
+            if (overlayHomePath) {
+              removeCodexHomeOverlay(overlayHomePath);
+            }
+          }),
+        ),
+        Effect.map((session) => session),
+      );
     };
 
     const sendTurn: CodexAdapterShape["sendTurn"] = (input) =>
@@ -1578,6 +1621,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
     const stopSession: CodexAdapterShape["stopSession"] = (threadId) =>
       Effect.sync(() => {
         manager.stopSession(threadId);
+        releaseOverlay(threadId);
       });
 
     const listSessions: CodexAdapterShape["listSessions"] = () =>
@@ -1589,6 +1633,9 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
     const stopAll: CodexAdapterShape["stopAll"] = () =>
       Effect.sync(() => {
         manager.stopAll();
+        for (const threadId of Array.from(overlayHomePathByThreadId.keys())) {
+          releaseOverlay(threadId);
+        }
       });
 
     const listStoredThreads: CodexAdapterShape["listStoredThreads"] = (input) =>

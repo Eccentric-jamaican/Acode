@@ -45,6 +45,26 @@ function checkpointStatusToLatestTurnState(status: "ready" | "missing" | "error"
   return "completed" as const;
 }
 
+function latestTurnStateFromSessionStatus(
+  status: OrchestrationSession["status"],
+): "running" | "completed" | "interrupted" | "error" | null {
+  switch (status) {
+    case "running":
+      return "running";
+    case "error":
+      return "error";
+    case "interrupted":
+      return "interrupted";
+    case "ready":
+    case "idle":
+    case "stopped":
+      return "completed";
+    case "starting":
+    default:
+      return null;
+  }
+}
+
 function updateThread(
   threads: ReadonlyArray<OrchestrationThread>,
   threadId: ThreadId,
@@ -655,35 +675,48 @@ export function projectEvent(
           event.type,
           "session",
         );
+        const previousActiveTurnId = thread.session?.activeTurnId ?? null;
+        const nextLatestTurnState = latestTurnStateFromSessionStatus(session.status);
+        const nextLatestTurn =
+          session.status === "running" && session.activeTurnId !== null
+            ? {
+                turnId: session.activeTurnId,
+                state: "running" as const,
+                interactionMode:
+                  thread.latestTurn?.turnId === session.activeTurnId
+                    ? thread.latestTurn.interactionMode
+                    : thread.interactionMode,
+                requestedAt:
+                  thread.latestTurn?.turnId === session.activeTurnId
+                    ? thread.latestTurn.requestedAt
+                    : session.updatedAt,
+                startedAt:
+                  thread.latestTurn?.turnId === session.activeTurnId
+                    ? (thread.latestTurn.startedAt ?? session.updatedAt)
+                    : session.updatedAt,
+                completedAt: null,
+                assistantMessageId:
+                  thread.latestTurn?.turnId === session.activeTurnId
+                    ? thread.latestTurn.assistantMessageId
+                    : null,
+              }
+            : nextLatestTurnState !== null &&
+                thread.latestTurn?.state === "running" &&
+                previousActiveTurnId !== null &&
+                thread.latestTurn.turnId === previousActiveTurnId &&
+                session.activeTurnId === null
+              ? {
+                  ...thread.latestTurn,
+                  state: nextLatestTurnState,
+                  completedAt: session.updatedAt,
+                }
+              : thread.latestTurn;
 
         return withDerivedTaskRuntimes({
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             session,
-            latestTurn:
-              session.status === "running" && session.activeTurnId !== null
-                ? {
-                    turnId: session.activeTurnId,
-                    state: "running",
-                    interactionMode:
-                      thread.latestTurn?.turnId === session.activeTurnId
-                        ? thread.latestTurn.interactionMode
-                        : thread.interactionMode,
-                    requestedAt:
-                      thread.latestTurn?.turnId === session.activeTurnId
-                        ? thread.latestTurn.requestedAt
-                        : session.updatedAt,
-                    startedAt:
-                      thread.latestTurn?.turnId === session.activeTurnId
-                        ? (thread.latestTurn.startedAt ?? session.updatedAt)
-                        : session.updatedAt,
-                    completedAt: null,
-                    assistantMessageId:
-                      thread.latestTurn?.turnId === session.activeTurnId
-                        ? thread.latestTurn.assistantMessageId
-                        : null,
-                  }
-                : thread.latestTurn,
+            latestTurn: nextLatestTurn,
             updatedAt: event.occurredAt,
           }),
         });

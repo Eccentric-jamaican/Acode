@@ -45,6 +45,7 @@ import {
   connectToOpenCodeServer,
   createOpenCodeSdkClient,
   getOpenCodeStartupMetadata,
+  resolveOpenCodeBinaryPath,
 } from "../opencodeRuntime.ts";
 import { OpencodeMessageRoleGate } from "./OpencodeMessageRoleGate.ts";
 import { OpencodeAdapter, type OpencodeAdapterShape } from "../Services/OpencodeAdapter.ts";
@@ -59,8 +60,10 @@ import { materializeSkillMentionsForProvider } from "./SkillPromptMaterializatio
 const PROVIDER = "opencode" as const;
 // Match the slower end of observed OpenCode cold-start behavior on Windows so
 // session startup does not race the server bootstrap.
-const STARTUP_TIMEOUT_MS = 30_000;
+const STARTUP_TIMEOUT_MS = 90_000;
+const OPENCODE_REQUEST_TIMEOUT_MS = 45_000;
 const RECONNECT_DELAY_MS = 700;
+const DISABLED_MODEL_CACHE_TTL_MS = 15 * 60_000;
 const logger = createLogger("opencode");
 
 export interface OpencodeAdapterLiveOptions {
@@ -109,6 +112,7 @@ interface RuntimeSession {
   readonly createdAt: string;
   updatedAt: string;
   activeTurnId: TurnId | null;
+  activeTurnStartedAtMs: number | null;
 }
 
 interface OpencodeEvent {
@@ -122,6 +126,9 @@ interface OpencodeSessionInfo {
 }
 
 interface OpencodeMessage {
+  readonly id?: string;
+  readonly role?: string;
+  readonly time?: { readonly completed?: number };
   readonly info?: { readonly id?: string; readonly role?: string };
   readonly parts?: ReadonlyArray<unknown>;
 }
@@ -442,6 +449,70 @@ function extractAssistantTextFromParts(partsValue: unknown): string {
   return text.trim();
 }
 
+function opencodeMessageRecord(value: unknown): Record<string, unknown> | undefined {
+  const record = asObject(value);
+  if (!record) {
+    return undefined;
+  }
+  return asObject(record.info) ?? record;
+}
+
+function opencodeMessageId(value: unknown): string | undefined {
+  return asString(opencodeMessageRecord(value)?.id);
+}
+
+function opencodeMessageRole(value: unknown): string | undefined {
+  const normalized = asString(opencodeMessageRecord(value)?.role)?.trim().toLowerCase();
+  return normalized && normalized.length > 0 ? normalized : undefined;
+}
+
+function opencodeMessageCompletedAt(value: unknown): number | undefined {
+  const time = asObject(opencodeMessageRecord(value)?.time) ?? asObject(asObject(value)?.time);
+  return typeof time?.completed === "number" ? time.completed : undefined;
+}
+
+function opencodeMessageParts(value: unknown): ReadonlyArray<unknown> {
+  return asArray(asObject(value)?.parts) ?? asArray(opencodeMessageRecord(value)?.parts) ?? [];
+}
+
+function opencodeErrorRecord(properties: Record<string, unknown>): Record<string, unknown> | undefined {
+  return asObject(properties.error);
+}
+
+function opencodeErrorDataRecord(
+  properties: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  return asObject(opencodeErrorRecord(properties)?.data);
+}
+
+function opencodeRuntimeErrorDetailMessage(properties: Record<string, unknown>): string | undefined {
+  const directMessage =
+    asString(opencodeErrorRecord(properties)?.message) ?? asString(properties.message);
+  if (directMessage?.trim()) {
+    return directMessage.trim();
+  }
+  const nestedMessage = asString(opencodeErrorDataRecord(properties)?.message);
+  if (nestedMessage?.trim()) {
+    return nestedMessage.trim();
+  }
+  return undefined;
+}
+
+function isOpencodeDisabledModelError(properties: Record<string, unknown>): boolean {
+  const normalized = opencodeRuntimeErrorDetailMessage(properties)?.toLowerCase() ?? "";
+  return normalized.includes("model is disabled");
+}
+
+function opencodeRuntimeErrorMessage(input: {
+  readonly properties: Record<string, unknown>;
+  readonly sessionModel?: string | undefined;
+}): string {
+  if (isOpencodeDisabledModelError(input.properties) && input.sessionModel) {
+    return `OpenCode model '${input.sessionModel}' is disabled. Choose another model.`;
+  }
+  return opencodeRuntimeErrorDetailMessage(input.properties) ?? "OpenCode runtime error";
+}
+
 function parseLeadingSlashInvocation(input: string): ParsedSlashInvocation | null {
   const trimmed = input.trim();
   if (!trimmed.startsWith("/")) {
@@ -574,6 +645,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
     >();
     const messageRoleGate = new OpencodeMessageRoleGate();
     const completedAssistantMessageSessionById = new Map<string, string>();
+    const disabledModelExpiresAtBySlug = new Map<string, number>();
     const controllersByDirectory = new Map<string, AbortController>();
 
     const emit = (event: ProviderRuntimeEvent) => Queue.offer(queue, event).pipe(Effect.asVoid);
@@ -594,7 +666,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         messageId: input.messageId,
         ...(input.roleHint !== undefined ? { roleHint: input.roleHint } : {}),
         fetchRole: async () => {
-          const fullMessage = await requestJson<unknown>({
+          const fullMessageOption = await requestJson<unknown>({
             threadId: input.threadId,
             methodName: "session.message",
             httpMethod: "GET",
@@ -603,8 +675,9 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
             body: undefined,
           })
             .pipe(Effect.option, runWithServices)
-            .catch(() => undefined);
-          return asString(asObject(asObject(fullMessage)?.info)?.role);
+            .catch(() => Option.none<unknown>());
+          const fullMessage = Option.getOrUndefined(fullMessageOption);
+          return opencodeMessageRole(fullMessage);
         },
       });
     };
@@ -624,6 +697,25 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         detail,
         ...(cause !== undefined ? { cause } : {}),
       });
+
+    const pruneDisabledModels = (nowMs = Date.now()) => {
+      for (const [slug, expiresAt] of disabledModelExpiresAtBySlug.entries()) {
+        if (expiresAt <= nowMs) {
+          disabledModelExpiresAtBySlug.delete(slug);
+        }
+      }
+    };
+
+    const rememberDisabledModel = (slug: string) => {
+      pruneDisabledModels();
+      disabledModelExpiresAtBySlug.set(slug, Date.now() + DISABLED_MODEL_CACHE_TTL_MS);
+    };
+
+    const isModelTemporarilyDisabled = (slug: string): boolean => {
+      pruneDisabledModels();
+      const expiresAt = disabledModelExpiresAtBySlug.get(slug);
+      return typeof expiresAt === "number" && expiresAt > Date.now();
+    };
 
     const releaseDirectoryStreamIfUnused = (directory: string) => {
       const stillUsed = Array.from(sessions.values()).some((session) => session.cwd === directory);
@@ -658,6 +750,16 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
             processError(threadId, toMessage(cause, "Failed to read OpenCode settings."), cause),
           ),
         );
+        const resolvedBinaryPath =
+          settings.serverUrl.trim().length > 0
+            ? settings.binaryPath
+            : (() => {
+                try {
+                  return resolveOpenCodeBinaryPath(settings.binaryPath);
+                } catch {
+                  return settings.binaryPath;
+                }
+              })();
         const serverPassword =
           settings.serverPassword.trim().length > 0 ? settings.serverPassword.trim() : undefined;
         const runtimeStartupStartedAt = Date.now();
@@ -666,7 +768,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           try: async () => {
             if (runtimeFactory) {
               return runtimeFactory({
-                binaryPath: settings.binaryPath,
+                binaryPath: resolvedBinaryPath,
                 serverUrl: settings.serverUrl,
                 ...(options?.host ? { hostname: options.host } : {}),
                 ...(options?.port ? { port: options.port } : {}),
@@ -676,7 +778,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
               });
             }
             const server = await connectToOpenCodeServer({
-              binaryPath: settings.binaryPath,
+              binaryPath: resolvedBinaryPath,
               serverUrl: settings.serverUrl,
               ...(options?.host ? { hostname: options.host } : {}),
               ...(options?.port ? { port: options.port } : {}),
@@ -686,7 +788,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
             });
             logger.info("OpenCode runtime connected", {
               threadId,
-              binaryPath: settings.binaryPath,
+              binaryPath: resolvedBinaryPath,
               configuredServerUrl: settings.serverUrl,
               startupDurationMs: Date.now() - runtimeStartupStartedAt,
               runtimeUrl: server.url,
@@ -697,7 +799,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
             const startupMetadata = getOpenCodeStartupMetadata(cause);
             logger.warn("OpenCode runtime startup failed", {
               threadId,
-              binaryPath: settings.binaryPath,
+              binaryPath: resolvedBinaryPath,
               configuredServerUrl: settings.serverUrl,
               startupDurationMs:
                 startupMetadata?.startupDurationMs ?? Date.now() - runtimeStartupStartedAt,
@@ -743,31 +845,35 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
               if (runtime.client) {
                 const client = runtime.client;
                 const bodyRecord = asObject(input.body) ?? {};
-                const command = asRecord(client.command);
-                const session = asRecord(client.session);
-                const provider = asObject(client.provider);
 
                 switch (input.methodName) {
-                  case "command.list":
+                  case "command.list": {
+                    const command = asRecord(client.command);
                     return (await asFunction(
                       command,
                       "list",
                     )({
                       ...(input.directory ? { directory: input.directory } : {}),
                     })) as T;
-                  case "provider.list":
+                  }
+                  case "provider.list": {
+                    const provider = asObject(client.provider);
                     if (!provider) {
                       throw new Error("Injected OpenCode runtime client is missing provider API.");
                     }
                     return (await asFunction(provider, "list")()) as T;
-                  case "session.create":
+                  }
+                  case "session.create": {
+                    const session = asRecord(client.session);
                     return (await asFunction(
                       session,
                       "create",
                     )({
                       body: bodyRecord,
                     })) as T;
+                  }
                   case "session.get": {
+                    const session = asRecord(client.session);
                     const sessionID = decodePathSegment(input.path, 1);
                     return (await asFunction(
                       session,
@@ -777,6 +883,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
                     })) as T;
                   }
                   case "session.command": {
+                    const session = asRecord(client.session);
                     const id = decodePathSegment(input.path, 1);
                     return (await asFunction(
                       session,
@@ -787,6 +894,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
                     })) as T;
                   }
                   case "session.prompt_async": {
+                    const session = asRecord(client.session);
                     const id = decodePathSegment(input.path, 1);
                     return (await asFunction(
                       session,
@@ -797,6 +905,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
                     })) as T;
                   }
                   case "session.abort": {
+                    const session = asRecord(client.session);
                     const id = decodePathSegment(input.path, 1);
                     return (await asFunction(
                       session,
@@ -806,9 +915,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
                     })) as T;
                   }
                   default:
-                    throw new Error(
-                      `Injected OpenCode runtime does not support '${input.methodName}'.`,
-                    );
+                    break;
                 }
               }
 
@@ -817,6 +924,10 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
               if (input.directory) {
                 url.searchParams.set("directory", input.directory);
               }
+              const abortController = new AbortController();
+              const timeout = setTimeout(() => {
+                abortController.abort();
+              }, OPENCODE_REQUEST_TIMEOUT_MS);
               const response = await fetch(url, {
                 method: input.httpMethod,
                 headers: {
@@ -830,7 +941,10 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
                       }
                     : {}),
                 },
+                signal: abortController.signal,
                 ...(input.httpMethod === "POST" ? { body: JSON.stringify(bodyRecord ?? {}) } : {}),
+              }).finally(() => {
+                clearTimeout(timeout);
               });
               if (!response.ok) {
                 throw new Error(`HTTP ${response.status}: ${await response.text()}`);
@@ -954,6 +1068,95 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
       );
     };
 
+    const emitMissingAssistantCompletionsFromHistory = async (input: {
+      readonly threadId: ThreadId;
+      readonly session: RuntimeSession;
+      readonly turnId: TurnId | undefined;
+      readonly method: string;
+      readonly rawPayload: unknown;
+    }) => {
+      const historyOption = await requestJson<ReadonlyArray<OpencodeMessage>>({
+        threadId: input.threadId,
+        methodName: "session.messages",
+        httpMethod: "GET",
+        path: `/session/${encodeURIComponent(input.session.sessionId)}/message`,
+        directory: input.session.cwd,
+        body: undefined,
+      })
+        .pipe(Effect.option, runWithServices)
+        .catch(() => Option.none<ReadonlyArray<OpencodeMessage>>());
+      const history = Option.getOrUndefined(historyOption);
+      if (!history || history.length === 0) {
+        return;
+      }
+
+      for (const message of history) {
+        const messageId = opencodeMessageId(message);
+        if (!messageId || opencodeMessageRole(message) !== "assistant") {
+          continue;
+        }
+        if (completedAssistantMessageSessionById.has(messageId)) {
+          continue;
+        }
+
+        const completedAt = opencodeMessageCompletedAt(message);
+        if (
+          input.session.activeTurnStartedAtMs !== null &&
+          typeof completedAt === "number" &&
+          completedAt < input.session.activeTurnStartedAtMs
+        ) {
+          continue;
+        }
+
+        const hasStreamedAssistantText = Array.from(partMetadataById.values()).some(
+          (entry) =>
+            entry.sessionId === input.session.sessionId &&
+            entry.messageId === messageId &&
+            entry.streamKind === "assistant_text" &&
+            entry.text.length > 0,
+        );
+
+        let detail = hasStreamedAssistantText
+          ? ""
+          : extractAssistantTextFromParts(opencodeMessageParts(message));
+        if (!hasStreamedAssistantText && detail.length === 0) {
+          const fullMessageOption = await requestJson<unknown>({
+            threadId: input.threadId,
+            methodName: "session.message",
+            httpMethod: "GET",
+            path: `/session/${encodeURIComponent(input.session.sessionId)}/message/${encodeURIComponent(messageId)}`,
+            directory: input.session.cwd,
+            body: undefined,
+          })
+            .pipe(Effect.option, runWithServices)
+            .catch(() => Option.none<unknown>());
+          const fullMessage = Option.getOrUndefined(fullMessageOption);
+          detail = extractAssistantTextFromParts(opencodeMessageParts(fullMessage));
+        }
+
+        messageRoleGate.remember(input.session.sessionId, messageId, "assistant");
+        await emitAsync(
+          eventBase({
+            threadId: input.threadId,
+            type: "item.completed",
+            payload: {
+              itemType: "assistant_message",
+              status: "completed",
+              ...(detail.length > 0 ? { detail } : {}),
+            },
+            method: input.method,
+            rawPayload: {
+              trigger: input.rawPayload,
+              message,
+            },
+            turnId: input.turnId,
+            itemId: messageId,
+          }),
+        );
+        completedAssistantMessageSessionById.set(messageId, input.session.sessionId);
+      }
+    };
+
     const handleSseEvent = async (event: OpencodeEvent): Promise<void> => {
       const properties = asObject(event.properties) ?? {};
       const sessionId =
@@ -993,7 +1196,17 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         }
         if (statusType === "idle" || statusType === "ready") {
           const completedTurnId = session.activeTurnId;
+          if (completedTurnId) {
+            await emitMissingAssistantCompletionsFromHistory({
+              threadId,
+              session,
+              turnId: completedTurnId,
+              method: event.type,
+              rawPayload: event,
+            });
+          }
           session.activeTurnId = null;
+          session.activeTurnStartedAtMs = null;
           session.status = "ready";
           session.updatedAt = nowIso();
           if (completedTurnId) {
@@ -1023,6 +1236,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           const reason = asString(statusRecord.message) ?? "OpenCode runtime reported an error.";
           const failedTurnId = session.activeTurnId;
           session.activeTurnId = null;
+          session.activeTurnStartedAtMs = null;
           session.status = "error";
           session.updatedAt = nowIso();
           if (failedTurnId) {
@@ -1294,15 +1508,25 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
 
       if (event.type === "message.updated" || event.type === "message.completed") {
         const message = asObject(properties.info) ?? asObject(properties.message) ?? properties;
-        const messageId = asString(message.id);
-        const role = asString(message.role)?.toLowerCase();
-        const completedAt = asObject(message.time)?.completed;
-        if (messageId) {
-          messageRoleGate.remember(sessionId, messageId, role);
-        }
+        const messageId = opencodeMessageId(message);
+        const role = messageId
+          ? await resolveMessageRole({
+              threadId,
+              sessionId,
+              messageId,
+              directory: session.cwd,
+              roleHint:
+                opencodeMessageRole(message) ??
+                asString(properties.role) ??
+                asString(asObject(properties.message)?.role) ??
+                asString(asObject(properties.info)?.role),
+            })
+          : opencodeMessageRole(message);
+        const completedAt = opencodeMessageCompletedAt(message);
         if (!messageId || role !== "assistant") {
           return;
         }
+        messageRoleGate.remember(sessionId, messageId, role);
         if (completedAssistantMessageSessionById.has(messageId)) {
           return;
         }
@@ -1314,7 +1538,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
               entry.text.length > 0,
           );
           if (!hasStreamedAssistantText) {
-            const fullMessage = await requestJson<unknown>({
+            const fullMessageOption = await requestJson<unknown>({
               threadId,
               methodName: "session.message",
               httpMethod: "GET",
@@ -1323,8 +1547,9 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
               body: undefined,
             })
               .pipe(Effect.option, runWithServices)
-              .catch(() => undefined);
-            const fallbackText = extractAssistantTextFromParts(asObject(fullMessage)?.parts);
+              .catch(() => Option.none<unknown>());
+            const fullMessage = Option.getOrUndefined(fullMessageOption);
+            const fallbackText = extractAssistantTextFromParts(opencodeMessageParts(fullMessage));
             if (fallbackText.length > 0) {
               await emitAsync(
                 eventBase({
@@ -1597,10 +1822,13 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
       }
 
       if (event.type.toLowerCase().includes("error")) {
-        const message =
-          asString(asObject(properties.error)?.message) ??
-          asString(properties.message) ??
-          "OpenCode runtime error";
+        if (isOpencodeDisabledModelError(properties)) {
+          rememberDisabledModel(session.model);
+        }
+        const message = opencodeRuntimeErrorMessage({
+          properties,
+          sessionModel: session.model,
+        });
         await emitAsync(
           eventBase({
             threadId,
@@ -1707,9 +1935,12 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
       operation: string,
     ) =>
       Effect.gen(function* () {
-        const normalized =
+        const preferredModel =
           normalizeModelSlug(requested ?? fallback ?? OPENCODE_DEFAULT_MODEL_SLUG, "opencode") ??
           getDefaultModel("opencode");
+        const normalized = isModelTemporarilyDisabled(preferredModel)
+          ? OPENCODE_DEFAULT_MODEL_SLUG
+          : preferredModel;
         const parsed = parseOpencodeModelSlug(normalized);
         if (parsed) {
           return { slug: normalized, providerID: parsed.providerID, modelID: parsed.modelID };
@@ -1882,6 +2113,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
               ? new Date(sessionInfo.time.updated).toISOString()
               : nowIso(),
           activeTurnId: null,
+          activeTurnStartedAtMs: null,
         };
         sessions.set(input.threadId, session);
         threadBySessionId.set(session.sessionId, input.threadId);
@@ -1994,6 +2226,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
 
           const turnId = TurnId.makeUnsafe(randomUUID());
           session.activeTurnId = turnId;
+          session.activeTurnStartedAtMs = Date.now();
           session.status = "running";
           session.updatedAt = nowIso();
 
@@ -2101,6 +2334,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
 
         const turnId = TurnId.makeUnsafe(randomUUID());
         session.activeTurnId = turnId;
+        session.activeTurnStartedAtMs = Date.now();
         session.status = "running";
         session.updatedAt = nowIso();
         const promptBody = buildOpencodePromptAsyncBody({
@@ -2178,6 +2412,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           body: {},
         });
         session.activeTurnId = null;
+        session.activeTurnStartedAtMs = null;
         session.status = "ready";
         session.updatedAt = nowIso();
         if (activeTurnId) {
@@ -2296,8 +2531,8 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         const turns: Array<{ id: TurnId; items: Array<unknown> }> = [];
         let current: { id: TurnId; items: Array<unknown> } | null = null;
         for (const message of messages) {
-          const role = message.info?.role;
-          const id = message.info?.id;
+          const role = opencodeMessageRole(message);
+          const id = opencodeMessageId(message);
           if (role === "user") {
             current = { id: TurnId.makeUnsafe(id ?? randomUUID()), items: [message] };
             turns.push(current);
@@ -2334,12 +2569,12 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         });
         const userMessageIds = messages
           .filter(
-            (message): message is OpencodeMessage & { info: { id: string; role: "user" } } =>
-              message.info?.role === "user" &&
-              typeof message.info.id === "string" &&
-              message.info.id.length > 0,
+            (message): message is OpencodeMessage =>
+              opencodeMessageRole(message) === "user" &&
+              typeof opencodeMessageId(message) === "string" &&
+              opencodeMessageId(message)!.length > 0,
           )
-          .map((message) => message.info.id);
+          .map((message) => opencodeMessageId(message)!);
         if (numTurns > userMessageIds.length) {
           return yield* new ProviderAdapterValidationError({
             provider: PROVIDER,
@@ -2487,9 +2722,13 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
               if (!modelId || !modelName) {
                 return [];
               }
+              const slug = `${providerId}/${modelId}`;
+              if (isModelTemporarilyDisabled(slug)) {
+                return [];
+              }
               return [
                 {
-                  slug: `${providerId}/${modelId}`,
+                  slug,
                   name: `${providerName} · ${modelName}`,
                 },
               ];

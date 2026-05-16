@@ -215,6 +215,22 @@ function makeFakeCodexAdapter(provider: ProviderKind = "codex") {
 const sleep = (ms: number) =>
   Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, ms)));
 
+const waitFor = (
+  predicate: () => boolean,
+  timeoutMs = 1_000,
+  intervalMs = 20,
+) =>
+  Effect.promise(async () => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (predicate()) {
+        return;
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, intervalMs));
+    }
+    throw new Error("Timed out waiting for provider runtime events.");
+  });
+
 function makeProviderServiceLayer() {
   const codex = makeFakeCodexAdapter();
   const registry: typeof ProviderAdapterRegistry.Service = {
@@ -668,7 +684,7 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
       };
 
       fanout.codex.emit(completedEvent);
-      yield* sleep(20);
+      yield* waitFor(() => Effect.runSync(Ref.get(eventsRef)).some((entry) => entry.type === "turn.completed"));
 
       const events = yield* Ref.get(eventsRef);
       yield* Fiber.interrupt(consumer);

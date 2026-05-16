@@ -4,6 +4,10 @@ import type {
   ComputerUseListAppsResult,
 } from "@t3tools/contracts";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import os from "node:os";
+import path from "node:path";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 
 import {
   executeListAppWindows,
@@ -86,8 +90,18 @@ interface TopLevelWindowCandidate {
 export const COMPUTER_USE_APP_ICON_ROUTE_PATH = "/computer-use/app-icon";
 
 const appIconCache = new Map<string, Buffer | null>();
+const inFlightAppIconCacheKeys = new Set<string>();
 const recentComputerUseLaunches = new Map<string, number>();
 const COMPUTER_USE_LAUNCH_COOLDOWN_MS = 8_000;
+const DEFAULT_T3_STATE_DIR = path.join(os.homedir(), ".t3", "dev");
+const T3_STATE_DIR = process.env.T3CODE_STATE_DIR?.trim() || DEFAULT_T3_STATE_DIR;
+const COMPUTER_USE_APP_ICON_CACHE_DIR = path.join(
+  T3_STATE_DIR,
+  "cache",
+  "computer-use",
+  "app-icons",
+);
+const COMPUTER_USE_APP_ICON_PREWARM_LIMIT = 10;
 
 async function focusAndResizeComputerUseWindow(input: {
   readonly pid: number;
@@ -402,7 +416,7 @@ function computerUseAppIconUrl(input: {
   if (!input.iconBaseUrl) return null;
   const params = new URLSearchParams();
   params.set("name", input.name);
-  if (input.pid > 0) params.set("pid", String(input.pid));
+  if (input.pid > 0 && !input.launchId) params.set("pid", String(input.pid));
   if (input.launchId) params.set("launchId", input.launchId);
   return `${input.iconBaseUrl}${COMPUTER_USE_APP_ICON_ROUTE_PATH}?${params.toString()}`;
 }
@@ -418,9 +432,69 @@ function appIconCacheKey(input: {
 }): string {
   return JSON.stringify({
     launchId: input.launchId ?? "",
-    name: input.name ?? "",
-    pid: input.pid ?? 0,
+    name: normalizeAppName(input.name ?? ""),
+    pid: input.launchId || input.name ? 0 : (input.pid ?? 0),
   });
+}
+
+function appIconCacheDigest(cacheKey: string): string {
+  return createHash("sha1").update(cacheKey).digest("hex");
+}
+
+export function resolveComputerUseAppIconCachePaths(input: {
+  readonly cacheKey: string;
+  readonly stateDir?: string | undefined;
+}): {
+  readonly iconPath: string;
+  readonly missPath: string;
+} {
+  const cacheDir = input.stateDir?.trim()
+    ? path.join(input.stateDir.trim(), "cache", "computer-use", "app-icons")
+    : COMPUTER_USE_APP_ICON_CACHE_DIR;
+  const digest = appIconCacheDigest(input.cacheKey);
+  return {
+    iconPath: path.join(cacheDir, `${digest}.png`),
+    missPath: path.join(cacheDir, `${digest}.miss`),
+  };
+}
+
+async function pathExists(filePath: string): Promise<boolean> {
+  try {
+    await stat(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function readPersistedComputerUseAppIcon(input: {
+  readonly cacheKey: string;
+  readonly stateDir?: string | undefined;
+}): Promise<Buffer | null | undefined> {
+  const paths = resolveComputerUseAppIconCachePaths(input);
+  if (await pathExists(paths.iconPath)) {
+    return readFile(paths.iconPath);
+  }
+  if (await pathExists(paths.missPath)) {
+    return null;
+  }
+  return undefined;
+}
+
+export async function writePersistedComputerUseAppIcon(input: {
+  readonly cacheKey: string;
+  readonly bytes: Buffer | null;
+  readonly stateDir?: string | undefined;
+}): Promise<void> {
+  const paths = resolveComputerUseAppIconCachePaths(input);
+  await mkdir(path.dirname(paths.iconPath), { recursive: true });
+  if (input.bytes) {
+    await writeFile(paths.iconPath, input.bytes);
+    await rm(paths.missPath, { force: true });
+    return;
+  }
+  await writeFile(paths.missPath, "");
+  await rm(paths.iconPath, { force: true });
 }
 
 export async function resolveComputerUseAppIcon(input: {
@@ -432,6 +506,11 @@ export async function resolveComputerUseAppIcon(input: {
   const cacheKey = appIconCacheKey(input);
   if (appIconCache.has(cacheKey)) {
     return appIconCache.get(cacheKey) ?? null;
+  }
+  const persisted = await readPersistedComputerUseAppIcon({ cacheKey }).catch(() => undefined);
+  if (persisted !== undefined) {
+    appIconCache.set(cacheKey, persisted);
+    return persisted;
   }
 
   const payload = Buffer.from(JSON.stringify(input), "utf8").toString("base64");
@@ -551,10 +630,57 @@ foreach ($path in $paths) {
       ? (raw as { base64: string }).base64
       : null;
   const bytes = base64 ? Buffer.from(base64, "base64") : null;
-  if (bytes) {
-    appIconCache.set(cacheKey, bytes);
-  }
+  appIconCache.set(cacheKey, bytes);
+  void writePersistedComputerUseAppIcon({ cacheKey, bytes }).catch(() => undefined);
   return bytes;
+}
+
+function compareComputerUseAppIconPrewarmPriority(
+  left: ComputerUseAppSummary,
+  right: ComputerUseAppSummary,
+): number {
+  if ((left.isFrontmost ?? false) !== (right.isFrontmost ?? false)) {
+    return left.isFrontmost ? -1 : 1;
+  }
+  const leftRunning = left.isRunning !== false;
+  const rightRunning = right.isRunning !== false;
+  if (leftRunning !== rightRunning) {
+    return leftRunning ? -1 : 1;
+  }
+  const leftWindowCount = left.windows.length;
+  const rightWindowCount = right.windows.length;
+  if (leftWindowCount !== rightWindowCount) {
+    return rightWindowCount - leftWindowCount;
+  }
+  return left.name.localeCompare(right.name, undefined, { sensitivity: "base" });
+}
+
+async function prewarmComputerUseAppIcons(apps: ReadonlyArray<ComputerUseAppSummary>): Promise<void> {
+  const candidates = apps
+    .filter((app) => app.launchId || app.pid > 0)
+    .toSorted(compareComputerUseAppIconPrewarmPriority)
+    .slice(0, COMPUTER_USE_APP_ICON_PREWARM_LIMIT);
+
+  for (const app of candidates) {
+    const cacheKey = appIconCacheKey({
+      name: app.name,
+      pid: app.pid,
+      launchId: app.launchId,
+    });
+    if (appIconCache.has(cacheKey) || inFlightAppIconCacheKeys.has(cacheKey)) {
+      continue;
+    }
+    inFlightAppIconCacheKeys.add(cacheKey);
+    try {
+      await resolveComputerUseAppIcon({
+        name: app.name,
+        pid: app.pid,
+        launchId: app.launchId,
+      });
+    } finally {
+      inFlightAppIconCacheKeys.delete(cacheKey);
+    }
+  }
 }
 
 async function listInstalledWindowsApps(): Promise<InstalledWindowsApp[]> {
@@ -1578,5 +1704,6 @@ export async function listComputerUseApps(input: {
   const apps = [...appsByIdentity.values()].toSorted((left, right) =>
     left.name.localeCompare(right.name, undefined, { sensitivity: "base" }),
   );
+  void prewarmComputerUseAppIcons(apps).catch(() => undefined);
   return { apps, status: { available: true } };
 }

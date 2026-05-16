@@ -94,6 +94,25 @@ function skillItemsForComposer(
     });
 }
 
+function desktopAppSearchBlob(app: ComputerUseAppSummary): string {
+  const windowTitles = app.windows.map((window) => window.title).join("\n");
+  const mentionName = app.name
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[^\w.-]+/g, "")
+    .replace(/^-+|-+$/g, "");
+  return normalizeProviderDiscoveryText(
+    [
+      app.name,
+      mentionName,
+      app.appId,
+      app.launchId ?? "",
+      windowTitles,
+      app.isRunning === false ? "installed app" : `${app.windows.length} windows`,
+    ].join("\n"),
+  );
+}
+
 export function useComposerCommandMenuItems(input: {
   composerTrigger: ComposerTrigger | null;
   provider: ProviderKind;
@@ -140,9 +159,8 @@ export function useComposerCommandMenuItems(input: {
       const appItems: ComposerCommandItem[] = desktopApps
         .filter((app) => {
           if (!normalizedQuery) return true;
-          return normalizeProviderDiscoveryText(app.name).includes(normalizedQuery);
+          return desktopAppSearchBlob(app).includes(normalizedQuery);
         })
-        .slice(0, 8)
         .map((app) => ({
           id: `desktop-app:${app.appId}`,
           type: "desktop-app" as const,

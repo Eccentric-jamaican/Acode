@@ -12,6 +12,7 @@
 import {
   DEFAULT_SERVER_SETTINGS,
   NonNegativeInt,
+  type ProviderKind,
   ThreadId,
   ProviderInterruptTurnInput,
   ProviderRespondToRequestInput,
@@ -26,6 +27,7 @@ import { Effect, Layer, Option, PubSub, Queue, Schema, SchemaIssue, Stream } fro
 
 import { ProviderValidationError } from "../Errors.ts";
 import { ProviderAdapterRegistry } from "../Services/ProviderAdapterRegistry.ts";
+import { ProviderRegistry } from "../Services/ProviderRegistry.ts";
 import { ProviderService, type ProviderServiceShape } from "../Services/ProviderService.ts";
 import {
   ProviderSessionDirectory,
@@ -125,6 +127,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         : undefined);
 
     const registry = yield* ProviderAdapterRegistry;
+    const providerRegistry = Option.getOrUndefined(yield* Effect.serviceOption(ProviderRegistry));
     const directory = yield* ProviderSessionDirectory;
     const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
     const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
@@ -139,6 +142,11 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         Effect.flatMap((canonicalEvent) => PubSub.publish(runtimeEventPubSub, canonicalEvent)),
         Effect.asVoid,
       );
+
+    const refreshOpenCodeProviderStatusIfNeeded = (provider: ProviderKind) =>
+      provider === "opencode"
+        ? (providerRegistry?.refresh("opencode").pipe(Effect.ignore) ?? Effect.void)
+        : Effect.void;
 
     const upsertSessionBinding = (
       session: ProviderSession,
@@ -219,6 +227,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         }
 
         yield* upsertSessionBinding(resumed, input.binding.threadId);
+        yield* refreshOpenCodeProviderStatusIfNeeded(resumed.provider);
         yield* analytics.record("provider.session.recovered", {
           provider: resumed.provider,
           strategy: "resume-thread",
@@ -289,6 +298,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         }
 
         yield* upsertSessionBinding(session, threadId);
+        yield* refreshOpenCodeProviderStatusIfNeeded(session.provider);
         yield* analytics.record("provider.session.started", {
           provider: session.provider,
           runtimeMode: input.runtimeMode,
@@ -342,6 +352,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
           attachmentCount: input.attachments.length,
           hasInput: typeof input.input === "string" && input.input.trim().length > 0,
         });
+        yield* refreshOpenCodeProviderStatusIfNeeded(routed.adapter.provider);
         return turn;
       });
 

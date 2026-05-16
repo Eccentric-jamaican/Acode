@@ -53,7 +53,11 @@ import {
   reduceDesktopUpdateStateOnUpdateAvailable,
 } from "./updateMachine";
 import { importLegacyDesktopStateIfNeeded } from "./legacyStateImport";
-import { resolveDesktopStateDir } from "./statePaths";
+import {
+  resolveDesktopElectronSessionDataDir,
+  resolveDesktopElectronUserDataDir,
+  resolveDesktopStateDir,
+} from "./statePaths";
 import { getDesktopWindowChromeMetrics } from "./windowChromeMetrics";
 
 fixPath();
@@ -207,9 +211,15 @@ const legacyStateImport = importLegacyDesktopStateIfNeeded({
   targetStateDir: STATE_DIR,
   explicitStateDir: process.env.T3CODE_STATE_DIR,
 });
-const ELECTRON_USER_DATA_DIR =
-  process.env.T3CODE_ELECTRON_USER_DATA_DIR?.trim() ||
-  Path.join(app.getPath("appData"), APP_DISPLAY_NAME);
+const ELECTRON_USER_DATA_DIR = resolveDesktopElectronUserDataDir({
+  stateDir: STATE_DIR,
+  appDataDir: app.getPath("appData"),
+  appDisplayName: APP_DISPLAY_NAME,
+  isDevelopment,
+  explicitElectronUserDataDir: process.env.T3CODE_ELECTRON_USER_DATA_DIR,
+  devInstance: process.env.T3CODE_DEV_INSTANCE,
+});
+const ELECTRON_SESSION_DATA_DIR = resolveDesktopElectronSessionDataDir(ELECTRON_USER_DATA_DIR);
 const DESKTOP_SCHEME = "t3";
 function resolveExplicitDevRoot(): string | null {
   const commandLineValue = app.commandLine.getSwitchValue("t3code-dev-root")?.trim();
@@ -379,8 +389,10 @@ function hideComputerOverlay(): void {
   computerOverlayWindow.hide();
 }
 
+FS.mkdirSync(ELECTRON_USER_DATA_DIR, { recursive: true });
+FS.mkdirSync(ELECTRON_SESSION_DATA_DIR, { recursive: true });
 app.setPath("userData", ELECTRON_USER_DATA_DIR);
-app.setPath("sessionData", Path.join(ELECTRON_USER_DATA_DIR, "session"));
+app.setPath("sessionData", ELECTRON_SESSION_DATA_DIR);
 
 function logTimestamp(): string {
   return new Date().toISOString();

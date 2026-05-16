@@ -590,7 +590,14 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
             }).catch(() => null),
           );
           if (!iconBytes) {
-            respond(404, { "Content-Type": "text/plain" }, "Not Found");
+            respond(
+              404,
+              {
+                "Content-Type": "text/plain",
+                "Cache-Control": "public, max-age=3600",
+              },
+              "Not Found",
+            );
             return;
           }
           respond(

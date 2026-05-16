@@ -47,7 +47,26 @@ function createEventStream(
       return {
         next: async () => {
           if (index < events.length) {
-            return { done: false, value: events[index++] };
+            const nextEntry = events[index++];
+            if (
+              typeof nextEntry === "object" &&
+              nextEntry !== null &&
+              "delayMs" in nextEntry &&
+              "event" in nextEntry
+            ) {
+              const delayMs =
+                typeof (nextEntry as { delayMs?: unknown }).delayMs === "number"
+                  ? (nextEntry as { delayMs: number }).delayMs
+                  : 0;
+              if (delayMs > 0) {
+                await new Promise((resolve) => setTimeout(resolve, delayMs));
+              }
+              return {
+                done: false,
+                value: (nextEntry as { event: unknown }).event,
+              };
+            }
+            return { done: false, value: nextEntry };
           }
           return createAbortableStream(signal)[Symbol.asyncIterator]().next();
         },
@@ -374,7 +393,7 @@ describe("OpencodeAdapter native commands", () => {
     expect(fixture.sessionCommand).not.toHaveBeenCalled();
   });
 
-  it("preserves a blank OpenCode binary path when settings persist an empty value", async () => {
+  it("resolves the default OpenCode binary path when settings persist an empty value", async () => {
     const fixture = createOpenCodeFixture();
 
     await runWithFixture(
@@ -404,7 +423,7 @@ describe("OpencodeAdapter native commands", () => {
 
     expect(fixture.createRuntime).toHaveBeenCalledWith(
       expect.objectContaining({
-        binaryPath: "",
+        binaryPath: expect.stringMatching(/opencode/i),
       }),
     );
   });
@@ -472,6 +491,143 @@ describe("OpencodeAdapter native commands", () => {
     expect(fixture.sessionCommand).toHaveBeenCalledTimes(1);
     expect(fixture.eventSubscribe).toHaveBeenCalledTimes(1);
     expect(events.some((event) => event.type === "runtime.warning")).toBe(false);
+  });
+
+  it("backfills assistant completion from session history when OpenCode only reports idle", async () => {
+    const fixture = createOpenCodeFixture({
+      events: [
+        {
+          delayMs: 100,
+          event: {
+            type: "session.status",
+            properties: {
+              sessionID: "session-1",
+              status: { type: "busy" },
+            },
+          },
+        },
+        {
+          delayMs: 100,
+          event: {
+            type: "session.status",
+            properties: {
+              sessionID: "session-1",
+              status: { type: "idle" },
+            },
+          },
+        },
+      ],
+    });
+    const events: ProviderRuntimeEvent[] = [];
+    const originalFetch = globalThis.fetch;
+    const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
+      const url = new URL(
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.toString()
+            : input.url,
+      );
+      if (url.pathname === "/session/session-1/message") {
+        return new Response(
+          JSON.stringify({
+            data: [
+              {
+                id: "msg-user-1",
+                role: "user",
+              },
+              {
+                id: "msg-assistant-1",
+                role: "assistant",
+                time: { completed: Date.now() },
+                parts: [{ type: "text", text: "Hello from OpenCode" }],
+              },
+            ],
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        );
+      }
+      throw new Error(`Unexpected fetch: ${url.toString()}`);
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    try {
+      await runWithFixture(
+        fixture,
+        Effect.gen(function* () {
+          const adapter = yield* OpencodeAdapter;
+          const collector = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+            Effect.sync(() => {
+              events.push(event);
+            }),
+          ).pipe(Effect.forkChild);
+
+          try {
+            const threadId = asThreadId("thread-history-backfill");
+            yield* adapter.startSession({
+              threadId,
+              provider: "opencode",
+              cwd: process.cwd(),
+              model: "openai/gpt-4.1",
+              runtimeMode: "full-access",
+            });
+
+            yield* adapter.sendTurn({
+              threadId,
+              input: "hello",
+            });
+
+            yield* Effect.promise(async () => {
+              for (let index = 0; index < 40; index += 1) {
+                if (
+                  events.some(
+                    (event) =>
+                      event.type === "item.completed" && String(event.itemId) === "msg-assistant-1",
+                  ) &&
+                  events.some((event) => event.type === "turn.completed")
+                ) {
+                  return;
+                }
+                await new Promise((resolve) => setTimeout(resolve, 25));
+              }
+              const fetchCalls = fetchMock.mock.calls
+                .map((call: ReadonlyArray<unknown>) => String(call[0]))
+                .join(", ");
+              throw new Error(
+                `Timed out waiting for assistant backfill events. Seen: ${events
+                  .map((event) => `${event.type}:${String(event.itemId ?? "")}`)
+                  .join(", ")}. Fetches: ${fetchCalls}`,
+              );
+            });
+
+            yield* adapter.stopAll();
+          } finally {
+            yield* Fiber.interrupt(collector);
+          }
+        }),
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+
+    const assistantCompletionIndex = events.findIndex(
+      (event) => event.type === "item.completed" && String(event.itemId) === "msg-assistant-1",
+    );
+    const turnCompletedIndex = events.findIndex((event) => event.type === "turn.completed");
+
+    expect(assistantCompletionIndex).toBeGreaterThan(-1);
+    expect(turnCompletedIndex).toBeGreaterThan(assistantCompletionIndex);
+    expect(String(fetchMock.mock.calls[0]?.[0] ?? "")).toContain("/session/session-1/message");
+
+    const assistantCompletion = events[assistantCompletionIndex];
+    expect(assistantCompletion?.payload).toMatchObject({
+      itemType: "assistant_message",
+      status: "completed",
+      detail: "Hello from OpenCode",
+    });
   });
 
   it("surfaces OpenCode Question tool parts as answerable user input", async () => {

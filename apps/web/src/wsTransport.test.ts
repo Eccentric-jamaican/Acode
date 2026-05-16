@@ -55,6 +55,7 @@ class MockWebSocket {
 }
 
 const originalWebSocket = globalThis.WebSocket;
+const originalFetch = globalThis.fetch;
 
 function getSocket(): MockWebSocket {
   const socket = sockets.at(-1);
@@ -76,10 +77,12 @@ beforeEach(() => {
   });
 
   globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+  globalThis.fetch = vi.fn(async () => new Response(null, { status: 204 })) as typeof fetch;
 });
 
 afterEach(() => {
   globalThis.WebSocket = originalWebSocket;
+  globalThis.fetch = originalFetch;
   vi.restoreAllMocks();
 });
 
@@ -99,6 +102,28 @@ describe("WsTransport", () => {
       "Desktop bridge is available but did not provide a WebSocket URL.",
     );
     expect(sockets).toHaveLength(0);
+  });
+
+  it("waits for an HTTP readiness probe before opening an auto-derived websocket", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn<() => Promise<Response>>()
+      .mockRejectedValueOnce(new Error("ECONNREFUSED"))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    const transport = new WsTransport();
+
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sockets).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(500);
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sockets).toHaveLength(1);
+
+    transport.dispose();
   });
 
   it("routes valid push envelopes to channel listeners", () => {

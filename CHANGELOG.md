@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.51] - 2026-05-16
+
+### Added
+- Added persistent on-disk caching for Windows desktop app icons used by T3 Computer Use, along with server and client-side icon prewarming for the desktop app mention menu.
+- Added focused coverage for desktop state-path resolution, Codex overlay cleanup behavior, OpenCode idle-history completion recovery, browser navigation helper behavior, and computer-use icon cache persistence.
+
+### Changed
+- Improved desktop app mention routing so explicit `@App` requests are matched more reliably by name, mention token, launch ID, app ID, and window title.
+- Strengthened desktop-app prompt injection so explicit app-targeted turns instruct providers to use `t3_computer` rather than answering from reasoning alone.
+- Preserved selected desktop app targets across follow-up turns in the composer so multi-step UI tasks can continue without re-tagging the app every turn.
+- Moved Electron dev `userData` and `sessionData` under the T3 state directory with dev-instance isolation to reduce Chromium cache conflicts across local runs.
+- Simplified the integrated browser omnibox so it behaves like a plain address bar without a suggestion popup.
+
+### Fixed
+- Fixed OpenCode assistant responses disappearing when the runtime only reported an idle/ready session state by backfilling assistant completions from session history.
+- Fixed Codex and OpenCode desktop-app targeting regressions so `t3_computer` is available and selected app mentions resolve more consistently in provider turns.
+- Fixed Windows T3 Computer Use helper refresh/install failures when `bridge.exe` was locked by another live process by reusing the installed helper instead of taking computer use offline.
+- Fixed Codex full-access startup failures caused by transient Windows permission errors while pruning stale per-thread `CODEX_HOME` overlays.
+- Fixed integrated browser URL handling so URL-like input no longer generated a misleading “search this URL” suggestion before the omnibox suggestion popup was removed.
+
 ## [0.2.44] - 2026-05-03
 
 ### Added

@@ -26,7 +26,7 @@ import {
 const DEFAULT_HOSTNAME = "127.0.0.1";
 // Cold OpenCode startup on Windows can take noticeably longer than a few seconds,
 // especially when the CLI initializes its local database and provider state.
-const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 30_000;
+const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 90_000;
 const OPENCODE_SERVER_READY_PREFIX = "opencode server listening";
 const PORT_POLL_INTERVAL_MS = 200;
 const DEFAULT_OPENCODE_BINARY_PATH = "opencode";

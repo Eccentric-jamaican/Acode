@@ -323,7 +323,7 @@ const ComposerCommandMenuItem = memo(function ComposerCommandMenuItem(props: {
             alt=""
             aria-hidden="true"
             className="size-4 shrink-0 rounded-sm object-contain"
-            loading="lazy"
+            loading="eager"
             draggable={false}
           />
         ) : (

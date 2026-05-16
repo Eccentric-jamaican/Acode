@@ -1,6 +1,29 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
-import { classifyComputerUseApp } from "./computerUseService";
+import { afterEach, describe, expect, it } from "vitest";
+
+import {
+  classifyComputerUseApp,
+  readPersistedComputerUseAppIcon,
+  resolveComputerUseAppIconCachePaths,
+  writePersistedComputerUseAppIcon,
+} from "./computerUseService";
+
+const tempDirs: string[] = [];
+
+function makeTempDir(prefix: string): string {
+  const dir = mkdtempSync(path.join(os.tmpdir(), prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 describe("classifyComputerUseApp", () => {
   it("keeps user-facing installed apps in the desktop group", () => {
@@ -70,5 +93,46 @@ describe("classifyComputerUseApp", () => {
         windowCount: 0,
       }),
     ).toBe("background");
+  });
+});
+
+describe("computer use icon cache", () => {
+  it("persists cached icon bytes to disk", async () => {
+    const stateDir = makeTempDir("t3-computer-icon-cache-");
+    const cacheKey = JSON.stringify({
+      launchId: "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0!ChatGPT",
+      name: "chatgpt",
+      pid: 0,
+    });
+    const bytes = Buffer.from("png-bytes");
+
+    await writePersistedComputerUseAppIcon({
+      cacheKey,
+      bytes,
+      stateDir,
+    });
+
+    const persisted = await readPersistedComputerUseAppIcon({ cacheKey, stateDir });
+    expect(persisted?.equals(bytes)).toBe(true);
+  });
+
+  it("persists negative cache entries for missing icons", async () => {
+    const stateDir = makeTempDir("t3-computer-icon-cache-");
+    const cacheKey = JSON.stringify({
+      launchId: "missing-app",
+      name: "missing-app",
+      pid: 0,
+    });
+
+    await writePersistedComputerUseAppIcon({
+      cacheKey,
+      bytes: null,
+      stateDir,
+    });
+
+    const persisted = await readPersistedComputerUseAppIcon({ cacheKey, stateDir });
+    expect(persisted).toBeNull();
+    const paths = resolveComputerUseAppIconCachePaths({ cacheKey, stateDir });
+    expect(paths.missPath.endsWith(".miss")).toBe(true);
   });
 });

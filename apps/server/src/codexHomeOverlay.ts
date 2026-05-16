@@ -153,6 +153,24 @@ const CODEX_HOME_VOLATILE_ROOT_FILE_PATTERNS = [
   /^transcription-history\.jsonl$/i,
   /^version\.json$/i,
 ];
+const CODEX_HOME_OVERLAY_ROOT_DIRNAME = "codex-home-overlays";
+const DEFAULT_STALE_OVERLAY_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+export function isIgnorableOverlayRemovalError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const code = "code" in error ? (error as NodeJS.ErrnoException).code : undefined;
+  if (code === "EPERM" || code === "EBUSY" || code === "EACCES") {
+    return true;
+  }
+  const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return (
+    message.includes("permission denied") ||
+    message.includes("resource busy") ||
+    message.includes("access is denied")
+  );
+}
 
 function isVolatileCodexHomeEntry(srcPath: string, baseHomePath: string): boolean {
   const relativePath = Path.relative(baseHomePath, srcPath);
@@ -273,6 +291,72 @@ export interface CodexHomeOverlayInput {
   bridgeToken?: string | undefined;
 }
 
+function codexHomeOverlayRoot(stateDir: string): string {
+  return Path.join(stateDir, CODEX_HOME_OVERLAY_ROOT_DIRNAME);
+}
+
+function normalizePathForComparison(value: string): string {
+  return Path.resolve(value).replace(/[\\/]+$/u, "").toLowerCase();
+}
+
+export function removeCodexHomeOverlay(overlayPath: string): void {
+  const normalized = overlayPath.trim();
+  if (!normalized) {
+    return;
+  }
+  FS.rmSync(normalized, { recursive: true, force: true });
+}
+
+export function pruneStaleCodexHomeOverlays(input: {
+  readonly stateDir: string;
+  readonly preservePaths?: ReadonlyArray<string>;
+  readonly maxAgeMs?: number;
+  readonly nowMs?: number;
+}): void {
+  const overlayRoot = codexHomeOverlayRoot(input.stateDir);
+  if (!FS.existsSync(overlayRoot)) {
+    return;
+  }
+
+  const nowMs = input.nowMs ?? Date.now();
+  const maxAgeMs = input.maxAgeMs ?? DEFAULT_STALE_OVERLAY_MAX_AGE_MS;
+  const preserved = new Set(
+    (input.preservePaths ?? [])
+      .map((candidate) => candidate.trim())
+      .filter((candidate) => candidate.length > 0)
+      .map(normalizePathForComparison),
+  );
+
+  for (const entry of FS.readdirSync(overlayRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    const candidatePath = Path.join(overlayRoot, entry.name);
+    if (preserved.has(normalizePathForComparison(candidatePath))) {
+      continue;
+    }
+
+    let stat: FS.Stats;
+    try {
+      stat = FS.statSync(candidatePath);
+    } catch {
+      continue;
+    }
+
+    if (nowMs - stat.mtimeMs < maxAgeMs) {
+      continue;
+    }
+
+    try {
+      removeCodexHomeOverlay(candidatePath);
+    } catch (error) {
+      if (!isIgnorableOverlayRemovalError(error)) {
+        throw error;
+      }
+    }
+  }
+}
+
 export function createCodexHomeOverlay(input: CodexHomeOverlayInput): string | undefined {
   const bridgeUrl = input.bridgeUrl?.trim();
   const bridgeToken = input.bridgeToken?.trim();
@@ -280,8 +364,7 @@ export function createCodexHomeOverlay(input: CodexHomeOverlayInput): string | u
 
   const baseHomePath = resolveBaseCodexHome(input.preferredHomePath);
   const overlayDir = Path.join(
-    input.stateDir,
-    "codex-home-overlays",
+    codexHomeOverlayRoot(input.stateDir),
     `${sanitizeSegment(String(input.threadId))}-${Date.now()}`,
   );
   FS.mkdirSync(overlayDir, { recursive: true });
