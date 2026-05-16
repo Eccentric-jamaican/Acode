@@ -69,7 +69,7 @@
     }
   },
   "scripts": {
-    "prepare": "effect-language-service patch",
+    "prepare": "node ../../scripts/effect-language-service-prepare.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

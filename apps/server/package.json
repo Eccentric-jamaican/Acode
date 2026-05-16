@@ -1,6 +1,6 @@
 {
   "name": "t3",
-  "version": "0.2.53",
+  "version": "0.2.54",
   "repository": {
     "type": "git",
     "url": "https://github.com/Eccentric-jamaican/t3code",
@@ -17,7 +17,7 @@
     "dev": "node scripts/dev.mjs",
     "build": "node scripts/cli.ts build",
     "start": "node dist/index.mjs",
-    "prepare": "effect-language-service patch",
+    "prepare": "node ../../scripts/effect-language-service-prepare.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --exclude src/git/Layers/GitCore.test.ts && vitest run src/git/Layers/GitCore.test.ts -t \"shell process execution|initGitRepo|listGitBranches|checkoutGitBranch|createGitBranch|renameGitBranch\" && vitest run src/git/Layers/GitCore.test.ts -t \"createGitWorktree|full flow\" && vitest run src/git/Layers/GitCore.test.ts -t \"GitCore\""
   },

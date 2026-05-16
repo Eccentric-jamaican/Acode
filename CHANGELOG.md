@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.54] - 2026-05-16
+
+### Fixed
+- Fixed workspace `prepare` scripts to skip the Effect language-service patch in CI while still allowing normal dependency install hooks like `node-pty` to run, unblocking Linux test and release preflight jobs.
+
 ## [0.2.53] - 2026-05-16
 
 ### Fixed
