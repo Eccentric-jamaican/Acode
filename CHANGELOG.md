@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.53] - 2026-05-16
+
+### Fixed
+- Fixed GitHub Actions CI and release installs to skip workspace `prepare` scripts, preventing `effect-language-service patch` crashes from blocking desktop release preflight and finalize steps.
+
 ## [0.2.52] - 2026-05-16
 
 ### Fixed
