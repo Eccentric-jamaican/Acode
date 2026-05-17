@@ -1,4 +1,5 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as FS from "node:fs";
 import * as Net from "node:net";
 import * as OS from "node:os";
@@ -51,35 +52,119 @@ function resolveComputerMcpServerPath(): string {
   return resolveSiblingRuntimePath("computerMcpServer");
 }
 
+function isWindowsElectronHost(): boolean {
+  return process.platform === "win32" && typeof process.versions.electron === "string";
+}
+
+function cmdEscapeEnvValue(value: string): string {
+  return value
+    .replace(/\^/g, "^^")
+    .replace(/%/g, "%%")
+    .replace(/!/g, "^^!")
+    .replace(/\r?\n/g, " ");
+}
+
+export function resolveOpenCodeMcpWrapperPath(input: {
+  readonly stateDir: string | undefined;
+  readonly wrapperName: string;
+  readonly scriptPath: string;
+  readonly env: Record<string, string>;
+}): string {
+  const wrapperRoot = Path.join(
+    input.stateDir ?? Path.join(OS.homedir(), ".t3", "dev"),
+    "helpers",
+    "opencode-mcp",
+  );
+  const hash = createHash("sha1")
+    .update(JSON.stringify({ scriptPath: input.scriptPath, env: input.env }))
+    .digest("hex")
+    .slice(0, 12);
+  FS.mkdirSync(wrapperRoot, { recursive: true });
+  const wrapperPath = Path.join(wrapperRoot, `${input.wrapperName}-${hash}.cmd`);
+  const lines = [
+    "@echo off",
+    "setlocal",
+    ...Object.entries(input.env).map(([key, value]) => `set "${key}=${cmdEscapeEnvValue(value)}"`),
+    `"${process.execPath}" "${input.scriptPath}"`,
+    "",
+  ];
+  const content = lines.join("\r\n");
+  if (!FS.existsSync(wrapperPath) || FS.readFileSync(wrapperPath, "utf8") !== content) {
+    FS.writeFileSync(wrapperPath, content, "utf8");
+  }
+  return wrapperPath;
+}
+
+function resolveOpenCodeLocalMcpLaunch(input: {
+  readonly stateDir: string | undefined;
+  readonly wrapperName: string;
+  readonly scriptPath: string;
+  readonly env: Record<string, string>;
+}): { readonly command: string[]; readonly environment?: Record<string, string> } {
+  if (!isWindowsElectronHost()) {
+    return {
+      command: [process.execPath, input.scriptPath],
+      environment: input.env,
+    };
+  }
+  return {
+    command: [
+      resolveOpenCodeMcpWrapperPath({
+        stateDir: input.stateDir,
+        wrapperName: input.wrapperName,
+        scriptPath: input.scriptPath,
+        env: {
+          ELECTRON_RUN_AS_NODE: "1",
+          ...input.env,
+        },
+      }),
+    ],
+  };
+}
+
 function buildOpenCodeInlineConfig(input: {
   readonly workspaceCwd: string | undefined;
   readonly stateDir: string | undefined;
 }): Record<string, unknown> {
+  const imagegenEnv = {
+    ELECTRON_RUN_AS_NODE: "1",
+    CODEX_HOME: process.env.CODEX_HOME ?? Path.join(OS.homedir(), ".codex"),
+    T3_IMAGEGEN_WORKSPACE: input.workspaceCwd ?? process.cwd(),
+  };
+  const imagegenLaunch = resolveOpenCodeLocalMcpLaunch({
+    stateDir: input.stateDir,
+    wrapperName: "t3-imagegen",
+    scriptPath: resolveImagegenMcpServerPath(),
+    env: imagegenEnv,
+  });
+  const computerEnv = {
+    ELECTRON_RUN_AS_NODE: "1",
+    T3CODE_STATE_DIR: input.stateDir ?? Path.join(OS.homedir(), ".t3", "dev"),
+    T3_COMPUTER_PROJECT_ID: "opencode",
+    T3_COMPUTER_THREAD_ID: "opencode",
+    T3_COMPUTER_TEXT_RESULT_BRIDGE: "1",
+  };
+  const computerLaunch = resolveOpenCodeLocalMcpLaunch({
+    stateDir: input.stateDir,
+    wrapperName: "t3-computer",
+    scriptPath: resolveComputerMcpServerPath(),
+    env: computerEnv,
+  });
   return {
     mcp: {
       t3_imagegen: {
         type: "local",
-        command: [process.execPath, resolveImagegenMcpServerPath()],
+        command: imagegenLaunch.command,
         enabled: true,
         timeout: 120_000,
-        environment: {
-          ELECTRON_RUN_AS_NODE: "1",
-          CODEX_HOME: process.env.CODEX_HOME ?? Path.join(OS.homedir(), ".codex"),
-          T3_IMAGEGEN_WORKSPACE: input.workspaceCwd ?? process.cwd(),
-        },
+        ...(imagegenLaunch.environment ? { environment: imagegenLaunch.environment } : {}),
       },
       t3_computer: {
         type: "local",
-        command: [process.execPath, resolveComputerMcpServerPath()],
+        command: computerLaunch.command,
         enabled: true,
         timeout: 120_000,
-        environment: {
-          ELECTRON_RUN_AS_NODE: "1",
-          T3CODE_STATE_DIR: input.stateDir ?? Path.join(OS.homedir(), ".t3", "dev"),
-          T3_COMPUTER_PROJECT_ID: "opencode",
-          T3_COMPUTER_THREAD_ID: "opencode",
-          T3_COMPUTER_TEXT_RESULT_BRIDGE: "1",
-        },
+        ...(computerLaunch.environment ? { environment: computerLaunch.environment } : {}),
       },
     },
   };

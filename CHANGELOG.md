@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.56] - 2026-05-16
+
+### Fixed
+- Fixed Windows OpenCode MCP startup in the desktop app by launching packaged local MCP servers through generated `.cmd` wrappers instead of invoking the Electron executable directly, restoring `t3_computer` and `t3_imagegen` availability for local OpenCode sessions.
+
 ## [0.2.55] - 2026-05-16
 
 ### Fixed
