@@ -35,6 +35,8 @@ import Migration0029 from "./Migrations/029_ProjectionThreadsSubagents.ts";
 import Migration0030 from "./Migrations/030_ProjectionThreadsPinnedAt.ts";
 import Migration0031 from "./Migrations/031_ProjectionThreadsArchivedAt.ts";
 import Migration0032 from "./Migrations/032_CanonicalChatsProject.ts";
+import Migration0033 from "./Migrations/033_LegacyModelSelectionEvents.ts";
+import Migration0034 from "./Migrations/034_LegacyProjectionSchemaRepair.ts";
 import { Effect } from "effect";
 
 /**
@@ -71,6 +73,8 @@ const loader = Migrator.fromRecord({
   "30_ProjectionThreadsPinnedAt": Migration0030,
   "31_ProjectionThreadsArchivedAt": Migration0031,
   "32_CanonicalChatsProject": Migration0032,
+  "33_LegacyModelSelectionEvents": Migration0033,
+  "34_LegacyProjectionSchemaRepair": Migration0034,
 });
 
 /**

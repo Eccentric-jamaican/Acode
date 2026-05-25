@@ -36,7 +36,7 @@ export const ProviderRegistryLive = Layer.effect(
     const openCodeProvider = yield* OpenCodeProvider;
     const healthStatuses = yield* providerHealth.getStatuses;
     const changes = yield* PubSub.unbounded<ReadonlyArray<ServerProviderStatus>>();
-    const initialOpenCodeProvider = yield* openCodeProvider.refresh;
+    const initialOpenCodeProvider = yield* openCodeProvider.getSnapshot;
     const initialProviders = mergeProviderList([], [
       ...healthStatuses.map((status) => ({
         ...status,
