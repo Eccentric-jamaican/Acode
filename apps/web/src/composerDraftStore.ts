@@ -10,11 +10,7 @@ import {
   type RuntimeMode,
 } from "@t3tools/contracts";
 import { normalizeModelSlug } from "@t3tools/shared/model";
-import {
-  DEFAULT_INTERACTION_MODE,
-  DEFAULT_RUNTIME_MODE,
-  type ChatImageAttachment,
-} from "./types";
+import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type ChatAttachment } from "./types";
 import type { BrowserInspectCapture } from "@t3tools/contracts";
 import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
@@ -23,6 +19,7 @@ export const COMPOSER_DRAFT_STORAGE_KEY = "t3code:composer-drafts:v1";
 export type DraftThreadEnvMode = "local" | "worktree";
 
 export interface PersistedComposerImageAttachment {
+  type: ChatAttachment["type"];
   id: string;
   name: string;
   mimeType: string;
@@ -30,7 +27,8 @@ export interface PersistedComposerImageAttachment {
   dataUrl: string;
 }
 
-export interface ComposerImageAttachment extends Omit<ChatImageAttachment, "previewUrl"> {
+export interface ComposerImageAttachment extends Omit<ChatAttachment, "previewUrl"> {
+  localPath?: string;
   previewUrl: string;
   file: File;
 }
@@ -280,12 +278,14 @@ function normalizePersistedAttachment(value: unknown): PersistedComposerImageAtt
     return null;
   }
   const candidate = value as Record<string, unknown>;
+  const type = candidate.type;
   const id = candidate.id;
   const name = candidate.name;
   const mimeType = candidate.mimeType;
   const sizeBytes = candidate.sizeBytes;
   const dataUrl = candidate.dataUrl;
   if (
+    (type !== "image" && type !== "pdf") ||
     typeof id !== "string" ||
     typeof name !== "string" ||
     typeof mimeType !== "string" ||
@@ -298,6 +298,7 @@ function normalizePersistedAttachment(value: unknown): PersistedComposerImageAtt
     return null;
   }
   return {
+    type,
     id,
     name,
     mimeType,
@@ -497,8 +498,7 @@ function normalizePersistedComposerDraftState(value: unknown): PersistedComposer
         ? draftCandidate.opencodeVariant
         : null;
     const opencodeAgent =
-      typeof draftCandidate.opencodeAgent === "string" &&
-      draftCandidate.opencodeAgent.length > 0
+      typeof draftCandidate.opencodeAgent === "string" && draftCandidate.opencodeAgent.length > 0
         ? draftCandidate.opencodeAgent
         : null;
     if (
@@ -571,8 +571,7 @@ function hydreatePersistedComposerImageAttachment(
   attachment: PersistedComposerImageAttachment,
 ): File | null {
   const commaIndex = attachment.dataUrl.indexOf(",");
-  const header =
-    commaIndex === -1 ? attachment.dataUrl : attachment.dataUrl.slice(0, commaIndex);
+  const header = commaIndex === -1 ? attachment.dataUrl : attachment.dataUrl.slice(0, commaIndex);
   const payload = commaIndex === -1 ? "" : attachment.dataUrl.slice(commaIndex + 1);
   if (payload.length === 0) {
     return null;
@@ -609,7 +608,7 @@ function hydrateImagesFromPersisted(
 
     return [
       {
-        type: "image" as const,
+        type: attachment.type,
         id: attachment.id,
         name: attachment.name,
         mimeType: attachment.mimeType,
@@ -692,7 +691,8 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
           const nextDraftThread: DraftThreadState = {
             projectId,
             createdAt: options?.createdAt ?? existingThread?.createdAt ?? new Date().toISOString(),
-            runtimeMode: options?.runtimeMode ?? existingThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE,
+            runtimeMode:
+              options?.runtimeMode ?? existingThread?.runtimeMode ?? DEFAULT_RUNTIME_MODE,
             interactionMode:
               options?.interactionMode ??
               existingThread?.interactionMode ??
@@ -762,7 +762,9 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             return state;
           }
           const nextWorktreePath =
-            options.worktreePath === undefined ? existing.worktreePath : (options.worktreePath ?? null);
+            options.worktreePath === undefined
+              ? existing.worktreePath
+              : (options.worktreePath ?? null);
           const nextIsTemporary =
             options.isTemporary === true
               ? true
@@ -780,8 +782,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             branch: options.branch === undefined ? existing.branch : (options.branch ?? null),
             worktreePath: nextWorktreePath,
             envMode:
-              options.envMode ??
-              (nextWorktreePath ? "worktree" : (existing.envMode ?? "local")),
+              options.envMode ?? (nextWorktreePath ? "worktree" : (existing.envMode ?? "local")),
             ...(nextIsTemporary ? { isTemporary: true } : {}),
           };
           const isUnchanged =
@@ -1090,7 +1091,8 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
         if (threadId.length === 0) {
           return;
         }
-        const nextVariant = typeof variant === "string" && variant.trim().length > 0 ? variant.trim() : null;
+        const nextVariant =
+          typeof variant === "string" && variant.trim().length > 0 ? variant.trim() : null;
         set((state) => {
           const existing = state.draftsByThreadId[threadId];
           if (!existing && nextVariant === null) {
@@ -1117,7 +1119,8 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
         if (threadId.length === 0) {
           return;
         }
-        const nextAgent = typeof agent === "string" && agent.trim().length > 0 ? agent.trim() : null;
+        const nextAgent =
+          typeof agent === "string" && agent.trim().length > 0 ? agent.trim() : null;
         set((state) => {
           const existing = state.draftsByThreadId[threadId];
           if (!existing && nextAgent === null) {

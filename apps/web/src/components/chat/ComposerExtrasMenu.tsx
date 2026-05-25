@@ -46,7 +46,7 @@ export const ComposerExtrasMenu = memo(function ComposerExtrasMenu(props: {
         ref={fileInputRef}
         data-testid="composer-photo-input"
         type="file"
-        accept="image/*"
+        accept="image/*,application/pdf"
         multiple
         className="sr-only"
         onChange={handleFileInputChange}
@@ -71,7 +71,7 @@ export const ComposerExtrasMenu = memo(function ComposerExtrasMenu(props: {
             }}
           >
             <PaperclipIcon className="size-4 shrink-0" />
-            Add image
+            Add file
           </MenuItem>
 
           {showInteractionModeToggle ? (
@@ -119,4 +119,3 @@ export const ComposerExtrasMenu = memo(function ComposerExtrasMenu(props: {
     </>
   );
 });
-

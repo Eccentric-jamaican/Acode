@@ -243,7 +243,13 @@ function readGitObjectBytes(input: {
         });
       }),
     catch: (cause) =>
-      createGitCommandError(input.operation, input.cwd, input.args, "Failed to read git file.", cause),
+      createGitCommandError(
+        input.operation,
+        input.cwd,
+        input.args,
+        "Failed to read git file.",
+        cause,
+      ),
   });
 }
 
@@ -588,29 +594,17 @@ const makeGitCore = Effect.gen(function* () {
     Effect.gen(function* () {
       yield* refreshStatusUpstreamIfStale(cwd).pipe(Effect.catch(() => Effect.void));
 
-      const [statusStdout, unstagedNumstatStdout, stagedNumstatStdout] = yield* Effect.all(
-        [
-          runGitStdout("GitCore.statusDetails.status", cwd, [
-            "status",
-            "--porcelain=2",
-            "--branch",
-          ]),
-          runGitStdout("GitCore.statusDetails.unstagedNumstat", cwd, ["diff", "--numstat"]),
-          runGitStdout("GitCore.statusDetails.stagedNumstat", cwd, [
-            "diff",
-            "--cached",
-            "--numstat",
-          ]),
-        ],
-        { concurrency: "unbounded" },
-      );
-
       let branch: string | null = null;
       let upstreamRef: string | null = null;
       let aheadCount = 0;
       let behindCount = 0;
       let hasWorkingTreeChanges = false;
       const changedFilesWithoutNumstat = new Set<string>();
+      const statusStdout = yield* runGitStdout("GitCore.statusDetails.status", cwd, [
+        "status",
+        "--porcelain=2",
+        "--branch",
+      ]);
 
       for (const line of statusStdout.split(/\r?\n/g)) {
         if (line.startsWith("# branch.head ")) {
@@ -643,6 +637,34 @@ const makeGitCore = Effect.gen(function* () {
         );
         behindCount = 0;
       }
+
+      if (!hasWorkingTreeChanges) {
+        return {
+          branch,
+          upstreamRef,
+          hasWorkingTreeChanges,
+          workingTree: {
+            files: [],
+            insertions: 0,
+            deletions: 0,
+          },
+          hasUpstream: upstreamRef !== null,
+          aheadCount,
+          behindCount,
+        };
+      }
+
+      const [unstagedNumstatStdout, stagedNumstatStdout] = yield* Effect.all(
+        [
+          runGitStdout("GitCore.statusDetails.unstagedNumstat", cwd, ["diff", "--numstat"]),
+          runGitStdout("GitCore.statusDetails.stagedNumstat", cwd, [
+            "diff",
+            "--cached",
+            "--numstat",
+          ]),
+        ],
+        { concurrency: "unbounded" },
+      );
 
       const stagedEntries = parseNumstatEntries(stagedNumstatStdout);
       const unstagedEntries = parseNumstatEntries(unstagedNumstatStdout);
@@ -1100,17 +1122,19 @@ const makeGitCore = Effect.gen(function* () {
         );
       }
 
-      yield* fileSystem.makeDirectory(input.parentDirectory, { recursive: true }).pipe(
-        Effect.mapError((cause) =>
-          createGitCommandError(
-            "GitCore.cloneRepo",
-            input.parentDirectory,
-            ["clone", input.repositoryUrl, sanitizedDirectoryName],
-            `Failed to prepare destination directory: ${String(cause)}`,
-            cause,
+      yield* fileSystem
+        .makeDirectory(input.parentDirectory, { recursive: true })
+        .pipe(
+          Effect.mapError((cause) =>
+            createGitCommandError(
+              "GitCore.cloneRepo",
+              input.parentDirectory,
+              ["clone", input.repositoryUrl, sanitizedDirectoryName],
+              `Failed to prepare destination directory: ${String(cause)}`,
+              cause,
+            ),
           ),
-        ),
-      );
+        );
 
       yield* executeGit(
         "GitCore.cloneRepo",

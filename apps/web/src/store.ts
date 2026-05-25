@@ -21,6 +21,7 @@ import {
   type ProjectRules,
   type Task,
   type TaskRuntime,
+  type ChatAttachment,
   type Thread,
 } from "./types";
 
@@ -130,6 +131,233 @@ function updateThread(
   return changed ? next : threads;
 }
 
+function toPreviewableChatAttachment(input: {
+  type: ChatAttachment["type"];
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+}): ChatAttachment {
+  const previewUrl = toAttachmentPreviewUrl(attachmentPreviewRoutePath(input.id));
+  if (input.type === "pdf") {
+    return {
+      type: "pdf",
+      id: input.id,
+      name: input.name,
+      mimeType: "application/pdf",
+      sizeBytes: input.sizeBytes,
+      previewUrl,
+    };
+  }
+  return {
+    type: "image",
+    id: input.id,
+    name: input.name,
+    mimeType: input.mimeType,
+    sizeBytes: input.sizeBytes,
+    previewUrl,
+  };
+}
+
+function reuseArrayByIndex<T>(
+  previous: ReadonlyArray<T>,
+  next: ReadonlyArray<T>,
+  isEqual: (left: T, right: T) => boolean,
+): T[] {
+  if (previous.length !== next.length) {
+    return next.map((entry, index) => {
+      const previousEntry = previous[index];
+      return previousEntry !== undefined && isEqual(previousEntry, entry) ? previousEntry : entry;
+    });
+  }
+
+  let changed = false;
+  const reused = next.map((entry, index) => {
+    const previousEntry = previous[index];
+    if (previousEntry !== undefined && isEqual(previousEntry, entry)) {
+      return previousEntry;
+    }
+    changed = true;
+    return entry;
+  });
+  return changed ? reused : (previous as T[]);
+}
+
+function arrayEqualByIndex<T>(
+  left: ReadonlyArray<T>,
+  right: ReadonlyArray<T>,
+  isEqual: (left: T, right: T) => boolean,
+): boolean {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    const leftEntry = left[index];
+    const rightEntry = right[index];
+    if (leftEntry === undefined || rightEntry === undefined || !isEqual(leftEntry, rightEntry)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function equalNullableObject<T extends object>(
+  left: T | null | undefined,
+  right: T | null | undefined,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  if (leftKeys.length !== rightKeys.length) return false;
+  for (const key of leftKeys) {
+    if (
+      !Object.is((left as Record<string, unknown>)[key], (right as Record<string, unknown>)[key])
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function equalProject(left: Project, right: Project): boolean {
+  return (
+    left.id === right.id &&
+    left.name === right.name &&
+    left.cwd === right.cwd &&
+    left.model === right.model &&
+    left.expanded === right.expanded &&
+    arrayEqualByIndex(left.scripts, right.scripts, equalNullableObject)
+  );
+}
+
+function equalAttachment(left: ChatAttachment, right: ChatAttachment): boolean {
+  return (
+    left.type === right.type &&
+    left.id === right.id &&
+    left.name === right.name &&
+    left.mimeType === right.mimeType &&
+    left.sizeBytes === right.sizeBytes &&
+    left.previewUrl === right.previewUrl
+  );
+}
+
+function equalMessage(left: ChatMessage, right: ChatMessage): boolean {
+  return (
+    left.id === right.id &&
+    left.role === right.role &&
+    left.text === right.text &&
+    left.turnId === right.turnId &&
+    left.createdAt === right.createdAt &&
+    left.completedAt === right.completedAt &&
+    left.streaming === right.streaming &&
+    arrayEqualByIndex(left.attachments ?? [], right.attachments ?? [], equalAttachment)
+  );
+}
+
+function equalProposedPlan(
+  left: Thread["proposedPlans"][number],
+  right: Thread["proposedPlans"][number],
+): boolean {
+  return (
+    left.id === right.id &&
+    left.turnId === right.turnId &&
+    left.planMarkdown === right.planMarkdown &&
+    left.createdAt === right.createdAt &&
+    left.updatedAt === right.updatedAt
+  );
+}
+
+function equalTurnDiffFile(
+  left: Thread["turnDiffSummaries"][number]["files"][number],
+  right: Thread["turnDiffSummaries"][number]["files"][number],
+): boolean {
+  return (
+    left.path === right.path &&
+    left.kind === right.kind &&
+    left.additions === right.additions &&
+    left.deletions === right.deletions
+  );
+}
+
+function equalTurnDiffSummary(
+  left: Thread["turnDiffSummaries"][number],
+  right: Thread["turnDiffSummaries"][number],
+): boolean {
+  return (
+    left.turnId === right.turnId &&
+    left.completedAt === right.completedAt &&
+    left.status === right.status &&
+    left.assistantMessageId === right.assistantMessageId &&
+    left.checkpointTurnCount === right.checkpointTurnCount &&
+    left.checkpointRef === right.checkpointRef &&
+    arrayEqualByIndex(left.files, right.files, equalTurnDiffFile)
+  );
+}
+
+function equalActivity(
+  left: Thread["activities"][number],
+  right: Thread["activities"][number],
+): boolean {
+  return (
+    left.id === right.id &&
+    left.turnId === right.turnId &&
+    left.kind === right.kind &&
+    left.tone === right.tone &&
+    left.summary === right.summary &&
+    left.createdAt === right.createdAt &&
+    left.sequence === right.sequence
+  );
+}
+
+function equalTask(left: Task, right: Task): boolean {
+  return (
+    left.id === right.id &&
+    left.projectId === right.projectId &&
+    left.title === right.title &&
+    left.brief === right.brief &&
+    left.acceptanceCriteria === right.acceptanceCriteria &&
+    left.state === right.state &&
+    left.priority === right.priority &&
+    left.threadId === right.threadId &&
+    left.createdAt === right.createdAt &&
+    left.updatedAt === right.updatedAt &&
+    arrayEqualByIndex(left.attachments, right.attachments, equalAttachment)
+  );
+}
+
+function equalThread(left: Thread, right: Thread): boolean {
+  return (
+    left.id === right.id &&
+    left.codexThreadId === right.codexThreadId &&
+    left.projectId === right.projectId &&
+    left.origin === right.origin &&
+    left.taskId === right.taskId &&
+    left.parentThreadId === right.parentThreadId &&
+    left.subagentAgentId === right.subagentAgentId &&
+    left.subagentNickname === right.subagentNickname &&
+    left.subagentRole === right.subagentRole &&
+    left.title === right.title &&
+    left.model === right.model &&
+    left.runtimeMode === right.runtimeMode &&
+    left.interactionMode === right.interactionMode &&
+    equalNullableObject(left.session, right.session) &&
+    left.error === right.error &&
+    left.createdAt === right.createdAt &&
+    left.updatedAt === right.updatedAt &&
+    equalNullableObject(left.latestTurn, right.latestTurn) &&
+    left.lastVisitedAt === right.lastVisitedAt &&
+    left.branch === right.branch &&
+    left.worktreePath === right.worktreePath &&
+    left.isPinned === right.isPinned &&
+    left.pinnedAt === right.pinnedAt &&
+    left.archivedAt === right.archivedAt &&
+    left.handoff === right.handoff &&
+    arrayEqualByIndex(left.messages, right.messages, equalMessage) &&
+    arrayEqualByIndex(left.proposedPlans, right.proposedPlans, equalProposedPlan) &&
+    arrayEqualByIndex(left.turnDiffSummaries, right.turnDiffSummaries, equalTurnDiffSummary) &&
+    arrayEqualByIndex(left.activities, right.activities, equalActivity)
+  );
+}
+
 function mapProjectsFromReadModel(
   incoming: OrchestrationReadModel["projects"],
   previous: Project[],
@@ -206,14 +434,13 @@ function resolveWsHttpOrigin(): string {
   const hasDesktopBridge = typeof desktopBridge?.getWsUrl === "function";
   const bridgeWsUrl = hasDesktopBridge ? desktopBridge.getWsUrl() : null;
   const envWsUrl = import.meta.env.VITE_WS_URL as string | undefined;
-  const wsCandidate =
-    hasDesktopBridge
-      ? typeof bridgeWsUrl === "string" && bridgeWsUrl.length > 0
-        ? bridgeWsUrl
-        : null
-      : typeof envWsUrl === "string" && envWsUrl.length > 0
-        ? envWsUrl
-        : null;
+  const wsCandidate = hasDesktopBridge
+    ? typeof bridgeWsUrl === "string" && bridgeWsUrl.length > 0
+      ? bridgeWsUrl
+      : null
+    : typeof envWsUrl === "string" && envWsUrl.length > 0
+      ? envWsUrl
+      : null;
   if (!wsCandidate) return window.location.origin;
   try {
     const wsUrl = new URL(wsCandidate);
@@ -263,122 +490,172 @@ function sanitizeSubagentThreadTitle(title: string, parentThreadId: ThreadId | n
 // ── Pure state transition functions ────────────────────────────────────
 
 export function syncServerReadModel(state: AppState, readModel: OrchestrationReadModel): AppState {
-  const projects = mapProjectsFromReadModel(
-    readModel.projects.filter((project) => project.deletedAt === null),
+  const projects = reuseArrayByIndex(
     state.projects,
+    mapProjectsFromReadModel(
+      readModel.projects.filter((project) => project.deletedAt === null),
+      state.projects,
+    ),
+    equalProject,
   );
   const existingThreadById = new Map(state.threads.map((thread) => [thread.id, thread] as const));
-  const projectRules = readModel.projectRules.map((entry) => ({ ...entry }));
-  const tasks = readModel.tasks
-    .filter((task) => task.deletedAt === null)
-    .map((task) => ({
-      id: task.id,
-      projectId: task.projectId,
-      title: task.title,
-      brief: task.brief,
-      acceptanceCriteria: task.acceptanceCriteria,
-      attachments: (task.attachments ?? []).map((attachment) => ({
-        type: "image" as const,
-        id: attachment.id,
-        name: attachment.name,
-        mimeType: attachment.mimeType,
-        sizeBytes: attachment.sizeBytes,
-        previewUrl: toAttachmentPreviewUrl(attachmentPreviewRoutePath(attachment.id)),
-      })),
-      state: task.state,
-      priority: task.priority,
-      threadId: task.threadId,
-      createdAt: task.createdAt,
-      updatedAt: task.updatedAt,
-    }));
-  const taskRuntimes = readModel.taskRuntimes.map((runtime) => ({ ...runtime }));
-  const threads = readModel.threads
-    .filter((thread) => thread.deletedAt === null)
-    .map((thread) => {
-      const existing = existingThreadById.get(thread.id);
-      const parentThreadId = thread.parentThreadId ?? null;
-      return {
-        id: thread.id,
-        codexThreadId: null,
-        projectId: thread.projectId,
-        origin: thread.origin ?? "user",
-        taskId: thread.taskId ?? null,
-        parentThreadId,
-        subagentAgentId: thread.subagentAgentId ?? null,
-        subagentNickname: thread.subagentNickname ?? null,
-        subagentRole: thread.subagentRole ?? null,
-        title: sanitizeSubagentThreadTitle(thread.title, parentThreadId),
-        model: resolveModelSlugForProvider(
-          inferProviderForThreadModel({
-            model: thread.model,
-            sessionProviderName: thread.session?.providerName ?? null,
-          }),
-          thread.model,
+  const projectRules = reuseArrayByIndex(
+    state.projectRules,
+    readModel.projectRules.map((entry) => ({ ...entry })),
+    equalNullableObject,
+  );
+  const tasks = reuseArrayByIndex(
+    state.tasks,
+    readModel.tasks
+      .filter((task) => task.deletedAt === null)
+      .map((task) => ({
+        id: task.id,
+        projectId: task.projectId,
+        title: task.title,
+        brief: task.brief,
+        acceptanceCriteria: task.acceptanceCriteria,
+        attachments: (task.attachments ?? []).map((attachment) =>
+          toPreviewableChatAttachment(attachment),
         ),
-        runtimeMode: thread.runtimeMode,
-        interactionMode: thread.interactionMode,
-        session: thread.session
-          ? {
-              provider: toLegacyProvider(thread.session.providerName),
-              status: toLegacySessionStatus(thread.session.status),
-              orchestrationStatus: thread.session.status,
-              activeTurnId: thread.session.activeTurnId ?? undefined,
-              createdAt: thread.session.updatedAt,
-              updatedAt: thread.session.updatedAt,
-              ...(thread.session.lastError ? { lastError: thread.session.lastError } : {}),
-            }
-          : null,
-        messages: thread.messages.map((message) => {
-          const attachments = message.attachments?.map((attachment) => ({
-            type: "image" as const,
-            id: attachment.id,
-            name: attachment.name,
-            mimeType: attachment.mimeType,
-            sizeBytes: attachment.sizeBytes,
-            previewUrl: toAttachmentPreviewUrl(attachmentPreviewRoutePath(attachment.id)),
-          }));
-          const normalizedMessage: ChatMessage = {
-            id: message.id,
-            role: message.role,
-            text: message.text,
-            ...(message.turnId ? { turnId: message.turnId } : {}),
-            createdAt: message.createdAt,
-            streaming: message.streaming,
-            ...(message.streaming ? {} : { completedAt: message.updatedAt }),
-            ...(attachments && attachments.length > 0 ? { attachments } : {}),
-          };
-          return normalizedMessage;
-        }),
-        proposedPlans: thread.proposedPlans.map((proposedPlan) => ({
-          id: proposedPlan.id,
-          turnId: proposedPlan.turnId,
-          planMarkdown: proposedPlan.planMarkdown,
-          createdAt: proposedPlan.createdAt,
-          updatedAt: proposedPlan.updatedAt,
-        })),
-        error: thread.session?.lastError ?? null,
-        createdAt: thread.createdAt,
-        updatedAt: thread.updatedAt,
-        latestTurn: thread.latestTurn,
-        lastVisitedAt: existing?.lastVisitedAt ?? thread.updatedAt,
-        branch: thread.branch,
-        worktreePath: thread.worktreePath,
-        isPinned: thread.isPinned ?? false,
-        pinnedAt: thread.pinnedAt ?? null,
-        archivedAt: thread.archivedAt ?? null,
-        turnDiffSummaries: thread.checkpoints.map((checkpoint) => ({
-          turnId: checkpoint.turnId,
-          completedAt: checkpoint.completedAt,
-          status: checkpoint.status,
-          assistantMessageId: checkpoint.assistantMessageId ?? undefined,
-          checkpointTurnCount: checkpoint.checkpointTurnCount,
-          checkpointRef: checkpoint.checkpointRef,
-          files: checkpoint.files.map((file) => ({ ...file })),
-        })),
-        activities: thread.activities.map((activity) => ({ ...activity })),
-        handoff: thread.handoff ?? null,
-      };
-    });
+        state: task.state,
+        priority: task.priority,
+        threadId: task.threadId,
+        createdAt: task.createdAt,
+        updatedAt: task.updatedAt,
+      })),
+    equalTask,
+  );
+  const taskRuntimes = reuseArrayByIndex(
+    state.taskRuntimes,
+    readModel.taskRuntimes.map((runtime) => ({ ...runtime })),
+    equalNullableObject,
+  );
+  const threads = reuseArrayByIndex(
+    state.threads,
+    readModel.threads
+      .filter((thread) => thread.deletedAt === null)
+      .map((thread) => {
+        const existing = existingThreadById.get(thread.id);
+        const parentThreadId = thread.parentThreadId ?? null;
+        const messages = reuseArrayByIndex(
+          existing?.messages ?? [],
+          thread.messages.map((message) => {
+            const attachments = message.attachments?.map((attachment) =>
+              toPreviewableChatAttachment(attachment),
+            );
+            const normalizedMessage: ChatMessage = {
+              id: message.id,
+              role: message.role,
+              text: message.text,
+              ...(message.turnId ? { turnId: message.turnId } : {}),
+              createdAt: message.createdAt,
+              streaming: message.streaming,
+              ...(message.streaming ? {} : { completedAt: message.updatedAt }),
+              ...(attachments && attachments.length > 0 ? { attachments } : {}),
+            };
+            return normalizedMessage;
+          }),
+          equalMessage,
+        );
+        const proposedPlans = reuseArrayByIndex(
+          existing?.proposedPlans ?? [],
+          thread.proposedPlans.map((proposedPlan) => ({
+            id: proposedPlan.id,
+            turnId: proposedPlan.turnId,
+            planMarkdown: proposedPlan.planMarkdown,
+            createdAt: proposedPlan.createdAt,
+            updatedAt: proposedPlan.updatedAt,
+          })),
+          equalProposedPlan,
+        );
+        const existingTurnDiffSummariesByTurnId = new Map(
+          existing?.turnDiffSummaries.map((summary) => [summary.turnId, summary] as const),
+        );
+        const turnDiffSummaries = reuseArrayByIndex(
+          existing?.turnDiffSummaries ?? [],
+          thread.checkpoints.map((checkpoint) => ({
+            turnId: checkpoint.turnId,
+            completedAt: checkpoint.completedAt,
+            status: checkpoint.status,
+            assistantMessageId: checkpoint.assistantMessageId ?? undefined,
+            checkpointTurnCount: checkpoint.checkpointTurnCount,
+            checkpointRef: checkpoint.checkpointRef,
+            files: reuseArrayByIndex(
+              existingTurnDiffSummariesByTurnId.get(checkpoint.turnId)?.files ?? [],
+              checkpoint.files.map((file) => ({ ...file })),
+              equalTurnDiffFile,
+            ),
+          })),
+          equalTurnDiffSummary,
+        );
+        const activities = reuseArrayByIndex(
+          existing?.activities ?? [],
+          thread.activities.map((activity) => ({ ...activity })),
+          equalActivity,
+        );
+        const normalizedThread: Thread = {
+          id: thread.id,
+          codexThreadId: null,
+          projectId: thread.projectId,
+          origin: thread.origin ?? "user",
+          taskId: thread.taskId ?? null,
+          parentThreadId,
+          subagentAgentId: thread.subagentAgentId ?? null,
+          subagentNickname: thread.subagentNickname ?? null,
+          subagentRole: thread.subagentRole ?? null,
+          title: sanitizeSubagentThreadTitle(thread.title, parentThreadId),
+          model: resolveModelSlugForProvider(
+            inferProviderForThreadModel({
+              model: thread.model,
+              sessionProviderName: thread.session?.providerName ?? null,
+            }),
+            thread.model,
+          ),
+          runtimeMode: thread.runtimeMode,
+          interactionMode: thread.interactionMode,
+          session: thread.session
+            ? {
+                provider: toLegacyProvider(thread.session.providerName),
+                status: toLegacySessionStatus(thread.session.status),
+                orchestrationStatus: thread.session.status,
+                activeTurnId: thread.session.activeTurnId ?? undefined,
+                createdAt: thread.session.updatedAt,
+                updatedAt: thread.session.updatedAt,
+                ...(thread.session.lastError ? { lastError: thread.session.lastError } : {}),
+              }
+            : null,
+          messages,
+          proposedPlans,
+          error: thread.session?.lastError ?? null,
+          createdAt: thread.createdAt,
+          updatedAt: thread.updatedAt,
+          latestTurn: thread.latestTurn,
+          lastVisitedAt: existing?.lastVisitedAt ?? thread.updatedAt,
+          branch: thread.branch,
+          worktreePath: thread.worktreePath,
+          isPinned: thread.isPinned ?? false,
+          pinnedAt: thread.pinnedAt ?? null,
+          archivedAt: thread.archivedAt ?? null,
+          turnDiffSummaries,
+          activities,
+          handoff: thread.handoff ?? null,
+        };
+        return existing && equalThread(existing, normalizedThread) ? existing : normalizedThread;
+      }),
+    equalThread,
+  );
+  if (
+    state.projects === projects &&
+    state.projectRules === projectRules &&
+    state.tasks === tasks &&
+    state.taskRuntimes === taskRuntimes &&
+    state.threads === threads &&
+    state.threadsHydrated &&
+    state.hydrationStatus === "ready" &&
+    state.hydrationError === null
+  ) {
+    return state;
+  }
   return {
     ...state,
     projects,

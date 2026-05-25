@@ -34,6 +34,10 @@ const SIDEBAR_BRAND_MARK_DARK_SRC = new URL(
   "../../../../../assets/prod/ACODE-DARK.png",
   import.meta.url,
 ).href;
+const SIDEBAR_TOGGLE_ICON_SRC = new URL(
+  "../../../../../assets/prod/sidebar-toggle.png",
+  import.meta.url,
+).href;
 
 type SidebarContextProps = {
   state: "expanded" | "collapsed";
@@ -439,33 +443,17 @@ function SidebarDockToggleIcon({
   collapsed?: boolean;
 }) {
   return (
-    <svg
+    <img
       aria-hidden="true"
-      className={cn("size-4", className)}
-      fill="none"
-      viewBox="0 0 20 20"
-      xmlns="http://www.w3.org/2000/svg"
-    >
-      <rect
-        fill="currentColor"
-        fillOpacity="0.04"
-        height="13"
-        rx="3"
-        stroke="currentColor"
-        strokeOpacity="0.9"
-        strokeWidth="1.4"
-        width="13"
-        x="3.5"
-        y="3.5"
-      />
-      <path
-        d={collapsed ? "M12 5.75V14.25" : "M8 5.75V14.25"}
-        opacity="0.95"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeWidth="1.6"
-      />
-    </svg>
+      alt=""
+      className={cn(
+        "size-4 select-none object-contain transition-transform duration-150",
+        collapsed && "rotate-180",
+        className,
+      )}
+      draggable={false}
+      src={SIDEBAR_TOGGLE_ICON_SRC}
+    />
   );
 }
 

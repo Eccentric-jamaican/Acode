@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -202,6 +202,8 @@ validationLayer("CodexAdapterLive validation", (it) => {
     () =>
       Effect.gen(function* () {
         validationManager.startSessionImpl.mockClear();
+        const baseCodexHome = join(testStateDir, "base-codex-home");
+        mkdirSync(baseCodexHome, { recursive: true });
         const adapter = yield* CodexAdapter;
 
         yield* adapter.startSession({
@@ -211,6 +213,11 @@ validationLayer("CodexAdapterLive validation", (it) => {
           modelOptions: {
             codex: {
               fastMode: true,
+            },
+          },
+          providerOptions: {
+            codex: {
+              homePath: baseCodexHome,
             },
           },
           runtimeMode: "full-access",
@@ -230,7 +237,10 @@ validationLayer("CodexAdapterLive validation", (it) => {
           },
         });
         assert.equal(typeof startSessionInput?.providerOptions?.codex?.homePath, "string");
-        assert.match(startSessionInput?.providerOptions?.codex?.homePath ?? "", /codex-home-overlays/);
+        assert.match(
+          startSessionInput?.providerOptions?.codex?.homePath ?? "",
+          /codex-home-overlays/,
+        );
       }),
     15_000,
   );

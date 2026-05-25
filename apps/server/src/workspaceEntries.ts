@@ -187,7 +187,10 @@ function recordWorkspaceEntryRename(input: {
 
     if (movedEntries.length === 0) {
       ensureDirectoryAncestors(entriesByPath, input.toRelativePath);
-      entriesByPath.set(input.toRelativePath, projectEntryForPath(input.toRelativePath, input.kind));
+      entriesByPath.set(
+        input.toRelativePath,
+        projectEntryForPath(input.toRelativePath, input.kind),
+      );
       return;
     }
 
@@ -229,10 +232,10 @@ function parentPathOf(input: string): string | undefined {
   return input.slice(0, separatorIndex);
 }
 
-function resolveWorkspaceTargetPath(input: {
-  cwd: string;
+function resolveWorkspaceTargetPath(input: { cwd: string; relativePath: string | null }): {
+  absolutePath: string;
   relativePath: string | null;
-}): { absolutePath: string; relativePath: string | null } {
+} {
   const normalizedRelativePath = input.relativePath?.trim() ?? null;
   if (!normalizedRelativePath) {
     return {
@@ -432,6 +435,31 @@ async function filterGitIgnoredPaths(cwd: string, relativePaths: string[]): Prom
   return relativePaths.filter((relativePath) => !ignoredPaths.has(relativePath));
 }
 
+async function listTrackedIgnoredGitPaths(cwd: string): Promise<Set<string>> {
+  const ignoredTrackedFiles = await runProcess(
+    "git",
+    ["ls-files", "--cached", "--ignored", "--exclude-standard", "-z"],
+    {
+      cwd,
+      allowNonZeroExit: true,
+      timeoutMs: 20_000,
+      maxBufferBytes: 16 * 1024 * 1024,
+      outputMode: "truncate",
+    },
+  ).catch(() => null);
+  if (!ignoredTrackedFiles || ignoredTrackedFiles.code !== 0) {
+    return new Set();
+  }
+  return new Set(
+    splitNullSeparatedPaths(
+      ignoredTrackedFiles.stdout,
+      Boolean(ignoredTrackedFiles.stdoutTruncated),
+    )
+      .map((entry) => toPosixPath(entry))
+      .filter((entry) => entry.length > 0),
+  );
+}
+
 async function buildWorkspaceIndexFromGit(cwd: string): Promise<WorkspaceIndex | null> {
   if (!(await isInsideGitWorkTree(cwd))) {
     return null;
@@ -458,7 +486,11 @@ async function buildWorkspaceIndexFromGit(cwd: string): Promise<WorkspaceIndex |
   )
     .map((entry) => toPosixPath(entry))
     .filter((entry) => entry.length > 0 && !isPathInIgnoredDirectory(entry));
-  const filePaths = await filterGitIgnoredPaths(cwd, listedPaths);
+  const trackedIgnoredPaths = await listTrackedIgnoredGitPaths(cwd);
+  const filePaths =
+    trackedIgnoredPaths.size === 0
+      ? listedPaths
+      : listedPaths.filter((entry) => !trackedIgnoredPaths.has(entry));
 
   const directorySet = new Set<string>();
   for (const filePath of filePaths) {
@@ -662,7 +694,10 @@ export async function listWorkspaceDirectory(
       ),
     )
     .filter((relativePath) => !isPathInIgnoredDirectory(relativePath));
-  const allowedRelativePaths = new Set(await filterGitIgnoredPaths(input.cwd, candidateRelativePaths));
+  const shouldFilterWithGitIgnore = await isInsideGitWorkTree(input.cwd);
+  const allowedRelativePaths = shouldFilterWithGitIgnore
+    ? new Set(await filterGitIgnoredPaths(input.cwd, candidateRelativePaths))
+    : new Set(candidateRelativePaths);
 
   const entries: ProjectDirectoryEntry[] = directoryEntries
     .filter((entry) => entry.isDirectory() || entry.isFile())
@@ -698,7 +733,9 @@ export async function listWorkspaceDirectory(
   };
 }
 
-export async function listWorkspaceTree(input: ProjectListTreeInput): Promise<ProjectListTreeResult> {
+export async function listWorkspaceTree(
+  input: ProjectListTreeInput,
+): Promise<ProjectListTreeResult> {
   const index = await getWorkspaceIndex(input.cwd);
   return {
     entries: index.entries,

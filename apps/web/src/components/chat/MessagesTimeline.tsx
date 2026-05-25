@@ -53,7 +53,7 @@ import {
   type WorkLogEntry,
 } from "../../session-logic";
 import { AUTO_SCROLL_BOTTOM_THRESHOLD_PX } from "../../chat-scroll";
-import { type TurnDiffFileChange, type TurnDiffSummary } from "../../types";
+import { type ChatAttachment, type TurnDiffFileChange, type TurnDiffSummary } from "../../types";
 import { buildPatchCacheKey, resolveDiffThemeName } from "../../lib/diffRendering";
 import {
   type RenderableInvocationDiffFile,
@@ -98,6 +98,7 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
+import { PdfCanvasPreview } from "../PdfCanvasPreview";
 import { toastManager } from "../ui/toast";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 import {
@@ -315,7 +316,11 @@ function splitUserMessageProviderMentions(
     const shortcut = marker === "/" ? parseLeadingShortcut(rawName) : null;
     if (shortcut) {
       if (tokenStart > cursor) {
-        segments.push({ type: "text", key: `text:${cursor}`, text: text.slice(cursor, tokenStart) });
+        segments.push({
+          type: "text",
+          key: `text:${cursor}`,
+          text: text.slice(cursor, tokenStart),
+        });
       }
       segments.push({
         type: "shortcut",
@@ -1348,6 +1353,64 @@ function generatedImagePreviewSrc(input: {
   return `data:${input.mimeType};base64,${input.contentsBase64}`;
 }
 
+async function fetchAttachmentBytes(previewUrl: string): Promise<Uint8Array> {
+  const response = await fetch(previewUrl);
+  if (!response.ok) {
+    throw new Error("Attachment preview is unavailable.");
+  }
+  const buffer = await response.arrayBuffer();
+  return new Uint8Array(buffer);
+}
+
+function UserPdfAttachmentPreview(props: { attachment: Extract<ChatAttachment, { type: "pdf" }> }) {
+  const previewQuery = useQuery({
+    queryKey: ["chat-attachment-pdf-preview", props.attachment.id, props.attachment.previewUrl],
+    queryFn: async () => {
+      if (!props.attachment.previewUrl) {
+        throw new Error("Attachment preview is unavailable.");
+      }
+      return fetchAttachmentBytes(props.attachment.previewUrl);
+    },
+    enabled: props.attachment.previewUrl !== undefined,
+    staleTime: 60_000,
+  });
+
+  if (!props.attachment.previewUrl) {
+    return (
+      <div className="flex min-h-[72px] items-center justify-center px-2 py-2.5 text-center text-[11px] text-muted-foreground/70">
+        {props.attachment.name}
+      </div>
+    );
+  }
+
+  if (previewQuery.isError) {
+    return (
+      <div className="flex min-h-[72px] items-center justify-center px-2 py-2.5 text-center text-[11px] text-muted-foreground/70">
+        {props.attachment.name}
+      </div>
+    );
+  }
+
+  if (!previewQuery.data) {
+    return (
+      <div className="flex min-h-[72px] items-center justify-center px-2 py-2.5 text-center text-[11px] text-muted-foreground/70">
+        Loading PDF...
+      </div>
+    );
+  }
+
+  return (
+    <div className="max-h-[220px] overflow-auto">
+      <PdfCanvasPreview
+        bytes={previewQuery.data}
+        filePath={props.attachment.name}
+        layout="embedded"
+        mimeType={props.attachment.mimeType}
+      />
+    </div>
+  );
+}
+
 type AssistantArtifact = TurnDiffFileChange & {
   artifactKind: AssistantArtifactKind;
   source: "checkpoint" | "message";
@@ -2262,9 +2325,7 @@ const WorkLogEntryDetail = memo(function WorkLogEntryDetail(props: {
             onClick={() => {
               const captureId = firstCapture.captureId ?? firstCapture.url;
               const previewModel = buildExpandedImagePreview(
-                [
-                  { id: captureId, name: imageLabel, previewUrl: firstCapture.url },
-                ],
+                [{ id: captureId, name: imageLabel, previewUrl: firstCapture.url }],
                 captureId,
               );
               if (previewModel) props.onImageExpand(previewModel);
@@ -3738,7 +3799,7 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
       {row.kind === "message" &&
         row.message.role === "user" &&
         (() => {
-          const userImages = row.message.attachments ?? [];
+          const userAttachments = row.message.attachments ?? [];
           const canRevertAgentWork = revertTurnCountByUserMessageId.has(row.message.id);
           return (
             <div className="flex justify-end">
@@ -3747,36 +3808,41 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
                   data-user-message-bubble="true"
                   className="relative w-full rounded-2xl rounded-br-sm border border-border bg-secondary px-3 py-2"
                 >
-                  {userImages.length > 0 && (
+                  {userAttachments.length > 0 && (
                     <div className="mb-1.5 grid max-w-[420px] grid-cols-2 gap-1.5">
-                      {userImages.map(
-                        (image: NonNullable<TimelineMessage["attachments"]>[number]) => (
+                      {userAttachments.map(
+                        (attachment: NonNullable<TimelineMessage["attachments"]>[number]) => (
                           <div
-                            key={image.id}
+                            key={attachment.id}
                             className="overflow-hidden rounded-lg border border-border/80 bg-background/70"
                           >
-                            {image.previewUrl ? (
+                            {attachment.type === "image" && attachment.previewUrl ? (
                               <button
                                 type="button"
                                 className="h-full w-full cursor-zoom-in"
-                                aria-label={`Preview ${image.name}`}
+                                aria-label={`Preview ${attachment.name}`}
                                 onClick={() => {
-                                  const preview = buildExpandedImagePreview(userImages, image.id);
+                                  const preview = buildExpandedImagePreview(
+                                    userAttachments,
+                                    attachment.id,
+                                  );
                                   if (!preview) return;
                                   onImageExpand(preview);
                                 }}
                               >
                                 <img
-                                  src={image.previewUrl}
-                                  alt={image.name}
+                                  src={attachment.previewUrl}
+                                  alt={attachment.name}
                                   className="h-full max-h-[220px] w-full object-cover"
                                   onLoad={onTimelineImageLoad}
                                   onError={onTimelineImageLoad}
                                 />
                               </button>
+                            ) : attachment.type === "pdf" ? (
+                              <UserPdfAttachmentPreview attachment={attachment} />
                             ) : (
                               <div className="flex min-h-[72px] items-center justify-center px-2 py-2.5 text-center text-[11px] text-muted-foreground/70">
-                                {image.name}
+                                {attachment.name}
                               </div>
                             )}
                           </div>

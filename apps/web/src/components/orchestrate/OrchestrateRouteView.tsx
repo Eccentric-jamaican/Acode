@@ -1,4 +1,11 @@
-import { type ComponentProps, startTransition, useDeferredValue, useEffect, useMemo, useState } from "react";
+import {
+  type ComponentProps,
+  startTransition,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { useNavigate } from "@tanstack/react-router";
 import {
   ArrowUpRightIcon,
@@ -64,15 +71,8 @@ import {
 import { SidebarInsetTrigger } from "~/components/ui/sidebar";
 import { Toggle } from "~/components/ui/toggle";
 import { toastManager } from "~/components/ui/toast";
-import {
-  DEFAULT_ORCHESTRATE_FILTERS,
-  type OrchestrateFilters,
-} from "./orchestrateFilters";
-import {
-  DEFAULT_HIDDEN_STATES,
-  hiddenTaskStates,
-  visibleTaskStates,
-} from "./orchestrateLayout";
+import { DEFAULT_ORCHESTRATE_FILTERS, type OrchestrateFilters } from "./orchestrateFilters";
+import { DEFAULT_HIDDEN_STATES, hiddenTaskStates, visibleTaskStates } from "./orchestrateLayout";
 import { TaskContextEditor } from "./TaskContextEditor";
 import {
   buildErrorInboxCollection,
@@ -176,7 +176,9 @@ function buildSearch(input: {
   };
 }
 
-function runtimeBadgeVariant(status: TaskRuntimeStatus | null): ComponentProps<typeof Badge>["variant"] {
+function runtimeBadgeVariant(
+  status: TaskRuntimeStatus | null,
+): ComponentProps<typeof Badge>["variant"] {
   switch (status) {
     case "error":
       return "error";
@@ -302,7 +304,12 @@ function TaskRuntimePill({ task }: { task: TaskWithRuntime }) {
       size="sm"
       className="gap-1 rounded-full px-1.5 text-[10px] font-medium"
     >
-      <Icon className={cn("size-3", status === "running" || status === "starting" ? "animate-spin" : "")} />
+      <Icon
+        className={cn(
+          "size-3",
+          status === "running" || status === "starting" ? "animate-spin" : "",
+        )}
+      />
       <span>{formatRuntimeLabel(status)}</span>
     </Badge>
   );
@@ -484,7 +491,7 @@ export default function OrchestrateRouteView({
   const selectedProject =
     projectIdFromSearch === "all"
       ? null
-      : projects.find((project) => project.id === projectIdFromSearch) ?? projects[0] ?? null;
+      : (projects.find((project) => project.id === projectIdFromSearch) ?? projects[0] ?? null);
   const selectedProjectId = projectIdFromSearch === "all" ? null : (selectedProject?.id ?? null);
   const selectedProjectRules =
     projectRules.find((rules) => rules.projectId === selectedProjectId) ?? null;
@@ -558,14 +565,21 @@ export default function OrchestrateRouteView({
         search: normalizedFilters.search,
         includeResolved: includeResolvedInboxEntries,
       }),
-    [errorInboxCollection, includeResolvedInboxEntries, normalizedFilters.search, selectedProjectId],
+    [
+      errorInboxCollection,
+      includeResolvedInboxEntries,
+      normalizedFilters.search,
+      selectedProjectId,
+    ],
   );
   const sortedErrorInbox = useMemo(
     () => sortErrorInboxCollection(filteredErrorInbox),
     [filteredErrorInbox],
   );
   const selectedErrorInboxEntry =
-    sortedErrorInbox.find((entry) => entry.entry.id === selectedInboxEntryId) ?? sortedErrorInbox[0] ?? null;
+    sortedErrorInbox.find((entry) => entry.entry.id === selectedInboxEntryId) ??
+    sortedErrorInbox[0] ??
+    null;
   const selectedErrorInboxLinkedTask = selectedErrorInboxEntry?.linkedTask ?? null;
   const selectedErrorInboxThread = selectedErrorInboxEntry?.thread ?? null;
   const sortedTasks = useMemo(() => sortTaskCollection(filteredTasks), [filteredTasks]);
@@ -649,7 +663,9 @@ export default function OrchestrateRouteView({
         title: currentTask.task.title,
         brief: currentTask.task.brief,
         briefCursor: currentTask.task.brief.length,
-        attachments: taskDraftAttachmentsFromTask(currentTask.task.attachments),
+        attachments: taskDraftAttachmentsFromTask(
+          currentTask.task.attachments.filter((attachment) => attachment.type === "image"),
+        ),
         acceptanceCriteria: currentTask.task.acceptanceCriteria,
         priority: currentTask.task.priority === null ? "" : String(currentTask.task.priority),
         state: currentTask.task.state,
@@ -974,13 +990,16 @@ export default function OrchestrateRouteView({
     }
   };
 
-  const emptyState = projects.length === 0 && resolvedView !== "inbox" ? (
-    <div className="flex flex-1 items-center justify-center px-6 py-12">
-      <div className="rounded-3xl border border-dashed border-border px-6 py-8 text-center">
-        <p className="text-sm text-muted-foreground">Add a project to start orchestrating work.</p>
+  const emptyState =
+    projects.length === 0 && resolvedView !== "inbox" ? (
+      <div className="flex flex-1 items-center justify-center px-6 py-12">
+        <div className="rounded-3xl border border-dashed border-border px-6 py-8 text-center">
+          <p className="text-sm text-muted-foreground">
+            Add a project to start orchestrating work.
+          </p>
+        </div>
       </div>
-    </div>
-  ) : null;
+    ) : null;
 
   return (
     <AppPageShell className="min-w-0">
@@ -1038,45 +1057,45 @@ export default function OrchestrateRouteView({
                 data-testid="orchestrate-header-actions"
               >
                 <div className="flex items-center rounded-full border border-border bg-background p-0.5 shadow-xs/5">
-                <Toggle
-                  pressed={resolvedView === "board"}
-                  onPressedChange={(pressed) => {
-                    if (pressed) updateRoute({ view: "board" });
-                  }}
-                  variant="default"
-                  size="xs"
-                  aria-label="Board view"
-                  className="rounded-full px-2.5"
-                >
-                  <KanbanSquareIcon className="size-3.5" />
-                  <span className="hidden sm:inline">Board</span>
-                </Toggle>
-                <Toggle
-                  pressed={resolvedView === "list"}
-                  onPressedChange={(pressed) => {
-                    if (pressed) updateRoute({ view: "list" });
-                  }}
-                  variant="default"
-                  size="xs"
-                  aria-label="List view"
-                  className="rounded-full px-2.5"
-                >
-                  <LayoutListIcon className="size-3.5" />
-                  <span className="hidden sm:inline">List</span>
-                </Toggle>
-                <Toggle
-                  pressed={resolvedView === "inbox"}
-                  onPressedChange={(pressed) => {
-                    if (pressed) updateRoute({ view: "inbox" });
-                  }}
-                  variant="default"
-                  size="xs"
-                  aria-label="Inbox view"
-                  className="rounded-full px-2.5"
-                >
-                  <InboxIcon className="size-3.5" />
-                  <span className="hidden sm:inline">Inbox</span>
-                </Toggle>
+                  <Toggle
+                    pressed={resolvedView === "board"}
+                    onPressedChange={(pressed) => {
+                      if (pressed) updateRoute({ view: "board" });
+                    }}
+                    variant="default"
+                    size="xs"
+                    aria-label="Board view"
+                    className="rounded-full px-2.5"
+                  >
+                    <KanbanSquareIcon className="size-3.5" />
+                    <span className="hidden sm:inline">Board</span>
+                  </Toggle>
+                  <Toggle
+                    pressed={resolvedView === "list"}
+                    onPressedChange={(pressed) => {
+                      if (pressed) updateRoute({ view: "list" });
+                    }}
+                    variant="default"
+                    size="xs"
+                    aria-label="List view"
+                    className="rounded-full px-2.5"
+                  >
+                    <LayoutListIcon className="size-3.5" />
+                    <span className="hidden sm:inline">List</span>
+                  </Toggle>
+                  <Toggle
+                    pressed={resolvedView === "inbox"}
+                    onPressedChange={(pressed) => {
+                      if (pressed) updateRoute({ view: "inbox" });
+                    }}
+                    variant="default"
+                    size="xs"
+                    aria-label="Inbox view"
+                    className="rounded-full px-2.5"
+                  >
+                    <InboxIcon className="size-3.5" />
+                    <span className="hidden sm:inline">Inbox</span>
+                  </Toggle>
                 </div>
 
                 <Menu>
@@ -1089,102 +1108,100 @@ export default function OrchestrateRouteView({
                     }
                   />
                   <MenuPopup align="end" className="w-64">
-                  <div className="p-2">
-                    <div className="relative">
-                      <SearchIcon className="-translate-y-1/2 pointer-events-none absolute top-1/2 left-2 size-3.5 text-muted-foreground/70" />
-                      <Input
-                        value={filters.search}
-                        onChange={(event) =>
-                          setFilters((current) => ({ ...current, search: event.target.value }))
-                        }
-                        placeholder={
-                          resolvedView === "inbox" ? "Search errors" : "Search tasks"
-                        }
-                        size="sm"
-                        className="pl-7"
-                      />
+                    <div className="p-2">
+                      <div className="relative">
+                        <SearchIcon className="-translate-y-1/2 pointer-events-none absolute top-1/2 left-2 size-3.5 text-muted-foreground/70" />
+                        <Input
+                          value={filters.search}
+                          onChange={(event) =>
+                            setFilters((current) => ({ ...current, search: event.target.value }))
+                          }
+                          placeholder={resolvedView === "inbox" ? "Search errors" : "Search tasks"}
+                          size="sm"
+                          className="pl-7"
+                        />
+                      </div>
                     </div>
-                  </div>
-                  {resolvedView === "inbox" ? (
-                    <>
-                      <MenuSeparator />
-                      <MenuCheckboxItem
-                        checked={includeResolvedInboxEntries}
-                        onCheckedChange={(checked) =>
-                          setIncludeResolvedInboxEntries(Boolean(checked))
-                        }
-                      >
-                        Include resolved
-                      </MenuCheckboxItem>
-                    </>
-                  ) : (
-                    <>
-                      <MenuSeparator />
-                      <MenuGroup>
-                        <MenuGroupLabel>State</MenuGroupLabel>
-                        <MenuRadioGroup
-                          value={filters.state}
-                          onValueChange={(value) =>
+                    {resolvedView === "inbox" ? (
+                      <>
+                        <MenuSeparator />
+                        <MenuCheckboxItem
+                          checked={includeResolvedInboxEntries}
+                          onCheckedChange={(checked) =>
+                            setIncludeResolvedInboxEntries(Boolean(checked))
+                          }
+                        >
+                          Include resolved
+                        </MenuCheckboxItem>
+                      </>
+                    ) : (
+                      <>
+                        <MenuSeparator />
+                        <MenuGroup>
+                          <MenuGroupLabel>State</MenuGroupLabel>
+                          <MenuRadioGroup
+                            value={filters.state}
+                            onValueChange={(value) =>
+                              setFilters((current) => ({
+                                ...current,
+                                state: (value as TaskState | "all") ?? "all",
+                              }))
+                            }
+                          >
+                            <MenuRadioItem value="all" indicatorPlacement="end">
+                              All states
+                            </MenuRadioItem>
+                            {TASK_STATE_OPTIONS.map((state) => (
+                              <MenuRadioItem key={state} value={state} indicatorPlacement="end">
+                                {formatTaskStateLabel(state)}
+                              </MenuRadioItem>
+                            ))}
+                          </MenuRadioGroup>
+                        </MenuGroup>
+                        <MenuSeparator />
+                        <MenuGroup>
+                          <MenuGroupLabel>Runtime</MenuGroupLabel>
+                          <MenuRadioGroup
+                            value={filters.runtime}
+                            onValueChange={(value) =>
+                              setFilters((current) => ({
+                                ...current,
+                                runtime: (value as TaskRuntimeStatus | "all") ?? "all",
+                              }))
+                            }
+                          >
+                            {TASK_RUNTIME_FILTER_OPTIONS.map((status) => (
+                              <MenuRadioItem key={status} value={status} indicatorPlacement="end">
+                                {status === "all" ? "All runtimes" : formatRuntimeLabel(status)}
+                              </MenuRadioItem>
+                            ))}
+                          </MenuRadioGroup>
+                        </MenuGroup>
+                        <MenuSeparator />
+                        <MenuCheckboxItem
+                          checked={filters.needsAttention}
+                          onCheckedChange={(checked) =>
                             setFilters((current) => ({
                               ...current,
-                              state: (value as TaskState | "all") ?? "all",
+                              needsAttention: Boolean(checked),
                             }))
                           }
                         >
-                          <MenuRadioItem value="all" indicatorPlacement="end">
-                            All states
-                          </MenuRadioItem>
-                          {TASK_STATE_OPTIONS.map((state) => (
-                            <MenuRadioItem key={state} value={state} indicatorPlacement="end">
-                              {formatTaskStateLabel(state)}
-                            </MenuRadioItem>
-                          ))}
-                        </MenuRadioGroup>
-                      </MenuGroup>
-                      <MenuSeparator />
-                      <MenuGroup>
-                        <MenuGroupLabel>Runtime</MenuGroupLabel>
-                        <MenuRadioGroup
-                          value={filters.runtime}
-                          onValueChange={(value) =>
+                          Needs attention
+                        </MenuCheckboxItem>
+                        <MenuCheckboxItem
+                          checked={filters.hasLinkedThread}
+                          onCheckedChange={(checked) =>
                             setFilters((current) => ({
                               ...current,
-                              runtime: (value as TaskRuntimeStatus | "all") ?? "all",
+                              hasLinkedThread: Boolean(checked),
                             }))
                           }
                         >
-                          {TASK_RUNTIME_FILTER_OPTIONS.map((status) => (
-                            <MenuRadioItem key={status} value={status} indicatorPlacement="end">
-                              {status === "all" ? "All runtimes" : formatRuntimeLabel(status)}
-                            </MenuRadioItem>
-                          ))}
-                        </MenuRadioGroup>
-                      </MenuGroup>
-                      <MenuSeparator />
-                      <MenuCheckboxItem
-                        checked={filters.needsAttention}
-                        onCheckedChange={(checked) =>
-                          setFilters((current) => ({
-                            ...current,
-                            needsAttention: Boolean(checked),
-                          }))
-                        }
-                      >
-                        Needs attention
-                      </MenuCheckboxItem>
-                      <MenuCheckboxItem
-                        checked={filters.hasLinkedThread}
-                        onCheckedChange={(checked) =>
-                          setFilters((current) => ({
-                            ...current,
-                            hasLinkedThread: Boolean(checked),
-                          }))
-                        }
-                      >
-                        Has linked thread
-                      </MenuCheckboxItem>
-                    </>
-                  )}
+                          Has linked thread
+                        </MenuCheckboxItem>
+                      </>
+                    )}
                   </MenuPopup>
                 </Menu>
 
@@ -1198,28 +1215,28 @@ export default function OrchestrateRouteView({
                     }
                   />
                   <MenuPopup align="end" className="w-48">
-                  <MenuItem onClick={() => setProjectRulesOpen(true)}>Project rules</MenuItem>
-                  {resolvedView !== "inbox" ? (
-                    <>
-                      <MenuSeparator />
-                      <MenuCheckboxItem
-                        checked={!hiddenStates.has("done")}
-                        onCheckedChange={(checked) =>
-                          setHiddenStates((current) => {
-                            const next = new Set(current);
-                            if (checked) {
-                              next.delete("done");
-                            } else {
-                              next.add("done");
-                            }
-                            return next;
-                          })
-                        }
-                      >
-                        Show done
-                      </MenuCheckboxItem>
-                    </>
-                  ) : null}
+                    <MenuItem onClick={() => setProjectRulesOpen(true)}>Project rules</MenuItem>
+                    {resolvedView !== "inbox" ? (
+                      <>
+                        <MenuSeparator />
+                        <MenuCheckboxItem
+                          checked={!hiddenStates.has("done")}
+                          onCheckedChange={(checked) =>
+                            setHiddenStates((current) => {
+                              const next = new Set(current);
+                              if (checked) {
+                                next.delete("done");
+                              } else {
+                                next.add("done");
+                              }
+                              return next;
+                            })
+                          }
+                        >
+                          Show done
+                        </MenuCheckboxItem>
+                      </>
+                    ) : null}
                   </MenuPopup>
                 </Menu>
 
@@ -1260,7 +1277,9 @@ export default function OrchestrateRouteView({
                         onDrop={(event) => {
                           event.preventDefault();
                           const taskId = event.dataTransfer.getData("text/plain");
-                          const droppedTask = taskCollection.find((entry) => entry.task.id === taskId);
+                          const droppedTask = taskCollection.find(
+                            (entry) => entry.task.id === taskId,
+                          );
                           if (!droppedTask) return;
                           void handleMoveTask(droppedTask, state);
                         }}
@@ -1312,7 +1331,8 @@ export default function OrchestrateRouteView({
                               key={task.task.id}
                               task={task}
                               highlighted={
-                                highlightedTaskId === task.task.id || selectedTaskFromSearch?.id === task.task.id
+                                highlightedTaskId === task.task.id ||
+                                selectedTaskFromSearch?.id === task.task.id
                               }
                               onSelect={() => setHighlightedTaskId(task.task.id)}
                               onOpenDetails={() => openTaskDetails(task)}
@@ -1380,7 +1400,10 @@ export default function OrchestrateRouteView({
                                   )}
                                 >
                                   <span
-                                    className={cn("h-2 w-2 shrink-0 rounded-full", stateDotClass(task.task.state))}
+                                    className={cn(
+                                      "h-2 w-2 shrink-0 rounded-full",
+                                      stateDotClass(task.task.state),
+                                    )}
                                   />
                                   <div className="min-w-0 flex-1">
                                     <div className="flex min-w-0 items-center gap-2">
@@ -1411,7 +1434,8 @@ export default function OrchestrateRouteView({
                       <div className="min-w-0">
                         <p className="text-sm font-medium text-foreground">Error inbox</p>
                         <p className="text-xs text-muted-foreground">
-                          {sortedErrorInbox.length} {sortedErrorInbox.length === 1 ? "entry" : "entries"}
+                          {sortedErrorInbox.length}{" "}
+                          {sortedErrorInbox.length === 1 ? "entry" : "entries"}
                         </p>
                       </div>
                       {includeResolvedInboxEntries ? (
@@ -1472,7 +1496,11 @@ export default function OrchestrateRouteView({
                                   </Badge>
                                 ) : null}
                                 {item.entry.resolution ? (
-                                  <Badge variant="secondary" size="sm" className="rounded-full px-2">
+                                  <Badge
+                                    variant="secondary"
+                                    size="sm"
+                                    className="rounded-full px-2"
+                                  >
                                     {item.entry.resolution}
                                   </Badge>
                                 ) : null}
@@ -1492,7 +1520,9 @@ export default function OrchestrateRouteView({
                             <div className="min-w-0">
                               <div className="flex flex-wrap items-center gap-2">
                                 <Badge
-                                  variant={errorSeverityVariant(selectedErrorInboxEntry.entry.severity)}
+                                  variant={errorSeverityVariant(
+                                    selectedErrorInboxEntry.entry.severity,
+                                  )}
                                   size="sm"
                                   className="rounded-full px-2"
                                 >
@@ -1510,14 +1540,21 @@ export default function OrchestrateRouteView({
                               </h2>
                               <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
                                 <span>
-                                  First seen {relativeErrorTimeLabel(selectedErrorInboxEntry.entry.firstSeenAt)}
+                                  First seen{" "}
+                                  {relativeErrorTimeLabel(
+                                    selectedErrorInboxEntry.entry.firstSeenAt,
+                                  )}
                                 </span>
                                 <span>
-                                  Last seen {relativeErrorTimeLabel(selectedErrorInboxEntry.entry.lastSeenAt)}
+                                  Last seen{" "}
+                                  {relativeErrorTimeLabel(selectedErrorInboxEntry.entry.lastSeenAt)}
                                 </span>
-                                <span>{selectedErrorInboxEntry.entry.occurrenceCount} occurrences</span>
                                 <span>
-                                  Project {selectedErrorInboxEntry.project?.name ?? "Global / unresolved"}
+                                  {selectedErrorInboxEntry.entry.occurrenceCount} occurrences
+                                </span>
+                                <span>
+                                  Project{" "}
+                                  {selectedErrorInboxEntry.project?.name ?? "Global / unresolved"}
                                 </span>
                               </div>
                             </div>
@@ -1544,7 +1581,9 @@ export default function OrchestrateRouteView({
                                   size="xs"
                                   className="rounded-full px-3"
                                   onClick={() =>
-                                    void handlePromoteInboxEntryToTask(selectedErrorInboxEntry.entry.id)
+                                    void handlePromoteInboxEntryToTask(
+                                      selectedErrorInboxEntry.entry.id,
+                                    )
                                   }
                                 >
                                   <PlusIcon className="size-3.5" />
@@ -1567,7 +1606,10 @@ export default function OrchestrateRouteView({
                                 variant="outline"
                                 className="rounded-full px-3"
                                 onClick={() =>
-                                  void handleSetInboxResolution(selectedErrorInboxEntry.entry.id, "ignored")
+                                  void handleSetInboxResolution(
+                                    selectedErrorInboxEntry.entry.id,
+                                    "ignored",
+                                  )
                                 }
                               >
                                 <EyeOffIcon className="size-3.5" />
@@ -1578,7 +1620,10 @@ export default function OrchestrateRouteView({
                                 variant="outline"
                                 className="rounded-full px-3"
                                 onClick={() =>
-                                  void handleSetInboxResolution(selectedErrorInboxEntry.entry.id, "resolved")
+                                  void handleSetInboxResolution(
+                                    selectedErrorInboxEntry.entry.id,
+                                    "resolved",
+                                  )
                                 }
                               >
                                 <CheckIcon className="size-3.5" />
@@ -1590,7 +1635,10 @@ export default function OrchestrateRouteView({
                                   variant="ghost"
                                   className="rounded-full px-3"
                                   onClick={() =>
-                                    void handleSetInboxResolution(selectedErrorInboxEntry.entry.id, null)
+                                    void handleSetInboxResolution(
+                                      selectedErrorInboxEntry.entry.id,
+                                      null,
+                                    )
                                   }
                                 >
                                   Reopen
@@ -1618,7 +1666,11 @@ export default function OrchestrateRouteView({
                                 Latest context
                               </h3>
                               <pre className="overflow-x-auto rounded-2xl border border-border/70 bg-muted/30 p-4 text-xs leading-5 text-muted-foreground">
-                                {JSON.stringify(selectedErrorInboxEntry.entry.latestContextJson, null, 2)}
+                                {JSON.stringify(
+                                  selectedErrorInboxEntry.entry.latestContextJson,
+                                  null,
+                                  2,
+                                )}
                               </pre>
                             </section>
                           </div>
@@ -2172,9 +2224,7 @@ export default function OrchestrateRouteView({
                           {TASK_STATE_OPTIONS.map((state) => (
                             <MenuItem
                               key={state}
-                              onClick={() =>
-                                setDetailDraft((current) => ({ ...current, state }))
-                              }
+                              onClick={() => setDetailDraft((current) => ({ ...current, state }))}
                             >
                               {formatTaskStateLabel(state)}
                             </MenuItem>
@@ -2248,17 +2298,20 @@ export default function OrchestrateRouteView({
                       Activity
                     </p>
                     <div className="space-y-2">
-                      {currentTask.thread.activities.slice(-6).toReversed().map((activity) => (
-                        <div
-                          key={activity.id}
-                          className="rounded-2xl border border-border/70 bg-card px-3 py-2.5"
-                        >
-                          <p className="text-sm text-foreground">{activity.summary}</p>
-                          <p className="mt-1 text-[11px] text-muted-foreground/72 tabular-nums">
-                            {relativeTimeLabel(activity.createdAt)}
-                          </p>
-                        </div>
-                      ))}
+                      {currentTask.thread.activities
+                        .slice(-6)
+                        .toReversed()
+                        .map((activity) => (
+                          <div
+                            key={activity.id}
+                            className="rounded-2xl border border-border/70 bg-card px-3 py-2.5"
+                          >
+                            <p className="text-sm text-foreground">{activity.summary}</p>
+                            <p className="mt-1 text-[11px] text-muted-foreground/72 tabular-nums">
+                              {relativeTimeLabel(activity.createdAt)}
+                            </p>
+                          </div>
+                        ))}
                     </div>
                   </div>
                 ) : null}

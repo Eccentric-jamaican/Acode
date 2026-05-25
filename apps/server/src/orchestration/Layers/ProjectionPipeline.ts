@@ -84,9 +84,8 @@ interface AttachmentSideEffects {
 }
 
 const materializeAttachmentsForProjection = Effect.fn(
-  (input: {
-    readonly attachments: ReadonlyArray<ChatAttachment>;
-  }) => Effect.succeed(input.attachments.length === 0 ? [] : input.attachments),
+  (input: { readonly attachments: ReadonlyArray<ChatAttachment> }) =>
+    Effect.succeed(input.attachments.length === 0 ? [] : input.attachments),
 );
 
 function extractActivityRequestId(payload: unknown): ApprovalRequestId | null {
@@ -232,9 +231,6 @@ function collectThreadAttachmentRelativePaths(
   const relativePaths = new Set<string>();
   for (const message of messages) {
     for (const attachment of message.attachments ?? []) {
-      if (attachment.type !== "image") {
-        continue;
-      }
       const attachmentThreadSegment = parseThreadSegmentFromAttachmentId(attachment.id);
       if (!attachmentThreadSegment || attachmentThreadSegment !== threadSegment) {
         continue;
@@ -342,7 +338,6 @@ const runAttachmentSideEffects = Effect.fn(function* (sideEffects: AttachmentSid
     },
     { concurrency: 1 },
   );
-
 });
 
 const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
@@ -969,8 +964,7 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
                 existingTurn.value.pendingMessageId ??
                 (Option.isSome(pendingTurnStart) ? pendingTurnStart.value.messageId : null),
               interactionMode:
-                existingTurn.value.interactionMode !== "default" ||
-                !Option.isSome(pendingTurnStart)
+                existingTurn.value.interactionMode !== "default" || !Option.isSome(pendingTurnStart)
                   ? existingTurn.value.interactionMode
                   : pendingTurnStart.value.interactionMode,
               startedAt:

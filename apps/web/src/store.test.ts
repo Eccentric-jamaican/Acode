@@ -1,5 +1,6 @@
 import {
   DEFAULT_MODEL_BY_PROVIDER,
+  MessageId,
   ProjectId,
   TaskId,
   ThreadId,
@@ -62,9 +63,7 @@ function makeState(thread: Thread): AppState {
   };
 }
 
-function makeReadModelThread(
-  overrides: Partial<OrchestrationReadModel["threads"][number]> = {},
-) {
+function makeReadModelThread(overrides: Partial<OrchestrationReadModel["threads"][number]> = {}) {
   return {
     id: ThreadId.makeUnsafe("thread-1"),
     projectId: ProjectId.makeUnsafe("project-1"),
@@ -114,7 +113,9 @@ function makeReadModel(thread: OrchestrationReadModel["threads"][number]): Orche
   };
 }
 
-function makeTaskReadModel(threadId: ThreadId | null = null): OrchestrationReadModel["tasks"][number] {
+function makeTaskReadModel(
+  threadId: ThreadId | null = null,
+): OrchestrationReadModel["tasks"][number] {
   return {
     id: TaskId.makeUnsafe("task-1"),
     projectId: ProjectId.makeUnsafe("project-1"),
@@ -268,5 +269,75 @@ describe("store read model sync", () => {
     expect(next.projectRules[0]?.onSuccessMoveTo).toBe("review");
     expect(next.threads[0]?.origin).toBe("task");
     expect(next.threads[0]?.taskId).toBe(TaskId.makeUnsafe("task-1"));
+  });
+
+  it("returns the same state object when a read model snapshot has no effective changes", () => {
+    const initialState = makeState(makeThread());
+    const readModel = makeReadModel(makeReadModelThread());
+
+    const hydrated = syncServerReadModel(initialState, readModel);
+    const repeated = syncServerReadModel(hydrated, readModel);
+
+    expect(repeated).toBe(hydrated);
+  });
+
+  it("reuses unchanged threads and messages when another thread changes", () => {
+    const initialState = makeState(makeThread());
+    const firstThread = makeReadModelThread({
+      id: ThreadId.makeUnsafe("thread-1"),
+      messages: [
+        {
+          id: MessageId.makeUnsafe("message-1"),
+          turnId: null,
+          role: "assistant",
+          text: "Stable",
+          streaming: false,
+          createdAt: "2026-02-27T00:00:00.000Z",
+          updatedAt: "2026-02-27T00:00:00.000Z",
+          attachments: [],
+        },
+      ],
+    });
+    const secondThread = makeReadModelThread({
+      id: ThreadId.makeUnsafe("thread-2"),
+      title: "Streaming",
+      messages: [
+        {
+          id: MessageId.makeUnsafe("message-2"),
+          turnId: null,
+          role: "assistant",
+          text: "Hel",
+          streaming: true,
+          createdAt: "2026-02-27T00:00:01.000Z",
+          updatedAt: "2026-02-27T00:00:01.000Z",
+          attachments: [],
+        },
+      ],
+    });
+    const readModel = {
+      ...makeReadModel(firstThread),
+      threads: [firstThread, secondThread],
+    } satisfies OrchestrationReadModel;
+    const hydrated = syncServerReadModel(initialState, readModel);
+    const changedSecondThread = {
+      ...secondThread,
+      messages: [
+        {
+          ...secondThread.messages[0]!,
+          text: "Hello",
+          updatedAt: "2026-02-27T00:00:02.000Z",
+        },
+      ],
+    } satisfies OrchestrationReadModel["threads"][number];
+
+    const next = syncServerReadModel(hydrated, {
+      ...readModel,
+      threads: [firstThread, changedSecondThread],
+    });
+
+    expect(next.threads[0]).toBe(hydrated.threads[0]);
+    expect(next.threads[0]?.messages[0]).toBe(hydrated.threads[0]?.messages[0]);
+    expect(next.threads[1]).not.toBe(hydrated.threads[1]);
+    expect(next.threads[1]?.messages[0]).not.toBe(hydrated.threads[1]?.messages[0]);
   });
 });

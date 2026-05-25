@@ -26,6 +26,7 @@ import {
   type ProviderSkillDescriptor,
   type ThreadId,
   type TurnId,
+  type UploadChatAttachment,
   OrchestrationThreadActivity,
   RuntimeMode,
   ProviderInteractionMode,
@@ -135,6 +136,7 @@ import {
   DEFAULT_RUNTIME_MODE,
   DEFAULT_THREAD_TERMINAL_ID,
   MAX_THREAD_TERMINAL_COUNT,
+  type ChatAttachment,
   type ChatMessage,
   type Thread,
   type TurnDiffSummary,
@@ -283,9 +285,9 @@ const THREAD_CONTEXT_PANEL_ARTIFACTS_COLLAPSED_KEY =
   "t3code:thread-context-panel-artifacts-collapsed";
 const THREAD_CONTEXT_PANEL_SOURCES_COLLAPSED_KEY = "t3code:thread-context-panel-sources-collapsed";
 const ATTACHMENT_PREVIEW_HANDOFF_TTL_MS = 5000;
-const IMAGE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / (1024 * 1024))}MB`;
-const IMAGE_ONLY_BOOTSTRAP_PROMPT =
-  "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
+const ATTACHMENT_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / (1024 * 1024))}MB`;
+const ATTACHMENT_ONLY_BOOTSTRAP_PROMPT =
+  "[User attached one or more files without additional text. Respond using the conversation context and any attached image(s).]";
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_KEYBINDINGS: ResolvedKeybindingsConfig = [];
 const EMPTY_PROJECT_ENTRIES: ProjectEntry[] = [];
@@ -314,6 +316,63 @@ const HANDOFF_WHEEL_SNAP_DELTA = 36;
 const HANDOFF_WHEEL_RESET_GAP_MS = 220;
 const HANDOFF_WHEEL_COOLDOWN_MS = 180;
 const DESKTOP_APP_RESOLUTION_TIMEOUT_MS = 2_500;
+
+function attachmentTypeForFile(file: File): ChatAttachment["type"] | null {
+  if (file.type.startsWith("image/")) {
+    return "image";
+  }
+  if (file.type === "application/pdf") {
+    return "pdf";
+  }
+  return null;
+}
+
+function attachmentLabel(attachment: Pick<ChatAttachment, "type" | "name">): string {
+  return attachment.type === "pdf" ? `PDF: ${attachment.name}` : `Image: ${attachment.name}`;
+}
+
+function toOptimisticChatAttachment(attachment: ComposerImageAttachment): ChatAttachment {
+  if (attachment.type === "pdf") {
+    return {
+      type: "pdf",
+      id: attachment.id,
+      name: attachment.name,
+      mimeType: "application/pdf",
+      sizeBytes: attachment.sizeBytes,
+      previewUrl: attachment.previewUrl,
+    };
+  }
+  return {
+    type: "image",
+    id: attachment.id,
+    name: attachment.name,
+    mimeType: attachment.mimeType,
+    sizeBytes: attachment.sizeBytes,
+    previewUrl: attachment.previewUrl,
+  };
+}
+
+async function toUploadChatAttachment(
+  attachment: ComposerImageAttachment,
+): Promise<UploadChatAttachment> {
+  const dataUrl = await readFileAsDataUrl(attachment.file);
+  if (attachment.type === "pdf") {
+    return {
+      type: "pdf",
+      name: attachment.name,
+      mimeType: "application/pdf",
+      sizeBytes: attachment.sizeBytes,
+      dataUrl,
+    };
+  }
+  return {
+    type: "image",
+    name: attachment.name,
+    mimeType: attachment.mimeType,
+    sizeBytes: attachment.sizeBytes,
+    dataUrl,
+  };
+}
 const DESKTOP_APP_ICON_PREWARM_COUNT = 10;
 const THREAD_CONTEXT_ARTIFACT_EXTENSIONS = new Set([
   "avif",
@@ -818,7 +877,10 @@ function selectedComposerExtensionsFromPrompt(input: {
     const marker = match[2];
     const desktopApp = marker === "@" ? desktopAppsByName.get(normalizedName) : undefined;
     if (desktopApp) {
-      selected.set(`desktop-app:${desktopApp.appId}`, selectedComposerExtensionFromDesktopApp(desktopApp));
+      selected.set(
+        `desktop-app:${desktopApp.appId}`,
+        selectedComposerExtensionFromDesktopApp(desktopApp),
+      );
       continue;
     }
     const plugin = pluginsByName.get(normalizedName);
@@ -988,9 +1050,7 @@ function promptWithSelectedComposerExtensions(input: {
     (extension) => extension.type === "desktop-app" && extension.desktopApp,
   );
   const selectedPrompt = providerExtensions
-    .filter(
-      (extension) => !promptContainsSelectedComposerExtensionToken(input.prompt, extension),
-    )
+    .filter((extension) => !promptContainsSelectedComposerExtensionToken(input.prompt, extension))
     .map((extension) => `${selectedComposerExtensionMarker(extension)}${extension.mentionName}`)
     .join(" ");
   const cleanPrompt = input.prompt.trim();
@@ -1023,9 +1083,7 @@ function displayPromptWithSelectedComposerExtensions(input: {
 }): string {
   if (input.selectedExtensions.length === 0) return input.prompt;
   const selectedPrompt = input.selectedExtensions
-    .filter(
-      (extension) => !promptContainsSelectedComposerExtensionToken(input.prompt, extension),
-    )
+    .filter((extension) => !promptContainsSelectedComposerExtensionToken(input.prompt, extension))
     .map((extension) => `${selectedComposerExtensionMarker(extension)}${extension.mentionName}`)
     .join(" ");
   const cleanPrompt = input.prompt.trim();
@@ -1236,9 +1294,6 @@ function revokeUserMessagePreviewUrls(message: ChatMessage): void {
     return;
   }
   for (const attachment of message.attachments) {
-    if (attachment.type !== "image") {
-      continue;
-    }
     revokeBlobPreviewUrl(attachment.previewUrl);
   }
 }
@@ -1249,7 +1304,6 @@ function collectUserMessageBlobPreviewUrls(message: ChatMessage): string[] {
   }
   const previewUrls: string[] = [];
   for (const attachment of message.attachments) {
-    if (attachment.type !== "image") continue;
     if (!attachment.previewUrl || !attachment.previewUrl.startsWith("blob:")) continue;
     previewUrls.push(attachment.previewUrl);
   }
@@ -1302,12 +1356,14 @@ function buildQueuedComposerPreviewText(input: {
   if (input.trimmedPrompt.length > 0) {
     return input.trimmedPrompt;
   }
-  const firstImage = input.images[0];
-  if (firstImage) {
-    return `Image: ${firstImage.name}`;
+  const firstAttachment = input.images[0];
+  if (firstAttachment) {
+    return attachmentLabel(firstAttachment);
   }
   return "Queued follow-up";
 }
+
+type FileWithLocalPath = File & { path?: string };
 
 function readFileAsDataUrl(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -1324,6 +1380,38 @@ function readFileAsDataUrl(file: File): Promise<string> {
     });
     reader.readAsDataURL(file);
   });
+}
+
+function localFilesystemPathForFile(file: File): string | null {
+  const maybePath = (file as FileWithLocalPath).path;
+  if (typeof maybePath !== "string") {
+    return null;
+  }
+  const trimmed = maybePath.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function promptWithLocalAttachmentPaths(input: {
+  prompt: string;
+  attachments: ReadonlyArray<ComposerImageAttachment>;
+}): string {
+  const localPaths = input.attachments
+    .filter((attachment) => attachment.type !== "image")
+    .map((attachment) => attachment.localPath?.trim() ?? "")
+    .filter((path) => path.length > 0);
+  if (localPaths.length === 0) {
+    return input.prompt;
+  }
+
+  const uniquePaths = Array.from(new Set(localPaths));
+  const pathBlock = [
+    "",
+    "Attached local file paths:",
+    ...uniquePaths.map((path) => `- ${path}`),
+    "",
+    "If needed, inspect these files directly from disk using the provided paths.",
+  ].join("\n");
+  return `${input.prompt}${pathBlock}`;
 }
 
 function buildTemporaryWorktreeBranchName(): string {
@@ -1526,9 +1614,9 @@ export default function ChatView({
     SelectedComposerShortcut[]
   >([]);
   const [queuedComposerTurns, setQueuedComposerTurns] = useState<QueuedComposerTurn[]>([]);
-  const [disabledOpencodeModelSlugs, setDisabledOpencodeModelSlugs] = useState<
-    ReadonlySet<string>
-  >(() => new Set());
+  const [disabledOpencodeModelSlugs, setDisabledOpencodeModelSlugs] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
   const [lastInvokedScriptByProjectId, setLastInvokedScriptByProjectId] = useState<
     Record<string, string>
   >(() => readLastInvokedScriptByProjectFromStorage());
@@ -1692,7 +1780,8 @@ export default function ChatView({
   const homeDirectory = serverConfigQuery.data?.homeDirectory ?? null;
   const chatWorkspaceRoot = serverConfigQuery.data?.chatWorkspaceRoot ?? null;
   const projectPickerProjects = useMemo(
-    () => projects.filter((project) => !isChatsProject(project, chatWorkspaceRoot ?? homeDirectory)),
+    () =>
+      projects.filter((project) => !isChatsProject(project, chatWorkspaceRoot ?? homeDirectory)),
     [chatWorkspaceRoot, homeDirectory, projects],
   );
   const isActiveHomeProject = activeProject
@@ -1783,7 +1872,9 @@ export default function ChatView({
     if (!draftModel) {
       return fallbackModel;
     }
-    return resolveModelForProviderPicker(selectedProvider, draftModel, providerOptions) ?? fallbackModel;
+    return (
+      resolveModelForProviderPicker(selectedProvider, draftModel, providerOptions) ?? fallbackModel
+    );
   }, [baseThreadModel, composerDraft.model, modelOptionsByProvider, selectedProvider]);
   const selectedOpencodeModelCapabilities =
     selectedProvider === "opencode"
@@ -1850,7 +1941,9 @@ export default function ChatView({
       : (normalizeModelSlug(selectedModelForPicker, selectedProvider) ?? selectedModelForPicker);
   }, [modelOptionsByProvider, selectedModelForPicker, selectedProvider]);
   useEffect(() => {
-    const disabledModelMatch = /OpenCode model '([^']+)' is disabled/i.exec(activeThread?.error ?? "");
+    const disabledModelMatch = /OpenCode model '([^']+)' is disabled/i.exec(
+      activeThread?.error ?? "",
+    );
     const disabledModelSlug = disabledModelMatch?.[1];
     if (!activeThread?.id || !disabledModelSlug) {
       return;
@@ -1984,9 +2077,7 @@ export default function ChatView({
     if (Object.keys(locallyDismissedApprovalRequestIds).length === 0) {
       return;
     }
-    const activeRequestIds = new Set(
-      pendingApprovals.map((approval) => `${approval.requestId}`),
-    );
+    const activeRequestIds = new Set(pendingApprovals.map((approval) => `${approval.requestId}`));
     setLocallyDismissedApprovalRequestIds((existing) => {
       const next = Object.fromEntries(
         Object.entries(existing).filter(([requestId]) => activeRequestIds.has(requestId)),
@@ -1998,9 +2089,7 @@ export default function ChatView({
     if (Object.keys(locallyDismissedUserInputRequestIds).length === 0) {
       return;
     }
-    const activeRequestIds = new Set(
-      pendingUserInputs.map((request) => `${request.requestId}`),
-    );
+    const activeRequestIds = new Set(pendingUserInputs.map((request) => `${request.requestId}`));
     setLocallyDismissedUserInputRequestIds((existing) => {
       const next = Object.fromEntries(
         Object.entries(existing).filter(([requestId]) => activeRequestIds.has(requestId)),
@@ -2234,13 +2323,13 @@ export default function ChatView({
             }
 
             let changed = false;
-            let imageIndex = 0;
+            let attachmentIndex = 0;
             const attachments = message.attachments.map((attachment) => {
-              if (attachment.type !== "image") {
+              if (!attachment.previewUrl) {
                 return attachment;
               }
-              const handoffPreviewUrl = handoffPreviewUrls[imageIndex];
-              imageIndex += 1;
+              const handoffPreviewUrl = handoffPreviewUrls[attachmentIndex];
+              attachmentIndex += 1;
               if (!handoffPreviewUrl || attachment.previewUrl === handoffPreviewUrl) {
                 return attachment;
               }
@@ -2533,7 +2622,8 @@ export default function ChatView({
     });
     return [...providerUserMessageMentionDescriptors, ...desktopAppDescriptors];
   }, [desktopApps, providerUserMessageMentionDescriptors]);
-  const composerMentionDescriptors: readonly ComposerMentionDescriptor[] = userMessageMentionDescriptors;
+  const composerMentionDescriptors: readonly ComposerMentionDescriptor[] =
+    userMessageMentionDescriptors;
 
   const composerMenuItems = useComposerCommandMenuItems({
     composerTrigger,
@@ -2568,38 +2658,33 @@ export default function ChatView({
   const keybindings = serverConfigQuery.data?.keybindings ?? EMPTY_KEYBINDINGS;
   const availableEditors = serverConfigQuery.data?.availableEditors ?? EMPTY_AVAILABLE_EDITORS;
   const activeProvider = activeThread?.session?.provider ?? "codex";
-  const activeProviderStatus = useMemo(
-    () => {
-      const providerStatus =
-        providerStatuses.find((status) => status.provider === activeProvider) ?? null;
-      if (!providerStatus) {
-        return null;
-      }
+  const activeProviderStatus = useMemo(() => {
+    const providerStatus =
+      providerStatuses.find((status) => status.provider === activeProvider) ?? null;
+    if (!providerStatus) {
+      return null;
+    }
 
-      const liveSession = activeThread?.session;
-      const liveSessionMatchesProvider =
-        liveSession !== null &&
-        liveSession !== undefined &&
-        liveSession.provider === activeProvider;
-      const liveSessionHealthy =
-        liveSessionMatchesProvider &&
-        liveSession.lastError === null &&
-        (liveSession.status === "connecting" ||
-          liveSession.status === "running" ||
-          liveSession.status === "ready");
+    const liveSession = activeThread?.session;
+    const liveSessionMatchesProvider =
+      liveSession !== null && liveSession !== undefined && liveSession.provider === activeProvider;
+    const liveSessionHealthy =
+      liveSessionMatchesProvider &&
+      liveSession.lastError === null &&
+      (liveSession.status === "connecting" ||
+        liveSession.status === "running" ||
+        liveSession.status === "ready");
 
-      if (!liveSessionHealthy || providerStatus.status === "ready") {
-        return providerStatus;
-      }
+    if (!liveSessionHealthy || providerStatus.status === "ready") {
+      return providerStatus;
+    }
 
-      const { message: _message, ...providerStatusWithoutMessage } = providerStatus;
-      return {
-        ...providerStatusWithoutMessage,
-        status: "ready" as const,
-      };
-    },
-    [activeProvider, activeThread?.session, providerStatuses],
-  );
+    const { message: _message, ...providerStatusWithoutMessage } = providerStatus;
+    return {
+      ...providerStatusWithoutMessage,
+      status: "ready" as const,
+    };
+  }, [activeProvider, activeThread?.session, providerStatuses]);
   const activeProjectCwd = activeProject?.cwd ?? null;
   const activeThreadWorktreePath = activeThread?.worktreePath ?? null;
   const threadTerminalRuntimeEnv = useMemo(() => {
@@ -3439,6 +3524,7 @@ export default function ChatView({
             try {
               const dataUrl = await readFileAsDataUrl(image.file);
               stagedAttachmentById.set(image.id, {
+                type: image.type,
                 id: image.id,
                 name: image.name,
                 mimeType: image.mimeType,
@@ -3633,24 +3719,27 @@ export default function ChatView({
     let nextImageCount = composerImagesRef.current.length;
     let error: string | null = null;
     for (const file of files) {
-      if (!file.type.startsWith("image/")) {
-        error = `Unsupported file type for '${file.name}'. Please attach image files only.`;
+      const attachmentType = attachmentTypeForFile(file);
+      if (!attachmentType) {
+        error = `Unsupported file type for '${file.name}'. Please attach images or PDFs only.`;
         continue;
       }
       if (file.size > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
-        error = `'${file.name}' exceeds the ${IMAGE_SIZE_LIMIT_LABEL} attachment limit.`;
+        error = `'${file.name}' exceeds the ${ATTACHMENT_SIZE_LIMIT_LABEL} attachment limit.`;
         continue;
       }
       if (nextImageCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
-        error = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} images per message.`;
+        error = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`;
         break;
       }
 
+      const localPath = localFilesystemPathForFile(file);
       const previewUrl = URL.createObjectURL(file);
       nextImages.push({
-        type: "image",
+        type: attachmentType,
         id: crypto.randomUUID(),
-        name: file.name || "image",
+        name: file.name || (attachmentType === "pdf" ? "document.pdf" : "image"),
+        ...(localPath ? { localPath } : {}),
         mimeType: file.type,
         sizeBytes: file.size,
         previewUrl,
@@ -3676,12 +3765,12 @@ export default function ChatView({
     if (files.length === 0) {
       return;
     }
-    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
-    if (imageFiles.length === 0) {
+    const attachmentFiles = files.filter((file) => attachmentTypeForFile(file) !== null);
+    if (attachmentFiles.length === 0) {
       return;
     }
     event.preventDefault();
-    addComposerImages(imageFiles);
+    addComposerImages(attachmentFiles);
   };
 
   const onComposerDragEnter = (event: React.DragEvent<HTMLDivElement>) => {
@@ -3973,6 +4062,10 @@ export default function ChatView({
     const runtimeModeForSend = queuedChatTurn?.runtimeMode ?? runtimeMode;
     const interactionModeForSend = queuedChatTurn?.interactionMode ?? interactionMode;
     const envModeForSend = queuedChatTurn?.envMode ?? envMode;
+    const providerInputTextForSend = promptWithLocalAttachmentPaths({
+      prompt: promptForSend,
+      attachments: composerImagesForSend,
+    });
     const trimmed = promptForSend.trim();
     const displayTrimmed = displayPromptForSend.trim();
     if (showPlanFollowUpPrompt && activeProposedPlan) {
@@ -4100,28 +4193,17 @@ export default function ChatView({
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
     const turnAttachmentsPromise = Promise.all(
-      composerImagesSnapshot.map(async (image) => ({
-        type: "image" as const,
-        name: image.name,
-        mimeType: image.mimeType,
-        sizeBytes: image.sizeBytes,
-        dataUrl: await readFileAsDataUrl(image.file),
-      })),
+      composerImagesSnapshot.map((image) => toUploadChatAttachment(image)),
     );
-    const optimisticAttachments = composerImagesSnapshot.map((image) => ({
-      type: "image" as const,
-      id: image.id,
-      name: image.name,
-      mimeType: image.mimeType,
-      sizeBytes: image.sizeBytes,
-      previewUrl: image.previewUrl,
-    }));
+    const optimisticAttachments = composerImagesSnapshot.map((image) =>
+      toOptimisticChatAttachment(image),
+    );
     setOptimisticUserMessages((existing) => [
       ...existing,
       {
         id: messageIdForSend,
         role: "user",
-        text: displayTrimmed || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+        text: displayTrimmed || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
         ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
         createdAt: messageCreatedAt,
         streaming: false,
@@ -4132,9 +4214,9 @@ export default function ChatView({
     forceStickToBottom();
 
     setThreadError(threadIdForSend, null);
-      clearComposerInput(threadIdForSend, {
-        preserveSelectedExtensions: persistentDesktopAppExtensionsForSend,
-      });
+    clearComposerInput(threadIdForSend, {
+      preserveSelectedExtensions: persistentDesktopAppExtensionsForSend,
+    });
 
     let createdServerThreadForLocalDraft = false;
     let turnStartSucceeded = false;
@@ -4176,7 +4258,10 @@ export default function ChatView({
       let titleSeed = displayTrimmed;
       if (!titleSeed) {
         if (firstComposerImageName) {
-          titleSeed = `Image: ${firstComposerImageName}`;
+          const firstComposerAttachment = composerImagesSnapshot[0];
+          titleSeed = firstComposerAttachment
+            ? attachmentLabel(firstComposerAttachment)
+            : `Attachment: ${firstComposerImageName}`;
         } else {
           titleSeed = "New thread";
         }
@@ -4198,12 +4283,13 @@ export default function ChatView({
         if (dateSegment && baseSlug) {
           const existingDirectoryNames = await api.projects
             .listDirectory({ cwd: chatWorkspaceRoot, relativePath: dateSegment })
-            .then((result) =>
-              new Set(
-                result.entries
-                  .filter((entry) => entry.kind === "directory")
-                  .map((entry) => entry.name.toLowerCase()),
-              ),
+            .then(
+              (result) =>
+                new Set(
+                  result.entries
+                    .filter((entry) => entry.kind === "directory")
+                    .map((entry) => entry.name.toLowerCase()),
+                ),
             )
             .catch(() => new Set<string>());
           while (
@@ -4306,9 +4392,11 @@ export default function ChatView({
         message: {
           messageId: messageIdForSend,
           role: "user",
-          text: displayTrimmed || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+          text: displayTrimmed || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
           attachments: turnAttachments,
-          ...(promptForSend !== displayPromptForSend ? { providerInputText: promptForSend } : {}),
+          ...(providerInputTextForSend !== displayPromptForSend
+            ? { providerInputText: providerInputTextForSend }
+            : {}),
         },
         model: selectedModelForSend || undefined,
         serviceTier: selectedServiceTier,
@@ -6318,7 +6406,7 @@ export default function ChatView({
                           key={image.id}
                           className="relative h-14 w-14 overflow-hidden rounded-md border border-border/50 bg-background"
                         >
-                          {image.previewUrl ? (
+                          {image.type === "image" && image.previewUrl ? (
                             <button
                               type="button"
                               className="h-full w-full cursor-zoom-in"
@@ -6336,8 +6424,17 @@ export default function ChatView({
                               />
                             </button>
                           ) : (
-                            <div className="flex h-full w-full items-center justify-center px-1 text-center text-[10px] text-muted-foreground/70">
-                              {image.name}
+                            <div className="flex h-full w-full flex-col items-center justify-center gap-0.5 px-1 text-center text-[10px] text-muted-foreground/70">
+                              {image.type === "pdf" ? (
+                                <>
+                                  <span className="font-medium uppercase tracking-wide text-foreground/75">
+                                    PDF
+                                  </span>
+                                  <span className="line-clamp-2">{image.name}</span>
+                                </>
+                              ) : (
+                                image.name
+                              )}
                             </div>
                           )}
                           {nonPersistedComposerImageIdSet.has(image.id) && (
@@ -6562,7 +6659,9 @@ export default function ChatView({
                                   : "Approval required for this turn. Click to enable full access for this thread."
                               }
                             >
-                              {runtimeMode === "full-access" ? "Full access (thread)" : "Supervised"}
+                              {runtimeMode === "full-access"
+                                ? "Full access (thread)"
+                                : "Supervised"}
                             </Button>
                           </>
                         ) : null}
