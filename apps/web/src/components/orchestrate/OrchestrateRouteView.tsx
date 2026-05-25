@@ -645,14 +645,16 @@ export default function OrchestrateRouteView({
           state: "backlog",
         };
       }
-      return {
-        title: currentTask.task.title,
-        brief: currentTask.task.brief,
-        briefCursor: currentTask.task.brief.length,
-        attachments: taskDraftAttachmentsFromTask(currentTask.task.attachments),
-        acceptanceCriteria: currentTask.task.acceptanceCriteria,
-        priority: currentTask.task.priority === null ? "" : String(currentTask.task.priority),
-        state: currentTask.task.state,
+        return {
+          title: currentTask.task.title,
+          brief: currentTask.task.brief,
+          briefCursor: currentTask.task.brief.length,
+          attachments: taskDraftAttachmentsFromTask(
+            currentTask.task.attachments.filter((attachment) => attachment.type === "image"),
+          ),
+          acceptanceCriteria: currentTask.task.acceptanceCriteria,
+          priority: currentTask.task.priority === null ? "" : String(currentTask.task.priority),
+          state: currentTask.task.state,
       };
     });
   }, [currentTask]);

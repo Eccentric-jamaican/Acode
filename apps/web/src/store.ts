@@ -15,6 +15,7 @@ import {
 } from "@t3tools/shared/model";
 import { create } from "zustand";
 import {
+  type ChatAttachment,
   type ChatMessage,
   type ErrorInboxEntry,
   type Project,
@@ -128,6 +129,34 @@ function updateThread(
     return updated;
   });
   return changed ? next : threads;
+}
+
+function toPreviewableChatAttachment(input: {
+  type: ChatAttachment["type"];
+  id: string;
+  name: string;
+  mimeType: string;
+  sizeBytes: number;
+}): ChatAttachment {
+  const previewUrl = toAttachmentPreviewUrl(attachmentPreviewRoutePath(input.id));
+  if (input.type === "pdf") {
+    return {
+      type: "pdf",
+      id: input.id,
+      name: input.name,
+      mimeType: "application/pdf",
+      sizeBytes: input.sizeBytes,
+      previewUrl,
+    };
+  }
+  return {
+    type: "image",
+    id: input.id,
+    name: input.name,
+    mimeType: input.mimeType,
+    sizeBytes: input.sizeBytes,
+    previewUrl,
+  };
 }
 
 function mapProjectsFromReadModel(
@@ -277,14 +306,9 @@ export function syncServerReadModel(state: AppState, readModel: OrchestrationRea
       title: task.title,
       brief: task.brief,
       acceptanceCriteria: task.acceptanceCriteria,
-      attachments: (task.attachments ?? []).map((attachment) => ({
-        type: "image" as const,
-        id: attachment.id,
-        name: attachment.name,
-        mimeType: attachment.mimeType,
-        sizeBytes: attachment.sizeBytes,
-        previewUrl: toAttachmentPreviewUrl(attachmentPreviewRoutePath(attachment.id)),
-      })),
+      attachments: (task.attachments ?? []).map((attachment) =>
+        toPreviewableChatAttachment(attachment),
+      ),
       state: task.state,
       priority: task.priority,
       threadId: task.threadId,
@@ -329,14 +353,9 @@ export function syncServerReadModel(state: AppState, readModel: OrchestrationRea
             }
           : null,
         messages: thread.messages.map((message) => {
-          const attachments = message.attachments?.map((attachment) => ({
-            type: "image" as const,
-            id: attachment.id,
-            name: attachment.name,
-            mimeType: attachment.mimeType,
-            sizeBytes: attachment.sizeBytes,
-            previewUrl: toAttachmentPreviewUrl(attachmentPreviewRoutePath(attachment.id)),
-          }));
+          const attachments = message.attachments?.map((attachment) =>
+            toPreviewableChatAttachment(attachment),
+          );
           const normalizedMessage: ChatMessage = {
             id: message.id,
             role: message.role,

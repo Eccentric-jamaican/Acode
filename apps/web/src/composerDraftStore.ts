@@ -13,7 +13,7 @@ import { normalizeModelSlug } from "@t3tools/shared/model";
 import {
   DEFAULT_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
-  type ChatImageAttachment,
+  type ChatAttachment,
 } from "./types";
 import type { BrowserInspectCapture } from "@t3tools/contracts";
 import { create } from "zustand";
@@ -23,6 +23,7 @@ export const COMPOSER_DRAFT_STORAGE_KEY = "t3code:composer-drafts:v1";
 export type DraftThreadEnvMode = "local" | "worktree";
 
 export interface PersistedComposerImageAttachment {
+  type: ChatAttachment["type"];
   id: string;
   name: string;
   mimeType: string;
@@ -30,7 +31,8 @@ export interface PersistedComposerImageAttachment {
   dataUrl: string;
 }
 
-export interface ComposerImageAttachment extends Omit<ChatImageAttachment, "previewUrl"> {
+export interface ComposerImageAttachment extends Omit<ChatAttachment, "previewUrl"> {
+  localPath?: string;
   previewUrl: string;
   file: File;
 }
@@ -280,12 +282,14 @@ function normalizePersistedAttachment(value: unknown): PersistedComposerImageAtt
     return null;
   }
   const candidate = value as Record<string, unknown>;
+  const type = candidate.type;
   const id = candidate.id;
   const name = candidate.name;
   const mimeType = candidate.mimeType;
   const sizeBytes = candidate.sizeBytes;
   const dataUrl = candidate.dataUrl;
   if (
+    (type !== "image" && type !== "pdf") ||
     typeof id !== "string" ||
     typeof name !== "string" ||
     typeof mimeType !== "string" ||
@@ -298,6 +302,7 @@ function normalizePersistedAttachment(value: unknown): PersistedComposerImageAtt
     return null;
   }
   return {
+    type,
     id,
     name,
     mimeType,
@@ -609,7 +614,7 @@ function hydrateImagesFromPersisted(
 
     return [
       {
-        type: "image" as const,
+        type: attachment.type,
         id: attachment.id,
         name: attachment.name,
         mimeType: attachment.mimeType,

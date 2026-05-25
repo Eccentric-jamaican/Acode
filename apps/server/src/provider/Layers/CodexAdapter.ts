@@ -1505,7 +1505,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
     const sendTurn: CodexAdapterShape["sendTurn"] = (input) =>
       Effect.gen(function* () {
         const codexAttachments = yield* Effect.forEach(
-          input.attachments ?? [],
+          (input.attachments ?? []).filter((attachment) => attachment.type === "image"),
           (attachment) =>
             Effect.gen(function* () {
               const attachmentPath = resolveAttachmentPath({

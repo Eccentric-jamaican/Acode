@@ -241,6 +241,17 @@ function isUploadChatAttachment(
   return "dataUrl" in attachment;
 }
 
+function normalizedUploadAttachmentType(mimeType: string): "image" | "pdf" | null {
+  const normalizedMimeType = mimeType.toLowerCase();
+  if (normalizedMimeType.startsWith("image/")) {
+    return "image";
+  }
+  if (normalizedMimeType === "application/pdf") {
+    return "pdf";
+  }
+  return null;
+}
+
 function overlayProviderStatuses(params: {
   readonly providerStatuses: ReadonlyArray<ServerProviderStatus>;
   readonly providerAccounts: ReadonlyArray<ServerProviderAccountSummary>;
@@ -433,16 +444,17 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
             }
 
             const parsed = parseBase64DataUrl(attachment.dataUrl);
-            if (!parsed || !parsed.mimeType.startsWith("image/")) {
+            const attachmentType = parsed ? normalizedUploadAttachmentType(parsed.mimeType) : null;
+            if (!parsed || !attachmentType) {
               return yield* new RouteRequestError({
-                message: `Invalid image attachment payload for '${attachment.name}'.`,
+                message: `Invalid attachment payload for '${attachment.name}'.`,
               });
             }
 
             const bytes = Buffer.from(parsed.base64, "base64");
             if (bytes.byteLength === 0 || bytes.byteLength > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
               return yield* new RouteRequestError({
-                message: `Image attachment '${attachment.name}' is empty or too large.`,
+                message: `Attachment '${attachment.name}' is empty or too large.`,
               });
             }
 
@@ -453,13 +465,22 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
               });
             }
 
-            const persistedAttachment: PersistedChatAttachment = {
-              type: "image",
-              id: attachmentId,
-              name: attachment.name,
-              mimeType: parsed.mimeType.toLowerCase(),
-              sizeBytes: bytes.byteLength,
-            };
+            const persistedAttachment: PersistedChatAttachment =
+              attachmentType === "pdf"
+                ? {
+                    type: "pdf",
+                    id: attachmentId,
+                    name: attachment.name,
+                    mimeType: "application/pdf",
+                    sizeBytes: bytes.byteLength,
+                  }
+                : {
+                    type: "image",
+                    id: attachmentId,
+                    name: attachment.name,
+                    mimeType: parsed.mimeType.toLowerCase(),
+                    sizeBytes: bytes.byteLength,
+                  };
 
             const attachmentPath = resolveAttachmentPath({
               stateDir: serverConfig.stateDir,
