@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  buildOpenCodeInlineConfig,
   resolveOpenCodeBinaryPath,
   resolveOpenCodeMcpWrapperPath,
   resolveOpenCodeProcessLaunch,
@@ -45,6 +46,31 @@ describe("resolveOpenCodeMcpWrapperPath", () => {
     expect(contents).toContain('set "T3CODE_STATE_DIR=C:\\Users\\Addis\\.t3-mine\\userdata"');
     expect(contents).toContain('"C:\\Program Files\\T3\\computerMcpServer.mjs"');
     expect(contents).toContain(`"${process.execPath}"`);
+  });
+});
+
+describe("buildOpenCodeInlineConfig", () => {
+  it("forces T3 MCP servers and matching tool globs on for spawned OpenCode runtimes", () => {
+    const stateDir = makeTempDir("t3-opencode-config-");
+    const config = buildOpenCodeInlineConfig({
+      workspaceCwd: process.cwd(),
+      stateDir,
+    }) as {
+      mcp?: Record<string, { type?: string; enabled?: boolean; command?: Array<string> }>;
+      tools?: Record<string, boolean>;
+    };
+
+    expect(config.mcp?.t3_computer).toMatchObject({
+      type: "local",
+      enabled: true,
+    });
+    expect(config.mcp?.t3_computer?.command?.length).toBeGreaterThan(0);
+    expect(config.tools).toMatchObject({
+      t3_computer: true,
+      "t3_computer*": true,
+      t3_imagegen: true,
+      "t3_imagegen*": true,
+    });
   });
 });
 

@@ -35,11 +35,20 @@ const WINDOWS_BATCH_EXTENSIONS = new Set([".bat", ".cmd"]);
 const WINDOWS_EXECUTABLE_EXTENSIONS = [".cmd", ".bat", ".exe", ".com"] as const;
 
 function resolveSiblingRuntimePath(relativeBaseName: string): string {
-  const builtPath = fileURLToPath(new URL(`../${relativeBaseName}.mjs`, import.meta.url));
-  if (FS.existsSync(builtPath)) {
-    return builtPath;
+  const modulePath = fileURLToPath(import.meta.url);
+  const moduleDir = Path.dirname(modulePath);
+  const candidates = [
+    Path.join(moduleDir, `${relativeBaseName}.mjs`),
+    Path.join(moduleDir, "..", "dist", `${relativeBaseName}.mjs`),
+    Path.join(moduleDir, "..", `${relativeBaseName}.mjs`),
+    Path.join(moduleDir, "..", `${relativeBaseName}.ts`),
+  ];
+  for (const candidate of candidates) {
+    if (FS.existsSync(candidate)) {
+      return candidate;
+    }
   }
-  return fileURLToPath(new URL(`../${relativeBaseName}.ts`, import.meta.url));
+  return Path.join(moduleDir, "..", `${relativeBaseName}.ts`);
 }
 
 function resolveBrowserUseClientPath(): string {
@@ -124,21 +133,10 @@ function resolveOpenCodeLocalMcpLaunch(input: {
   };
 }
 
-function buildOpenCodeInlineConfig(input: {
+export function buildOpenCodeT3ComputerMcpConfig(input: {
   readonly workspaceCwd: string | undefined;
   readonly stateDir: string | undefined;
 }): Record<string, unknown> {
-  const imagegenEnv = {
-    ELECTRON_RUN_AS_NODE: "1",
-    CODEX_HOME: process.env.CODEX_HOME ?? Path.join(OS.homedir(), ".codex"),
-    T3_IMAGEGEN_WORKSPACE: input.workspaceCwd ?? process.cwd(),
-  };
-  const imagegenLaunch = resolveOpenCodeLocalMcpLaunch({
-    stateDir: input.stateDir,
-    wrapperName: "t3-imagegen",
-    scriptPath: resolveImagegenMcpServerPath(),
-    env: imagegenEnv,
-  });
   const computerEnv = {
     ELECTRON_RUN_AS_NODE: "1",
     T3CODE_STATE_DIR: input.stateDir ?? Path.join(OS.homedir(), ".t3", "dev"),
@@ -153,21 +151,52 @@ function buildOpenCodeInlineConfig(input: {
     env: computerEnv,
   });
   return {
+    type: "local",
+    command: computerLaunch.command,
+    enabled: true,
+    timeout: 120_000,
+    ...(computerLaunch.environment ? { environment: computerLaunch.environment } : {}),
+  };
+}
+
+function buildOpenCodeT3ImagegenMcpConfig(input: {
+  readonly workspaceCwd: string | undefined;
+  readonly stateDir: string | undefined;
+}): Record<string, unknown> {
+  const imagegenEnv = {
+    ELECTRON_RUN_AS_NODE: "1",
+    CODEX_HOME: process.env.CODEX_HOME ?? Path.join(OS.homedir(), ".codex"),
+    T3_IMAGEGEN_WORKSPACE: input.workspaceCwd ?? process.cwd(),
+  };
+  const imagegenLaunch = resolveOpenCodeLocalMcpLaunch({
+    stateDir: input.stateDir,
+    wrapperName: "t3-imagegen",
+    scriptPath: resolveImagegenMcpServerPath(),
+    env: imagegenEnv,
+  });
+  return {
+    type: "local",
+    command: imagegenLaunch.command,
+    enabled: true,
+    timeout: 120_000,
+    ...(imagegenLaunch.environment ? { environment: imagegenLaunch.environment } : {}),
+  };
+}
+
+export function buildOpenCodeInlineConfig(input: {
+  readonly workspaceCwd: string | undefined;
+  readonly stateDir: string | undefined;
+}): Record<string, unknown> {
+  return {
     mcp: {
-      t3_imagegen: {
-        type: "local",
-        command: imagegenLaunch.command,
-        enabled: true,
-        timeout: 120_000,
-        ...(imagegenLaunch.environment ? { environment: imagegenLaunch.environment } : {}),
-      },
-      t3_computer: {
-        type: "local",
-        command: computerLaunch.command,
-        enabled: true,
-        timeout: 120_000,
-        ...(computerLaunch.environment ? { environment: computerLaunch.environment } : {}),
-      },
+      t3_imagegen: buildOpenCodeT3ImagegenMcpConfig(input),
+      t3_computer: buildOpenCodeT3ComputerMcpConfig(input),
+    },
+    tools: {
+      t3_imagegen: true,
+      "t3_imagegen*": true,
+      t3_computer: true,
+      "t3_computer*": true,
     },
   };
 }

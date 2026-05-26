@@ -1,6 +1,7 @@
 import { mergeProps } from "@base-ui/react/merge-props";
 import { useRender } from "@base-ui/react/use-render";
 import { cva, type VariantProps } from "class-variance-authority";
+import { PanelLeftIcon } from "lucide-react";
 import * as React from "react";
 import { cn } from "~/lib/utils";
 import { Button } from "~/components/ui/button";
@@ -34,11 +35,6 @@ const SIDEBAR_BRAND_MARK_DARK_SRC = new URL(
   "../../../../../assets/prod/ACODE-DARK.png",
   import.meta.url,
 ).href;
-const SIDEBAR_TOGGLE_ICON_SRC = new URL(
-  "../../../../../assets/prod/sidebar-toggle.png",
-  import.meta.url,
-).href;
-
 type SidebarContextProps = {
   state: "expanded" | "collapsed";
   open: boolean;
@@ -435,24 +431,12 @@ function SidebarBrandMark() {
   );
 }
 
-function SidebarDockToggleIcon({
-  className,
-  collapsed = false,
-}: {
-  className?: string;
-  collapsed?: boolean;
-}) {
+function SidebarDockToggleIcon({ className }: { className?: string; collapsed?: boolean }) {
   return (
-    <img
+    <PanelLeftIcon
       aria-hidden="true"
-      alt=""
-      className={cn(
-        "size-4 select-none object-contain transition-transform duration-150",
-        collapsed && "rotate-180",
-        className,
-      )}
-      draggable={false}
-      src={SIDEBAR_TOGGLE_ICON_SRC}
+      className={cn("size-4 shrink-0", className)}
+      strokeWidth={1.8}
     />
   );
 }

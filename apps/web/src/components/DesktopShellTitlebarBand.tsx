@@ -1,4 +1,5 @@
 import { SidebarDesktopBrandTrigger, useSidebar } from "~/components/ui/sidebar";
+import { AppNavigationControls } from "~/components/AppNavigationControls";
 
 type DesktopShellTitlebarBandProps = {
   hasDesktopShellChrome: boolean;
@@ -42,6 +43,10 @@ export default function DesktopShellTitlebarBand({
         >
           <SidebarDesktopBrandTrigger className="[-webkit-app-region:no-drag]" />
         </div>
+        <AppNavigationControls
+          buttonClassName="size-[var(--desktop-titlebar-trigger-size)] rounded-[10px]"
+          className="shrink-0 [-webkit-app-region:no-drag]"
+        />
         <div className="drag-region h-full min-w-0 flex-1" />
       </div>
     </div>

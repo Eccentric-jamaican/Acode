@@ -1,4 +1,5 @@
 import AppPageShell from "./AppPageShell";
+import { AppNavigationControls } from "./AppNavigationControls";
 import { isElectron, isElectronRuntime } from "../env";
 import { SidebarInsetTrigger } from "./ui/sidebar";
 import { Skeleton } from "./ui/skeleton";
@@ -42,6 +43,7 @@ export default function ChatHomeSurface(props: { variant: ChatHomeSurfaceVariant
           <header className="px-3 py-2 md:hidden">
             <div className="flex items-center gap-2">
               <SidebarInsetTrigger className="shrink-0" />
+              <AppNavigationControls className="shrink-0" />
               <span className="text-sm font-medium text-foreground">Threads</span>
             </div>
           </header>

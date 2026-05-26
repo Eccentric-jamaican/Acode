@@ -17,6 +17,7 @@ import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
   type ResolvedKeybindingsConfig,
+  type ServerProviderAccountSummary,
   type ProviderApprovalDecision,
   type ProviderModelOptions,
   type ServerProviderStatus,
@@ -44,13 +45,11 @@ import {
   memo,
   useCallback,
   useEffect,
-  type KeyboardEvent as ReactKeyboardEvent,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type ReactNode,
-  type WheelEvent as ReactWheelEvent,
 } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useDebouncedValue } from "@tanstack/react-pacer";
@@ -168,7 +167,10 @@ import {
   BotIcon,
   EllipsisIcon,
   ChevronDownIcon,
+  ChevronRightIcon,
+  CheckIcon,
   CircleAlertIcon,
+  CloudIcon,
   FileTextIcon,
   FilesIcon,
   FolderClosedIcon,
@@ -178,7 +180,10 @@ import {
   PanelLeftIcon,
   BoxIcon,
   GitBranchIcon,
+  GitCommitIcon,
+  HardDriveIcon,
   ImageIcon,
+  LaptopIcon,
   MousePointer2Icon,
   PlusIcon,
   Maximize2Icon,
@@ -194,6 +199,7 @@ import {
   StarIcon,
 } from "lucide-react";
 import { Button } from "./ui/button";
+import { AppNavigationControls } from "./AppNavigationControls";
 import { Separator } from "./ui/separator";
 import { Group, GroupSeparator } from "./ui/group";
 import {
@@ -208,7 +214,15 @@ import {
   MenuTrigger,
 } from "./ui/menu";
 import { Popover, PopoverPopup, PopoverTrigger } from "./ui/popover";
-import { Combobox, ComboboxEmpty, ComboboxInput, ComboboxItem, ComboboxList } from "./ui/combobox";
+import {
+  Combobox,
+  ComboboxEmpty,
+  ComboboxInput,
+  ComboboxItem,
+  ComboboxList,
+  ComboboxPopup,
+  ComboboxTrigger,
+} from "./ui/combobox";
 import { ScrollArea } from "./ui/scroll-area";
 import {
   ClaudeAI,
@@ -318,9 +332,6 @@ const SCRIPT_TERMINAL_COLS = 120;
 const SCRIPT_TERMINAL_ROWS = 30;
 const WORKTREE_BRANCH_PREFIX = "t3code";
 const HEADER_COMPACT_BREAKPOINT = 480;
-const HANDOFF_WHEEL_SNAP_DELTA = 36;
-const HANDOFF_WHEEL_RESET_GAP_MS = 220;
-const HANDOFF_WHEEL_COOLDOWN_MS = 180;
 const DESKTOP_APP_RESOLUTION_TIMEOUT_MS = 2_500;
 
 function attachmentTypeForFile(file: File): ChatAttachment["type"] | null {
@@ -483,7 +494,9 @@ function pathToBrowserFileUrl(pathValue: string, cwd?: string | undefined): stri
   const withLeadingSlash = /^[A-Za-z]:\//.test(absolutePath) ? `/${absolutePath}` : absolutePath;
   return `file://${withLeadingSlash
     .split("/")
-    .map((part, index) => (index === 0 || /^[A-Za-z]:$/.test(part) ? part : encodeURIComponent(part)))
+    .map((part, index) =>
+      index === 0 || /^[A-Za-z]:$/.test(part) ? part : encodeURIComponent(part),
+    )
     .join("/")}`;
 }
 
@@ -4256,8 +4269,7 @@ export default function ChatView({
     const composerImagesForSend = queuedChatTurn?.images ?? composerImages;
     const composerInspectCapturesForSend =
       queuedChatTurn?.inspectCaptures ?? composerInspectCaptures;
-    const composerPdfAnnotationsForSend =
-      queuedChatTurn?.pdfAnnotations ?? composerPdfAnnotations;
+    const composerPdfAnnotationsForSend = queuedChatTurn?.pdfAnnotations ?? composerPdfAnnotations;
     const selectedProviderForSend = queuedChatTurn?.selectedProvider ?? selectedProvider;
     const rawPromptForSend = queuedChatTurn?.displayText ?? promptRef.current;
     const desktopAppsForSend =
@@ -6162,6 +6174,7 @@ export default function ChatView({
           <header className="px-3 py-2 md:hidden">
             <div className="flex items-center gap-2">
               <SidebarInsetTrigger className="shrink-0" />
+              <AppNavigationControls className="shrink-0" />
               <span className="text-sm font-medium text-foreground">Threads</span>
             </div>
           </header>
@@ -6260,16 +6273,24 @@ export default function ChatView({
       </div>
 
       {!resolvedDiffOpen && !resolvedBrowserPaneOpen ? (
-      <ThreadContextPanel
-        thread={activeThread}
-        gitCwd={gitCwd}
-        workspaceCwd={threadWorkspaceCwd}
-        homeDirectory={homeDirectory ?? undefined}
-        activeThreadId={activeThread.id}
-        onOpenFilePath={onOpenFilePath}
-        onOpenBrowserPreview={onOpenBrowserPreview}
-        onOpenChanges={onToggleDiff}
-      />
+        <ThreadContextPanel
+          thread={activeThread}
+          gitCwd={gitCwd}
+          workspaceCwd={threadWorkspaceCwd}
+          homeDirectory={homeDirectory ?? undefined}
+          activeThreadId={activeThread.id}
+          accountSummary={getCodexAccountSummary(serverConfigQuery.data?.providerAccounts)}
+          envLocked={envLocked}
+          handoffBusy={handoffBusy}
+          isServerThread={isServerThread}
+          onEnvModeChange={onEnvModeChange}
+          onHandoffToLocal={onHandoffToLocal}
+          onHandoffToWorktree={onHandoffToWorktree}
+          onOpenBrowserUrl={onOpenLocalServerUrl}
+          onOpenFilePath={onOpenFilePath}
+          onOpenBrowserPreview={onOpenBrowserPreview}
+          onOpenChanges={onToggleDiff}
+        />
       ) : null}
 
       {/* Messages */}
@@ -6628,9 +6649,7 @@ export default function ChatView({
                                 type="button"
                                 className="inline-flex items-center gap-1.5 px-2 py-1 outline-none transition-colors hover:bg-muted/55 focus-visible:ring-2 focus-visible:ring-ring/45"
                                 aria-label={`${composerPdfAnnotations.length} ${
-                                  composerPdfAnnotations.length === 1
-                                    ? "annotation"
-                                    : "annotations"
+                                  composerPdfAnnotations.length === 1 ? "annotation" : "annotations"
                                 } attached`}
                               />
                             }
@@ -6638,9 +6657,7 @@ export default function ChatView({
                             <MessageSquareIcon className="size-3.5 text-muted-foreground" />
                             <span>
                               {composerPdfAnnotations.length}{" "}
-                              {composerPdfAnnotations.length === 1
-                                ? "annotation"
-                                : "annotations"}
+                              {composerPdfAnnotations.length === 1 ? "annotation" : "annotations"}
                             </span>
                           </PopoverTrigger>
                           <button
@@ -6705,7 +6722,10 @@ export default function ChatView({
                                   className="size-6 rounded-full opacity-60 transition-opacity group-hover/annotation:opacity-100"
                                   onClick={() => {
                                     if (activeThread) {
-                                      removeComposerDraftPdfAnnotation(activeThread.id, annotation.id);
+                                      removeComposerDraftPdfAnnotation(
+                                        activeThread.id,
+                                        annotation.id,
+                                      );
                                       if (annotation.imageId) {
                                         removeComposerImageFromDraft(annotation.imageId);
                                       }
@@ -7324,6 +7344,14 @@ interface ThreadContextPanelProps {
   workspaceCwd: string | null;
   homeDirectory: string | undefined;
   activeThreadId: ThreadId;
+  accountSummary: ServerProviderAccountSummary | null;
+  envLocked: boolean;
+  handoffBusy: boolean;
+  isServerThread: boolean;
+  onEnvModeChange: (mode: DraftThreadEnvMode) => void;
+  onHandoffToLocal: () => void;
+  onHandoffToWorktree: () => void;
+  onOpenBrowserUrl: (url: string) => void;
   onOpenFilePath: (
     path: string,
     options?: { cwd?: string | undefined; displayName?: string | undefined },
@@ -7390,12 +7418,95 @@ function ThreadContextCollapsibleSection(props: {
   );
 }
 
+function getRateLimitRemainingPercent(
+  window: {
+    usedPercent: number;
+  } | null,
+): number | null {
+  if (!window) {
+    return null;
+  }
+  return Math.max(0, Math.min(100, 100 - window.usedPercent));
+}
+
+function formatRateLimitWindowLabel(windowDurationMins: number | null): string {
+  if (!windowDurationMins || windowDurationMins <= 0) {
+    return "Window";
+  }
+  if (windowDurationMins === 10_080) {
+    return "Weekly";
+  }
+  if (windowDurationMins % 60 === 0) {
+    return `${windowDurationMins / 60}h`;
+  }
+  return `${windowDurationMins} min`;
+}
+
+function formatRateLimitResetAt(resetsAt: string | null): string | null {
+  if (!resetsAt) {
+    return null;
+  }
+  const date = new Date(resetsAt);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  const now = new Date();
+  if (date.toDateString() === now.toDateString()) {
+    return new Intl.DateTimeFormat(undefined, {
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(date);
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+  }).format(date);
+}
+
+function getSummaryRemainingPercent(
+  accountSummary: ServerProviderAccountSummary | null,
+): number | null {
+  if (!accountSummary) {
+    return null;
+  }
+  let lowestRemaining: number | null = null;
+  for (const bucket of accountSummary.rateLimits) {
+    const remainingPercents = [
+      getRateLimitRemainingPercent(bucket.primary),
+      getRateLimitRemainingPercent(bucket.secondary),
+    ];
+    for (const remaining of remainingPercents) {
+      if (remaining === null) {
+        continue;
+      }
+      if (lowestRemaining === null || remaining < lowestRemaining) {
+        lowestRemaining = remaining;
+      }
+    }
+  }
+  return lowestRemaining;
+}
+
+function getCodexAccountSummary(
+  providerAccounts: ReadonlyArray<ServerProviderAccountSummary> | undefined,
+): ServerProviderAccountSummary | null {
+  return providerAccounts?.find((providerAccount) => providerAccount.provider === "codex") ?? null;
+}
+
 const ThreadContextPanel = memo(function ThreadContextPanel({
   thread,
   gitCwd,
   workspaceCwd,
   homeDirectory,
   activeThreadId,
+  accountSummary,
+  envLocked,
+  handoffBusy,
+  isServerThread,
+  onEnvModeChange,
+  onHandoffToLocal,
+  onHandoffToWorktree,
+  onOpenBrowserUrl,
   onOpenFilePath,
   onOpenBrowserPreview,
   onOpenChanges,
@@ -7413,6 +7524,10 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
   const [sourcesCollapsed, setSourcesCollapsed] = useState(() =>
     readThreadContextPanelPreference(THREAD_CONTEXT_PANEL_SOURCES_COLLAPSED_KEY, false),
   );
+  const [branchMenuOpen, setBranchMenuOpen] = useState(false);
+  const [branchQuery, setBranchQuery] = useState("");
+  const [usageOpen, setUsageOpen] = useState(false);
+  const [creatingBranch, setCreatingBranch] = useState(false);
   const { data: gitStatus = null } = useQuery(gitStatusQueryOptions(gitCwd));
   const { data: branchList = null } = useQuery(gitBranchesQueryOptions(gitCwd));
   const checkoutBranchMutation = useMutation(
@@ -7427,7 +7542,7 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
   const hasGitContext = gitCwd !== null;
   const hasChanges =
     (gitStatus?.workingTree.insertions ?? 0) > 0 || (gitStatus?.workingTree.deletions ?? 0) > 0;
-  const visibleBranches = useMemo(
+  const localBranches = useMemo(
     () =>
       (branchList?.branches ?? [])
         .filter((branch) => !branch.isRemote)
@@ -7437,10 +7552,30 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
             : left.current
               ? -1
               : 1,
-        )
-        .slice(0, 6),
+        ),
     [branchList?.branches],
   );
+  const branchNames = useMemo(() => localBranches.map((branch) => branch.name), [localBranches]);
+  const normalizedBranchQuery = branchQuery.trim().toLowerCase();
+  const filteredBranchNames = useMemo(
+    () =>
+      normalizedBranchQuery.length === 0
+        ? branchNames
+        : branchNames.filter((branch) => branch.toLowerCase().includes(normalizedBranchQuery)),
+    [branchNames, normalizedBranchQuery],
+  );
+  const currentBranchName =
+    localBranches.find((branch) => branch.current)?.name ?? gitStatus?.branch ?? null;
+  const activeWorktreePath = thread.worktreePath ?? null;
+  const isWorktree = activeWorktreePath !== null;
+  const canHandoffToWorktree = !isWorktree && (!isServerThread || envLocked);
+  const canHandoffToLocal = isWorktree;
+  const handoffToWorktreeLabel = isServerThread ? "Handoff to worktree" : "Work in new worktree";
+  const usageRemainingPercent = getSummaryRemainingPercent(accountSummary);
+  const rateLimitBuckets = accountSummary?.rateLimits ?? [];
+  const dirtyFileCount = gitStatus?.workingTree.files.length ?? 0;
+  const createBranchName = branchQuery.trim();
+  const canCreateBranch = createBranchName.length > 0 && !branchNames.includes(createBranchName);
   const checkoutBranch = useCallback(
     (branch: string) => {
       if (checkoutBranchMutation.isPending) {
@@ -7459,6 +7594,36 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
     },
     [checkoutBranchMutation],
   );
+  const createAndCheckoutBranch = useCallback(async () => {
+    if (!gitCwd || !canCreateBranch || creatingBranch) {
+      return;
+    }
+
+    const api = readNativeApi();
+    if (!api) {
+      return;
+    }
+
+    setCreatingBranch(true);
+    try {
+      await api.git.createBranch({ cwd: gitCwd, branch: createBranchName });
+      await api.git.checkout({ cwd: gitCwd, branch: createBranchName });
+      await queryClient.invalidateQueries({ queryKey: ["git"] });
+      setBranchMenuOpen(false);
+      setBranchQuery("");
+    } catch (error) {
+      toastManager.add({
+        type: "error",
+        title: "Branch creation failed",
+        description: error instanceof Error ? error.message : "Unable to create that branch.",
+      });
+    } finally {
+      setCreatingBranch(false);
+    }
+  }, [canCreateBranch, createBranchName, creatingBranch, gitCwd, queryClient]);
+  const openCodexCloud = useCallback(() => {
+    onOpenBrowserUrl("https://chatgpt.com/codex");
+  }, [onOpenBrowserUrl]);
 
   const togglePinned = useCallback(() => {
     setPinned((current) => {
@@ -7485,7 +7650,7 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
   const panel = (
     <aside
       className={cn(
-        "w-64 overflow-hidden rounded-lg border border-border/70 bg-background/88 text-sm text-foreground shadow-none backdrop-blur supports-[backdrop-filter]:bg-background/76",
+        "w-72 overflow-hidden rounded-2xl border border-border/70 bg-popover/95 text-sm text-popover-foreground shadow-xl shadow-black/18 backdrop-blur-xl supports-[backdrop-filter]:bg-popover/86",
         "transition-[opacity,transform] duration-150",
         pinned
           ? "opacity-100"
@@ -7493,9 +7658,9 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
       )}
       aria-label={hasGitContext ? "Branch details" : "Thread context"}
     >
-      <div className="flex items-center justify-between px-3 py-2">
-        <p className="text-sm font-medium text-foreground/82">
-          {progressItems.length > 0 ? "Progress" : hasGitContext ? "Branch details" : "Context"}
+      <div className="flex items-center justify-between px-4 py-3">
+        <p className="text-sm font-medium text-muted-foreground">
+          {progressItems.length > 0 ? "Progress" : hasGitContext ? "Environment" : "Context"}
         </p>
         <Button
           type="button"
@@ -7562,11 +7727,11 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
           <>
             <button
               type="button"
-              className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left transition-colors hover:bg-muted/45"
+              className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left transition-colors hover:bg-muted/60"
               onClick={onOpenChanges}
             >
               <BoxIcon className="size-4 shrink-0 text-muted-foreground" />
-              <span className="min-w-0 flex-1 text-foreground/88">Changes</span>
+              <span className="min-w-0 flex-1 text-foreground/92">Changes</span>
               {hasChanges ? (
                 <span className="shrink-0 font-mono text-xs">
                   <span className="text-success">+{gitStatus?.workingTree.insertions ?? 0}</span>
@@ -7578,41 +7743,278 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
               )}
             </button>
 
-            <div className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5">
-              <GitBranchIcon className="size-4 shrink-0 text-muted-foreground" />
-              <span className="min-w-0 flex-1 text-foreground/88">Git actions</span>
-              <div className="shrink-0">
-                <GitActionsControl gitCwd={gitCwd} activeThreadId={activeThreadId} />
-              </div>
+            <Menu>
+              <MenuTrigger
+                render={
+                  <button
+                    type="button"
+                    className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-muted-foreground/82 transition-colors hover:bg-muted/60 hover:text-foreground"
+                  />
+                }
+              >
+                <HardDriveIcon className="size-4 shrink-0" />
+                <span className="min-w-0 flex-1 text-foreground/88">
+                  {isWorktree ? "Worktree" : "Local"}
+                </span>
+                <ChevronRightIcon className="size-4 shrink-0" />
+              </MenuTrigger>
+              <MenuPopup align="start" side="left" className="w-48">
+                <MenuItem
+                  disabled={!isWorktree || handoffBusy}
+                  onClick={() => {
+                    if (isWorktree) {
+                      onHandoffToLocal();
+                    } else {
+                      onEnvModeChange("local");
+                    }
+                  }}
+                >
+                  <LaptopIcon className="size-4" />
+                  <span className="min-w-0 flex-1">Work locally</span>
+                  {!isWorktree ? <CheckIcon className="size-4" /> : null}
+                </MenuItem>
+                <MenuItem onClick={() => void openCodexCloud()}>
+                  <CloudIcon className="size-4" />
+                  <span className="min-w-0 flex-1">Cloud</span>
+                </MenuItem>
+                <MenuDivider />
+                <button
+                  type="button"
+                  className="flex min-h-7 w-full items-center gap-2 rounded-sm px-2 py-1 text-left text-sm text-foreground outline-none transition-colors hover:bg-accent hover:text-accent-foreground"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    setUsageOpen((open) => !open);
+                  }}
+                >
+                  <GlobeIcon className="size-4" />
+                  <span className="min-w-0 flex-1">
+                    Usage remaining
+                    {usageRemainingPercent !== null ? ` ${usageRemainingPercent}%` : ""}
+                  </span>
+                  <ChevronDownIcon
+                    className={cn(
+                      "size-4 shrink-0 text-muted-foreground transition-transform",
+                      usageOpen ? "rotate-0" : "-rotate-90",
+                    )}
+                  />
+                </button>
+                {usageOpen ? (
+                  <div className="px-2 pb-1">
+                    {rateLimitBuckets.length > 0 ? (
+                      <div className="space-y-2 text-sm">
+                        {rateLimitBuckets.map((bucket, index) => {
+                          const bucketKey = [
+                            bucket.limitId ?? "rate-limit",
+                            bucket.limitName ?? "unnamed",
+                            bucket.planType ?? "unknown",
+                            bucket.primary?.windowDurationMins ?? "primary",
+                            bucket.secondary?.windowDurationMins ?? "secondary",
+                          ].join(":");
+                          return (
+                            <div key={bucketKey} className={cn("space-y-1", index > 0 && "pt-1")}>
+                              {rateLimitBuckets.length > 1 ? (
+                                <p className="truncate text-xs font-medium text-muted-foreground">
+                                  {bucket.limitName ?? bucket.limitId ?? `Limit ${index + 1}`}
+                                </p>
+                              ) : null}
+                              {[
+                                { slot: "primary", window: bucket.primary },
+                                { slot: "secondary", window: bucket.secondary },
+                              ].map(({ slot, window }) => {
+                                if (!window) {
+                                  return null;
+                                }
+                                const percent = getRateLimitRemainingPercent(window);
+                                const resetLabel = formatRateLimitResetAt(window.resetsAt);
+                                return (
+                                  <div
+                                    key={`${bucketKey}:${slot}`}
+                                    className="flex items-baseline gap-2"
+                                  >
+                                    <span className="min-w-12 font-semibold text-foreground">
+                                      {formatRateLimitWindowLabel(window.windowDurationMins)}
+                                    </span>
+                                    <span className="shrink-0 text-muted-foreground">
+                                      {percent !== null ? `${percent}%` : "--"}
+                                    </span>
+                                    <span className="min-w-0 flex-1 truncate text-right text-muted-foreground">
+                                      {resetLabel ?? ""}
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="py-1 text-sm text-muted-foreground">
+                        {accountSummary?.state === "authenticated"
+                          ? "Usage data is not available yet."
+                          : "Sign in to Codex to view usage remaining."}
+                      </div>
+                    )}
+                    <button
+                      type="button"
+                      className="mt-1 flex min-h-7 w-full items-center gap-2 rounded-sm py-1 text-left text-sm font-medium text-foreground transition-colors hover:text-foreground/80"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        toastManager.add({
+                          type: "info",
+                          title: "Usage upgrades are managed by OpenAI",
+                          description: "Open your ChatGPT or OpenAI account to manage your plan.",
+                        });
+                      }}
+                    >
+                      <span className="min-w-0 flex-1">Upgrade for more usage</span>
+                      <ChevronRightIcon className="size-4 shrink-0 -rotate-45 text-muted-foreground" />
+                    </button>
+                    <button
+                      type="button"
+                      className="flex min-h-7 w-full items-center gap-2 rounded-sm py-1 text-left text-sm text-muted-foreground transition-colors hover:text-foreground"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        toastManager.add({
+                          type: "info",
+                          title: "Usage details",
+                          description:
+                            "This shows Codex rate-limit windows reported by the local server.",
+                        });
+                      }}
+                    >
+                      <span className="min-w-0 flex-1">Learn more</span>
+                      <ChevronRightIcon className="size-4 shrink-0 -rotate-45" />
+                    </button>
+                  </div>
+                ) : null}
+                <MenuItem
+                  disabled={(!canHandoffToWorktree && !canHandoffToLocal) || handoffBusy}
+                  onClick={() => {
+                    if (canHandoffToLocal) {
+                      onHandoffToLocal();
+                      return;
+                    }
+                    if (canHandoffToWorktree) {
+                      if (!isServerThread) {
+                        onEnvModeChange("worktree");
+                        return;
+                      }
+                      onHandoffToWorktree();
+                    }
+                  }}
+                >
+                  <ArrowLeftRight className="size-4" />
+                  {canHandoffToLocal ? "Handoff to local" : handoffToWorktreeLabel}
+                </MenuItem>
+              </MenuPopup>
+            </Menu>
+
+            {localBranches.length > 0 ? (
+              <Combobox
+                items={branchNames}
+                filteredItems={filteredBranchNames}
+                autoHighlight
+                open={branchMenuOpen}
+                value={currentBranchName ?? undefined}
+                onOpenChange={(open) => {
+                  setBranchMenuOpen(open);
+                  if (!open) setBranchQuery("");
+                }}
+              >
+                <ComboboxTrigger
+                  render={<button type="button" />}
+                  className="flex h-8 w-full items-center gap-2 rounded-lg bg-muted/70 px-2 text-left text-foreground shadow-inner shadow-white/5 transition-colors hover:bg-muted"
+                  disabled={checkoutBranchMutation.isPending}
+                  title={
+                    currentBranchName ? `Current branch: ${currentBranchName}` : "Select branch"
+                  }
+                >
+                  <GitBranchIcon className="size-4 shrink-0 text-foreground/78" />
+                  <span className="min-w-0 flex-1 truncate font-medium">
+                    {currentBranchName ?? "Select branch"}
+                  </span>
+                  <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground" />
+                </ComboboxTrigger>
+                <ComboboxPopup align="start" side="left" className="w-72 overflow-hidden p-0">
+                  <div className="border-b border-border/70 p-2">
+                    <ComboboxInput
+                      className="rounded-lg [&_input]:font-sans"
+                      inputClassName="ring-0"
+                      placeholder="Search branches"
+                      showTrigger={false}
+                      size="sm"
+                      value={branchQuery}
+                      onChange={(event) => setBranchQuery(event.target.value)}
+                    />
+                  </div>
+                  <p className="px-3 pt-3 text-xs font-medium text-muted-foreground">Branches</p>
+                  <ComboboxEmpty className="px-3 py-4 text-xs text-muted-foreground">
+                    No branches found.
+                  </ComboboxEmpty>
+                  <ComboboxList className="max-h-64 px-2 py-1">
+                    {filteredBranchNames.map((branchName) => {
+                      const branch = localBranches.find((item) => item.name === branchName);
+                      const isCurrent = branch?.current ?? branchName === currentBranchName;
+                      return (
+                        <ComboboxItem
+                          hideIndicator
+                          key={branchName}
+                          value={branchName}
+                          className="min-w-0 rounded-lg px-2 py-1.5"
+                          onClick={() => {
+                            if (isCurrent) return;
+                            checkoutBranch(branchName);
+                            setBranchMenuOpen(false);
+                            setBranchQuery("");
+                          }}
+                        >
+                          <div className="flex w-full min-w-0 items-start gap-2">
+                            <GitBranchIcon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate">{branchName}</span>
+                              {isCurrent && dirtyFileCount > 0 ? (
+                                <span className="block truncate text-xs text-muted-foreground">
+                                  Uncommitted: {dirtyFileCount}{" "}
+                                  {dirtyFileCount === 1 ? "file" : "files"}
+                                </span>
+                              ) : null}
+                            </span>
+                            {isCurrent ? <CheckIcon className="mt-0.5 size-4 shrink-0" /> : null}
+                          </div>
+                        </ComboboxItem>
+                      );
+                    })}
+                  </ComboboxList>
+                  <div className="border-t border-border/70 p-2">
+                    <button
+                      type="button"
+                      className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-sm transition-colors hover:bg-muted/60 disabled:pointer-events-none disabled:opacity-50"
+                      disabled={!canCreateBranch || creatingBranch}
+                      onClick={() => void createAndCheckoutBranch()}
+                    >
+                      <PlusIcon className="size-4 shrink-0 text-muted-foreground" />
+                      <span className="min-w-0 flex-1 truncate">
+                        Create and checkout new branch...
+                      </span>
+                    </button>
+                  </div>
+                </ComboboxPopup>
+              </Combobox>
+            ) : null}
+
+            <div className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-muted-foreground/45">
+              <GitCommitIcon className="size-4 shrink-0" />
+              <span className="min-w-0 flex-1">Commit</span>
             </div>
 
-            {visibleBranches.length > 0 ? (
-              <div className="space-y-1 px-1.5 py-1">
-                <p className="text-xs font-medium text-muted-foreground/80">Branches</p>
-                <div className="flex flex-wrap gap-1.5">
-                  {visibleBranches.map((branch) => (
-                    <Toggle
-                      key={branch.name}
-                      size="sm"
-                      variant="outline"
-                      pressed={branch.current}
-                      disabled={branch.current || checkoutBranchMutation.isPending}
-                      onPressedChange={(pressed) => {
-                        if (pressed) {
-                          checkoutBranch(branch.name);
-                        }
-                      }}
-                      title={
-                        branch.current ? `${branch.name} is checked out` : `Checkout ${branch.name}`
-                      }
-                      className="h-7 max-w-full min-w-0 px-2 text-xs"
-                    >
-                      <span className="max-w-40 truncate">{branch.name}</span>
-                    </Toggle>
-                  ))}
-                </div>
-              </div>
-            ) : null}
+            <div className="flex h-8 w-full items-center gap-2 rounded-lg px-2">
+              <GitBranchIcon className="size-4 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 flex-1 text-foreground/88">Git actions</span>
+              <GitActionsControl gitCwd={gitCwd} activeThreadId={activeThreadId} />
+            </div>
 
             <Separator className="my-2 bg-border/60" />
           </>
@@ -7746,20 +8148,20 @@ interface ChatHeaderProps {
 const ChatHeader = memo(function ChatHeader({
   activeThreadId,
   activeThreadTitle,
-  activeProjectName,
+  activeProjectName: _activeProjectName,
   activeTaskTitle,
-  isGitRepo,
+  isGitRepo: _isGitRepo,
   openInCwd,
-  activeProjectScripts,
-  preferredScriptId,
+  activeProjectScripts: _activeProjectScripts,
+  preferredScriptId: _preferredScriptId,
   keybindings,
   availableEditors,
   diffToggleShortcutLabel,
   handoffBadgeLabel,
-  handoffActionLabel,
-  handoffDisabled,
-  handoffActionTargetProvider,
-  handoffTargetProviderCount,
+  handoffActionLabel: _handoffActionLabel,
+  handoffDisabled: _handoffDisabled,
+  handoffActionTargetProvider: _handoffActionTargetProvider,
+  handoffTargetProviderCount: _handoffTargetProviderCount,
   handoffBadgeSourceProvider,
   handoffBadgeTargetProvider,
   terminalOpen,
@@ -7770,16 +8172,16 @@ const ChatHeader = memo(function ChatHeader({
   isFocusedPane,
   onSplitSurface,
   onMaximizeSurface,
-  onRunProjectScript,
-  onAddProjectScript,
-  onUpdateProjectScript,
-  onOpenTask,
+  onRunProjectScript: _onRunProjectScript,
+  onAddProjectScript: _onAddProjectScript,
+  onUpdateProjectScript: _onUpdateProjectScript,
+  onOpenTask: _onOpenTask,
   onToggleTerminal,
   onToggleFiles,
   onToggleDiff,
   onToggleBrowser,
-  onCreateHandoff,
-  onCycleHandoffTargetProvider,
+  onCreateHandoff: _onCreateHandoff,
+  onCycleHandoffTargetProvider: _onCycleHandoffTargetProvider,
 }: ChatHeaderProps) {
   const { isMobile, state } = useSidebar();
   const needsDesktopTrafficLightInset = isElectron && !isMobile && state === "collapsed";
@@ -7792,100 +8194,6 @@ const ChatHeader = memo(function ChatHeader({
       : surfaceMode === "split" && isFocusedPane && onMaximizeSurface
         ? { kind: "maximize" as const, label: "Expand this chat", onClick: onMaximizeSurface }
         : null;
-  const [handoffFlipDirection, setHandoffFlipDirection] = useState<1 | -1 | 0>(0);
-  const handoffWheelAccumRef = useRef(0);
-  const handoffWheelCooldownUntilRef = useRef(0);
-  const handoffWheelLastEventAtRef = useRef(0);
-  const handoffCanCycle = handoffTargetProviderCount > 1 && !handoffDisabled;
-  const cycleHandoffTargetProvider = useCallback(
-    (direction: 1 | -1) => {
-      if (!handoffCanCycle) {
-        return;
-      }
-      setHandoffFlipDirection(direction);
-      onCycleHandoffTargetProvider(direction);
-    },
-    [handoffCanCycle, onCycleHandoffTargetProvider],
-  );
-  const onHandoffWheel = useCallback(
-    (event: ReactWheelEvent<HTMLButtonElement>) => {
-      if (!handoffCanCycle) {
-        return;
-      }
-      const now = Date.now();
-      if (now < handoffWheelCooldownUntilRef.current) {
-        return;
-      }
-
-      if (now - handoffWheelLastEventAtRef.current > HANDOFF_WHEEL_RESET_GAP_MS) {
-        handoffWheelAccumRef.current = 0;
-      }
-      handoffWheelLastEventAtRef.current = now;
-
-      if (Math.abs(event.deltaY) < 1) {
-        return;
-      }
-      if (
-        handoffWheelAccumRef.current !== 0 &&
-        Math.sign(handoffWheelAccumRef.current) !== Math.sign(event.deltaY)
-      ) {
-        handoffWheelAccumRef.current = 0;
-      }
-
-      handoffWheelAccumRef.current += event.deltaY;
-      if (Math.abs(handoffWheelAccumRef.current) < HANDOFF_WHEEL_SNAP_DELTA) {
-        return;
-      }
-
-      const direction: 1 | -1 = handoffWheelAccumRef.current > 0 ? 1 : -1;
-      handoffWheelAccumRef.current = 0;
-      handoffWheelCooldownUntilRef.current = now + HANDOFF_WHEEL_COOLDOWN_MS;
-      cycleHandoffTargetProvider(direction);
-    },
-    [cycleHandoffTargetProvider, handoffCanCycle],
-  );
-  useEffect(() => {
-    if (handoffCanCycle) {
-      return;
-    }
-    handoffWheelAccumRef.current = 0;
-    handoffWheelCooldownUntilRef.current = 0;
-    handoffWheelLastEventAtRef.current = 0;
-  }, [handoffCanCycle]);
-  const onHandoffKeyDown = useCallback(
-    (event: ReactKeyboardEvent<HTMLButtonElement>) => {
-      if (!handoffCanCycle) {
-        return;
-      }
-      if (event.key === "ArrowDown") {
-        event.preventDefault();
-        cycleHandoffTargetProvider(1);
-        return;
-      }
-      if (event.key === "ArrowUp") {
-        event.preventDefault();
-        cycleHandoffTargetProvider(-1);
-      }
-    },
-    [cycleHandoffTargetProvider, handoffCanCycle],
-  );
-  useEffect(() => {
-    if (handoffFlipDirection === 0) {
-      return;
-    }
-    const timeoutId = window.setTimeout(() => {
-      setHandoffFlipDirection(0);
-    }, 200);
-    return () => {
-      window.clearTimeout(timeoutId);
-    };
-  }, [handoffActionTargetProvider, handoffFlipDirection]);
-  const handoffProviderAnimationClass =
-    handoffFlipDirection > 0
-      ? "handoff-provider-flip-down"
-      : handoffFlipDirection < 0
-        ? "handoff-provider-flip-up"
-        : "";
   const renderProviderIcon = (provider: ProviderKind | null, className: string) => {
     if (provider === "claudeAgent") {
       return <ClaudeAI className={cn("text-[#d97757]", className)} />;
@@ -7917,6 +8225,7 @@ const ChatHeader = memo(function ChatHeader({
         <div className="shrink-0 md:hidden">
           <SidebarTrigger className="size-7 shrink-0" />
         </div>
+        <AppNavigationControls className="shrink-0 md:hidden" />
         <div className="flex min-w-0 flex-1 items-center gap-2">
           <h2
             className="max-w-[clamp(16rem,50vw,40rem)] min-w-0 flex-1 truncate text-sm font-medium text-foreground"

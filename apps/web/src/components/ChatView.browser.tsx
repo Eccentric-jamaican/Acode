@@ -3575,7 +3575,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await vi.waitFor(
         async () => {
           const panelText = await waitForThreadContextPanelText();
-          expect(panelText).toContain("Branch details");
+          expect(panelText).toContain("Environment");
           expect(panelText).toContain("Git actions");
           expect(panelText).not.toContain("Progress");
           expect(panelText).not.toContain("Old progress should not remain.");

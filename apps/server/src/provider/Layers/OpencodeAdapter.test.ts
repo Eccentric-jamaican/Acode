@@ -78,6 +78,8 @@ function createEventStream(
 function createOpenCodeFixture(input?: {
   readonly commands?: ReadonlyArray<{ name: string; description?: string }>;
   readonly events?: ReadonlyArray<unknown>;
+  readonly mcpStatus?: Record<string, unknown>;
+  readonly toolIds?: ReadonlyArray<string>;
   readonly requireMethodThisBinding?: boolean;
 }) {
   const commands = [...(input?.commands ?? [{ name: "review", description: "Run review checks" }])];
@@ -161,6 +163,16 @@ function createOpenCodeFixture(input?: {
       },
     };
   });
+  const mcpStatus = vi.fn(async () => ({
+    ...(input?.mcpStatus ?? { t3_computer: { status: "connected" } }),
+  }));
+  const mcpAdd = vi.fn(async () => ({
+    t3_computer: { status: "connected" },
+  }));
+  const mcpConnect = vi.fn(async () => ({
+    t3_computer: { status: "connected" },
+  }));
+  const toolIds = vi.fn(async () => input?.toolIds ?? ["bash", "edit", "t3_computer_screenshot"]);
 
   const commandApi = input?.requireMethodThisBinding
     ? {
@@ -205,6 +217,14 @@ function createOpenCodeFixture(input?: {
       session: sessionApi,
       event: eventApi,
       provider: providerApi,
+      mcp: {
+        status: mcpStatus,
+        add: mcpAdd,
+        connect: mcpConnect,
+      },
+      tool: {
+        ids: toolIds,
+      },
     } as unknown as OpencodeClient,
   });
   const createRuntime = vi.fn(createRuntimeImpl);
@@ -217,6 +237,10 @@ function createOpenCodeFixture(input?: {
     sessionCommand,
     eventSubscribe,
     providerList,
+    mcpStatus,
+    mcpAdd,
+    mcpConnect,
+    toolIds,
     serverClose,
   };
 }
@@ -320,6 +344,42 @@ describe("OpencodeAdapter native commands", () => {
         model: "openai/gpt-4.1",
       },
     });
+  });
+
+  it("adds and connects the T3 computer MCP server when OpenCode has not loaded it", async () => {
+    const fixture = createOpenCodeFixture({
+      mcpStatus: {},
+      toolIds: ["bash", "edit", "t3_computer_screenshot"],
+    });
+
+    await runWithFixture(
+      fixture,
+      Effect.gen(function* () {
+        const adapter = yield* OpencodeAdapter;
+        yield* adapter.startSession({
+          threadId: asThreadId("thread-t3-computer-mcp"),
+          provider: "opencode",
+          cwd: process.cwd(),
+          model: "openai/gpt-4.1",
+          runtimeMode: "full-access",
+        });
+      }),
+    );
+
+    expect(fixture.mcpAdd).toHaveBeenCalledTimes(1);
+    expect(fixture.mcpAdd).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "t3_computer",
+        config: expect.objectContaining({
+          type: "local",
+          enabled: true,
+        }),
+      }),
+    );
+    expect(fixture.mcpConnect).toHaveBeenCalledWith(
+      expect.objectContaining({ name: "t3_computer" }),
+    );
+    expect(fixture.toolIds).toHaveBeenCalledTimes(1);
   });
 
   it("returns validation error for unknown leading slash command", async () => {

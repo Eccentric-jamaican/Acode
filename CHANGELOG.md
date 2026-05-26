@@ -2,7 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.2.59] - 2026-05-26
+## [0.2.60] - 2026-05-26
+
+### Added
+- Added in-app browser-style back/forward navigation controls (`AppNavigationControls`) for navigation history in the web UI.
+- Added OpenCode MCP management in the adapter with `mcp.status`, `mcp.add`, `mcp.connect`, and `tool.ids` SDK bridge methods, enabling dynamic MCP server lifecycle for T3 Computer Use.
+- Added automatic T3 Computer MCP server provisioning in OpenCode sessions: the adapter checks at session start whether `t3_computer` is connected and connects it if missing.
+- Added rate-limit / account summary display to the thread context panel, surfacing provider account tier, usage windows, and remaining capacity.
+- Added `external` flag to OpenCode runtime client detection for distinguishing local vs. remote server runtimes.
+- Added a `ComboboxPopup` and `ComboboxTrigger` component to the combobox UI kit for richer select/dropdown interactions.
+
+### Changed
+- Replaced the sidebar toggle icon from a raster PNG (`sidebar-toggle.png`) to a Lucide `PanelLeftIcon` SVG for sharper rendering and consistency.
+- Refactored `ChatView` thread context panel to accept enriched props: `accountSummary`, `envLocked`, `handoffBusy`, `isServerThread`, and various action callbacks.
+- Extracted T3 Computer and Imagegen MCP config builders into separate exported functions (`buildOpenCodeT3ComputerMcpConfig`, `buildOpenCodeT3ImagegenMcpConfig`).
+- Improved OpenCode runtime module resolution to search multiple candidate paths for built `.mjs` and source `.ts` files.
+
+### Fixed
+- Fixed OpenCode adapter MCP server persistence when `t3_computer` is not loaded at session start — the adapter now adds and connects the MCP server automatically rather than relying on pre-existing configuration.
+- Fixed sidebar icon blurriness on high-DPI displays by switching from a raster image to an SVG icon.
 
 ### Added
 - Added Codex session prewarming so the app-server transport boots in the background before the first turn, reducing perceived session-start latency when navigating into threads.

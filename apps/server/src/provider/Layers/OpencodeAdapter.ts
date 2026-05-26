@@ -43,6 +43,7 @@ import {
 import {
   buildOpenCodeModelCapabilities,
   buildOpenCodeBasicAuthorizationHeader,
+  buildOpenCodeT3ComputerMcpConfig,
   connectToOpenCodeServer,
   createOpenCodeSdkClient,
   getOpenCodeStartupMetadata,
@@ -65,6 +66,7 @@ const STARTUP_TIMEOUT_MS = 90_000;
 const OPENCODE_REQUEST_TIMEOUT_MS = 45_000;
 const RECONNECT_DELAY_MS = 700;
 const DISABLED_MODEL_CACHE_TTL_MS = 15 * 60_000;
+const T3_COMPUTER_MCP_NAME = "t3_computer";
 const logger = createLogger("opencode");
 
 export interface OpencodeAdapterLiveOptions {
@@ -100,6 +102,7 @@ interface RuntimeHandle {
   readonly serverPassword?: string;
   readonly client?: Record<string, unknown>;
   readonly usesInjectedClient: boolean;
+  readonly external: boolean;
   readonly close: () => void;
 }
 
@@ -171,6 +174,13 @@ function asArray(value: unknown): ReadonlyArray<unknown> | undefined {
 function isQuestionToolName(toolName: string): boolean {
   const normalized = toolName.toLowerCase().replace(/[^a-z]/g, "");
   return normalized === "question" || normalized === "askuserquestion";
+}
+
+function isT3ComputerToolId(value: unknown): boolean {
+  if (typeof value !== "string") {
+    return false;
+  }
+  return value === T3_COMPUTER_MCP_NAME || value.startsWith(`${T3_COMPUTER_MCP_NAME}_`);
 }
 
 function parseComputerUseTextBridge(output: string | undefined): {
@@ -825,6 +835,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
             ? { client: asRecord(asObject(runtimeFromSdk)?.client) }
             : {}),
           usesInjectedClient: runtimeFactory !== undefined,
+          external: asObject(runtimeFromSdk.server)?.external === true,
           close: runtimeFromSdk.server.close,
         };
         yield* Ref.set(runtimeRef, runtime);
@@ -846,16 +857,12 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
               if (runtime.client) {
                 const client = runtime.client;
                 const bodyRecord = asObject(input.body) ?? {};
+                const directoryParams = input.directory ? { directory: input.directory } : {};
 
                 switch (input.methodName) {
                   case "command.list": {
                     const command = asRecord(client.command);
-                    return (await asFunction(
-                      command,
-                      "list",
-                    )({
-                      ...(input.directory ? { directory: input.directory } : {}),
-                    })) as T;
+                    return (await asFunction(command, "list")(directoryParams)) as T;
                   }
                   case "provider.list": {
                     const provider = asObject(client.provider);
@@ -863,6 +870,47 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
                       throw new Error("Injected OpenCode runtime client is missing provider API.");
                     }
                     return (await asFunction(provider, "list")()) as T;
+                  }
+                  case "mcp.status": {
+                    const mcp = asObject(client.mcp);
+                    if (!mcp) {
+                      throw new Error("Injected OpenCode runtime client is missing mcp API.");
+                    }
+                    return (await asFunction(mcp, "status")(directoryParams)) as T;
+                  }
+                  case "mcp.add": {
+                    const mcp = asObject(client.mcp);
+                    if (!mcp) {
+                      throw new Error("Injected OpenCode runtime client is missing mcp API.");
+                    }
+                    return (await asFunction(
+                      mcp,
+                      "add",
+                    )({
+                      ...directoryParams,
+                      name: bodyRecord.name,
+                      config: bodyRecord.config,
+                    })) as T;
+                  }
+                  case "mcp.connect": {
+                    const mcp = asObject(client.mcp);
+                    if (!mcp) {
+                      throw new Error("Injected OpenCode runtime client is missing mcp API.");
+                    }
+                    return (await asFunction(
+                      mcp,
+                      "connect",
+                    )({
+                      ...directoryParams,
+                      name: decodePathSegment(input.path, 1),
+                    })) as T;
+                  }
+                  case "tool.ids": {
+                    const tool = asObject(client.tool);
+                    if (!tool) {
+                      throw new Error("Injected OpenCode runtime client is missing tool API.");
+                    }
+                    return (await asFunction(tool, "ids")(directoryParams)) as T;
                   }
                   case "session.create": {
                     const session = asRecord(client.session);
@@ -992,6 +1040,100 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         );
         return result;
       });
+
+    const emitT3ComputerMcpWarning = (input: {
+      readonly threadId: ThreadId;
+      readonly summary: string;
+      readonly detail: string;
+      readonly rawPayload: unknown;
+    }) =>
+      emit(
+        eventBase({
+          threadId: input.threadId,
+          type: "config.warning",
+          payload: {
+            summary: input.summary,
+            detail: input.detail,
+            category: "mcp",
+          },
+          method: "mcp.t3_computer.ensure",
+          rawPayload: input.rawPayload,
+        }),
+      );
+
+    const ensureT3ComputerMcp = (input: {
+      readonly threadId: ThreadId;
+      readonly directory: string;
+    }): Effect.Effect<void> =>
+      Effect.gen(function* () {
+        const runtime = yield* ensureRuntime(input.threadId);
+        const statusByName = yield* requestJson<Record<string, unknown>>({
+          threadId: input.threadId,
+          methodName: "mcp.status",
+          httpMethod: "GET",
+          path: "/mcp",
+          directory: input.directory,
+          body: undefined,
+        });
+        const currentStatus = asString(asObject(statusByName[T3_COMPUTER_MCP_NAME])?.status);
+        if (currentStatus !== "connected") {
+          const config = buildOpenCodeT3ComputerMcpConfig({
+            workspaceCwd: serverConfig.cwd,
+            stateDir: serverConfig.stateDir,
+          });
+          yield* requestJson<unknown>({
+            threadId: input.threadId,
+            methodName: "mcp.add",
+            httpMethod: "POST",
+            path: "/mcp",
+            directory: input.directory,
+            body: { name: T3_COMPUTER_MCP_NAME, config },
+          });
+          yield* requestJson<unknown>({
+            threadId: input.threadId,
+            methodName: "mcp.connect",
+            httpMethod: "POST",
+            path: `/mcp/${encodeURIComponent(T3_COMPUTER_MCP_NAME)}/connect`,
+            directory: input.directory,
+            body: {},
+          });
+        }
+
+        const toolIds = yield* requestJson<ReadonlyArray<unknown>>({
+          threadId: input.threadId,
+          methodName: "tool.ids",
+          httpMethod: "GET",
+          path: "/experimental/tool/ids",
+          directory: input.directory,
+          body: undefined,
+        });
+        if (!toolIds.some(isT3ComputerToolId)) {
+          yield* emitT3ComputerMcpWarning({
+            threadId: input.threadId,
+            summary: "OpenCode did not report T3 Computer Use tools.",
+            detail:
+              "T3 added the t3_computer MCP server, but OpenCode's tool list did not include t3_computer tools. Check OpenCode tool filters such as tools.t3_computer or tools.t3_computer*.",
+            rawPayload: {
+              externalRuntime: runtime.external,
+              mcpStatus: statusByName[T3_COMPUTER_MCP_NAME],
+              toolIds,
+            },
+          });
+        }
+      }).pipe(
+        Effect.catch((cause) =>
+          emitT3ComputerMcpWarning({
+            threadId: input.threadId,
+            summary: "OpenCode could not enable T3 Computer Use.",
+            detail: `${toMessage(
+              cause,
+              "Failed to add or verify the t3_computer MCP server.",
+            )} If you are using a configured external OpenCode server, make sure it can run local MCP servers from this machine.`,
+            rawPayload: { cause: toMessage(cause, "unknown") },
+          }),
+        ),
+        Effect.asVoid,
+      );
 
     const generatedQuestionId = (index: number, question: Record<string, unknown>) => {
       const header = (asString(question.header) ?? asString(question.title) ?? "")
@@ -2068,6 +2210,7 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
           undefined,
           "startSession",
         );
+        yield* ensureT3ComputerMcp({ threadId: input.threadId, directory: cwd });
 
         let sessionInfo: OpencodeSessionInfo | undefined;
         if (resumeCursor?.sessionId) {
