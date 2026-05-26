@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync, execSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { platform } from "node:os";
 
@@ -71,11 +71,7 @@ function resolveBunPath(): string {
         join(process.env.LOCALAPPDATA || "", "bun", "bin", "bun.exe"),
         join(process.env.LOCALAPPDATA || "", "bun", "bin", "bun.cmd"),
       ]
-    : [
-        join(userProfile, ".bun", "bin", "bun"),
-        "/usr/local/bin/bun",
-        "/usr/bin/bun",
-      ];
+    : [join(userProfile, ".bun", "bin", "bun"), "/usr/local/bin/bun", "/usr/bin/bun"];
 
   for (const bunPath of commonPaths) {
     if (existsSync(bunPath)) {
@@ -87,6 +83,33 @@ function resolveBunPath(): string {
   return bunNames[0] ?? "bun";
 }
 
+function normalizeWindowsIcoFile(path: string): void {
+  const bytes = readFileSync(path);
+  if (bytes.length < 6 || bytes.readUInt16LE(0) !== 0 || bytes.readUInt16LE(2) !== 1) {
+    return;
+  }
+
+  const imageCount = bytes.readUInt16LE(4);
+  const directoryLength = 6 + imageCount * 16;
+  if (bytes.length < directoryLength) {
+    return;
+  }
+
+  let changed = false;
+  for (let index = 0; index < imageCount; index++) {
+    const directoryEntryOffset = 6 + index * 16;
+    const planesOffset = directoryEntryOffset + 4;
+    if (bytes.readUInt16LE(planesOffset) !== 1) {
+      bytes.writeUInt16LE(1, planesOffset);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    writeFileSync(path, bytes);
+  }
+}
+
 const BUN_PATH = resolveBunPath();
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
@@ -95,8 +118,10 @@ const BuildArch = Schema.Literals(["arm64", "x64", "universal"]);
 const RepoRoot = Effect.service(Path.Path).pipe(
   Effect.flatMap((path) => path.fromFileUrl(new URL("..", import.meta.url))),
 );
-const ProductionMacIconSource = Effect.zipWith(RepoRoot, Effect.service(Path.Path), (repoRoot, path) =>
-  path.join(repoRoot, BRAND_ASSET_PATHS.productionMacIconPng),
+const ProductionMacIconSource = Effect.zipWith(
+  RepoRoot,
+  Effect.service(Path.Path),
+  (repoRoot, path) => path.join(repoRoot, BRAND_ASSET_PATHS.productionMacIconPng),
 );
 const ProductionLinuxIconSource = Effect.zipWith(
   RepoRoot,
@@ -506,7 +531,9 @@ function stageWindowsIcons(stageResourcesDir: string) {
       });
     }
 
-    yield* fs.copyFile(iconSource, path.join(stageResourcesDir, "icon.ico"));
+    const stagedIconPath = path.join(stageResourcesDir, "icon.ico");
+    yield* fs.copyFile(iconSource, stagedIconPath);
+    normalizeWindowsIcoFile(stagedIconPath);
     yield* fs.copyFile(brandPngSource, path.join(stageResourcesDir, "icon.png"));
   });
 }

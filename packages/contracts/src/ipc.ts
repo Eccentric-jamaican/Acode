@@ -122,6 +122,7 @@ import type {
   ProviderReadPluginInput,
   ProviderReadPluginResult,
 } from "./providerDiscovery";
+import type { ProviderPrewarmSessionInput, ProviderPrewarmSessionResult } from "./provider";
 
 export interface ContextMenuItem<T extends string = string> {
   id: T;
@@ -249,6 +250,7 @@ export interface DesktopBridge {
   getWindowChromeMetrics: () => DesktopWindowChromeMetrics;
   pickFolder: () => Promise<string | null>;
   confirm: (message: string) => Promise<boolean>;
+  getPathForFile: (file: unknown) => string | null;
   showContextMenu: <T extends string>(
     items: readonly ContextMenuItem<T>[],
     position?: { x: number; y: number },
@@ -381,6 +383,9 @@ export interface NativeApi {
     listPlugins: (input: ProviderListPluginsInput) => Promise<ProviderListPluginsResult>;
     readPlugin: (input: ProviderReadPluginInput) => Promise<ProviderReadPluginResult>;
     listModels: (input: ProviderListModelsInput) => Promise<ProviderListModelsResult>;
+    prewarmSession: (
+      input: ProviderPrewarmSessionInput,
+    ) => Promise<ProviderPrewarmSessionResult>;
   };
   orchestration: {
     getSnapshot: (input?: OrchestrationGetSnapshotInput) => Promise<OrchestrationReadModel>;

@@ -101,6 +101,7 @@ const COMPUTER_USE_APP_ICON_CACHE_DIR = path.join(
   "computer-use",
   "app-icons",
 );
+const COMPUTER_USE_APP_ICON_MISS_TTL_MS = 6 * 60 * 60 * 1_000;
 const COMPUTER_USE_APP_ICON_PREWARM_LIMIT = 10;
 
 async function focusAndResizeComputerUseWindow(input: {
@@ -476,6 +477,15 @@ export async function readPersistedComputerUseAppIcon(input: {
     return readFile(paths.iconPath);
   }
   if (await pathExists(paths.missPath)) {
+    try {
+      const missStats = await stat(paths.missPath);
+      if (Date.now() - missStats.mtimeMs > COMPUTER_USE_APP_ICON_MISS_TTL_MS) {
+        await rm(paths.missPath, { force: true });
+        return undefined;
+      }
+    } catch {
+      return undefined;
+    }
     return null;
   }
   return undefined;
@@ -509,7 +519,9 @@ export async function resolveComputerUseAppIcon(input: {
   }
   const persisted = await readPersistedComputerUseAppIcon({ cacheKey }).catch(() => undefined);
   if (persisted !== undefined) {
-    appIconCache.set(cacheKey, persisted);
+    if (persisted) {
+      appIconCache.set(cacheKey, persisted);
+    }
     return persisted;
   }
 
@@ -630,7 +642,11 @@ foreach ($path in $paths) {
       ? (raw as { base64: string }).base64
       : null;
   const bytes = base64 ? Buffer.from(base64, "base64") : null;
-  appIconCache.set(cacheKey, bytes);
+  if (bytes) {
+    appIconCache.set(cacheKey, bytes);
+  } else {
+    appIconCache.delete(cacheKey);
+  }
   void writePersistedComputerUseAppIcon({ cacheKey, bytes }).catch(() => undefined);
   return bytes;
 }

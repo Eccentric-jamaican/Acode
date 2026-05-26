@@ -329,6 +329,7 @@ export function createWsNativeApi(): NativeApi {
       listPlugins: (input) => transport.request(WS_METHODS.providerListPlugins, input),
       readPlugin: (input) => transport.request(WS_METHODS.providerReadPlugin, input),
       listModels: (input) => transport.request(WS_METHODS.providerListModels, input),
+      prewarmSession: (input) => transport.request(WS_METHODS.providerPrewarmSession, input),
     },
     orchestration: {
       getSnapshot: (input) => transport.request(ORCHESTRATION_WS_METHODS.getSnapshot, input),

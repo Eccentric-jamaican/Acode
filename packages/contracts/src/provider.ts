@@ -80,6 +80,16 @@ export const ProviderSessionStartInput = Schema.Struct({
 });
 export type ProviderSessionStartInput = typeof ProviderSessionStartInput.Type;
 
+export const ProviderPrewarmSessionInput = ProviderSessionStartInput;
+export type ProviderPrewarmSessionInput = typeof ProviderPrewarmSessionInput.Type;
+
+export const ProviderPrewarmSessionResult = Schema.Struct({
+  threadId: ThreadId,
+  provider: ProviderKind,
+  status: Schema.Literals(["warming", "ready", "active", "unsupported"]),
+});
+export type ProviderPrewarmSessionResult = typeof ProviderPrewarmSessionResult.Type;
+
 export const ProviderSendTurnInput = Schema.Struct({
   threadId: ThreadId,
   input: Schema.optional(

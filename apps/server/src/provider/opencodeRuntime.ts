@@ -31,6 +31,8 @@ const DEFAULT_OPENCODE_SERVER_TIMEOUT_MS = 90_000;
 const OPENCODE_SERVER_READY_PREFIX = "opencode server listening";
 const PORT_POLL_INTERVAL_MS = 200;
 const DEFAULT_OPENCODE_BINARY_PATH = "opencode";
+const WINDOWS_BATCH_EXTENSIONS = new Set([".bat", ".cmd"]);
+const WINDOWS_EXECUTABLE_EXTENSIONS = [".cmd", ".bat", ".exe", ".com"] as const;
 
 function resolveSiblingRuntimePath(relativeBaseName: string): string {
   const builtPath = fileURLToPath(new URL(`../${relativeBaseName}.mjs`, import.meta.url));
@@ -214,22 +216,60 @@ function normalizeOpenCodeBinaryCommand(binaryPath: string): string {
   return trimmed.length > 0 ? trimmed : DEFAULT_OPENCODE_BINARY_PATH;
 }
 
+function isWindowsBatchFile(binaryPath: string): boolean {
+  return WINDOWS_BATCH_EXTENSIONS.has(Path.extname(binaryPath).toLowerCase());
+}
+
+function quoteWindowsCmdArgument(value: string): string {
+  return `"${value.replace(/"/g, '""').replace(/%/g, "%%")}"`;
+}
+
+export function resolveOpenCodeProcessLaunch(input: {
+  readonly binaryPath: string;
+  readonly args: ReadonlyArray<string>;
+  readonly platform?: NodeJS.Platform;
+  readonly comSpec?: string;
+}): {
+  readonly command: string;
+  readonly args: ReadonlyArray<string>;
+  readonly windowsVerbatimArguments?: true;
+} {
+  const platform = input.platform ?? process.platform;
+  if (platform !== "win32" || !isWindowsBatchFile(input.binaryPath)) {
+    return {
+      command: input.binaryPath,
+      args: [...input.args],
+    };
+  }
+
+  return {
+    command: input.comSpec ?? process.env.ComSpec ?? "cmd.exe",
+    args: [
+      "/d",
+      "/s",
+      "/c",
+      ["call", quoteWindowsCmdArgument(input.binaryPath), ...input.args.map(quoteWindowsCmdArgument)].join(
+        " ",
+      ),
+    ],
+    windowsVerbatimArguments: true,
+  };
+}
+
 function spawnOpenCodeProcess(input: {
   readonly binaryPath: string;
   readonly args: ReadonlyArray<string>;
   readonly env: NodeJS.ProcessEnv;
 }): ChildProcess {
-  if (process.platform !== "win32") {
-    return spawn(input.binaryPath, [...input.args], {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: input.env,
-    });
-  }
-
-  return spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/c", input.binaryPath, ...input.args], {
+  const launch = resolveOpenCodeProcessLaunch({
+    binaryPath: input.binaryPath,
+    args: input.args,
+  });
+  return spawn(launch.command, [...launch.args], {
     stdio: ["ignore", "pipe", "pipe"],
     env: input.env,
-    windowsHide: true,
+    ...(process.platform === "win32" ? { windowsHide: true } : {}),
+    ...(launch.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
   });
 }
 
@@ -298,21 +338,29 @@ function parseServerUrlFromOutput(output: string): string | null {
   return null;
 }
 
-async function waitForOpenCodeHttpReady(input: {
+export async function waitForOpenCodeHttpReady(input: {
   readonly url: string;
   readonly timeoutMs: number;
   readonly startedAt: number;
 }): Promise<void> {
   let lastError: unknown;
   while (Date.now() - input.startedAt < input.timeoutMs) {
+    const remainingMs = input.timeoutMs - (Date.now() - input.startedAt);
+    const controller = new AbortController();
+    const requestTimeout = setTimeout(
+      () => controller.abort(),
+      Math.min(5_000, Math.max(1, remainingMs)),
+    );
     try {
-      const response = await fetch(new URL("/provider", input.url));
+      const response = await fetch(new URL("/", input.url), { signal: controller.signal });
       if (response.ok) {
         return;
       }
       lastError = new Error(`HTTP ${response.status}: ${await response.text()}`);
     } catch (error) {
       lastError = error;
+    } finally {
+      clearTimeout(requestTimeout);
     }
     await new Promise((resolve) => setTimeout(resolve, PORT_POLL_INTERVAL_MS));
   }
@@ -331,11 +379,8 @@ export function buildOpenCodeBasicAuthorizationHeader(password: string): string 
   return `Basic ${Buffer.from(`opencode:${password}`, "utf8").toString("base64")}`;
 }
 
-function buildVariantOptions(
-  providerID: string,
-  model: ProviderListResponse["all"][number]["models"][string],
-) {
-  const values = Object.keys(model.variants ?? {});
+export function buildOpenCodeVariantOptions(variants: Record<string, unknown> | null | undefined) {
+  const values = Object.keys(variants ?? {});
   return values.map((value, index) => ({
     value,
     label: titleCaseSlug(value),
@@ -343,7 +388,7 @@ function buildVariantOptions(
   }));
 }
 
-function buildAgentOptions(agents: ReadonlyArray<Agent>) {
+function buildOpenCodeAgentOptions(agents: ReadonlyArray<Pick<Agent, "hidden" | "name">>) {
   const visibleAgents = agents.filter((agent) => !agent.hidden);
   return visibleAgents.map((agent, index) => ({
     value: agent.name,
@@ -352,16 +397,25 @@ function buildAgentOptions(agents: ReadonlyArray<Agent>) {
   }));
 }
 
-function openCodeCapabilitiesForModel(input: {
-  readonly providerID: string;
-  readonly model: ProviderListResponse["all"][number]["models"][string];
-  readonly agents: ReadonlyArray<Agent>;
+export function buildOpenCodeModelCapabilities(input: {
+  readonly variants: Record<string, unknown> | null | undefined;
+  readonly agents?: ReadonlyArray<Pick<Agent, "hidden" | "name">>;
 }): ModelCapabilities {
   return {
     ...DEFAULT_OPENCODE_MODEL_CAPABILITIES,
-    variantOptions: buildVariantOptions(input.providerID, input.model),
-    agentOptions: buildAgentOptions(input.agents),
+    variantOptions: buildOpenCodeVariantOptions(input.variants),
+    ...(input.agents ? { agentOptions: buildOpenCodeAgentOptions(input.agents) } : {}),
   };
+}
+
+function openCodeCapabilitiesForModel(input: {
+  readonly model: ProviderListResponse["all"][number]["models"][string];
+  readonly agents: ReadonlyArray<Agent>;
+}): ModelCapabilities {
+  return buildOpenCodeModelCapabilities({
+    variants: input.model.variants,
+    agents: input.agents,
+  });
 }
 
 export function parseOpenCodeModelSlug(
@@ -722,7 +776,6 @@ export function flattenOpenCodeModels(
         name: `${provider.name} · ${model.name}`,
         isCustom: false,
         capabilities: openCodeCapabilitiesForModel({
-          providerID: provider.id,
           model,
           agents: input.agents,
         }),
@@ -732,17 +785,57 @@ export function flattenOpenCodeModels(
   return models.toSorted((left, right) => left.name.localeCompare(right.name));
 }
 
+function resolveWindowsNpmPosixShimTarget(shimPath: string): string | undefined {
+  if (Path.extname(shimPath) !== "") {
+    return undefined;
+  }
+  try {
+    const stat = FS.statSync(shimPath);
+    if (!stat.isFile() || stat.size > 64_000) {
+      return undefined;
+    }
+    const contents = FS.readFileSync(shimPath, "utf8");
+    const targetMatch = contents.match(/["']\$basedir\/([^"'\r\n]+?\.exe)["']/u);
+    const relativeTarget = targetMatch?.[1];
+    if (!relativeTarget) {
+      return undefined;
+    }
+    const targetPath = Path.resolve(Path.dirname(shimPath), relativeTarget.replace(/\//g, Path.sep));
+    return FS.existsSync(targetPath) ? targetPath : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveWindowsOpenCodeCommandCandidate(candidate: string): string | undefined {
+  if (Path.extname(candidate) !== "") {
+    return FS.existsSync(candidate) ? candidate : undefined;
+  }
+  for (const extension of WINDOWS_EXECUTABLE_EXTENSIONS) {
+    const executableCandidate = `${candidate}${extension}`;
+    if (FS.existsSync(executableCandidate)) {
+      return executableCandidate;
+    }
+  }
+  return resolveWindowsNpmPosixShimTarget(candidate) ?? (FS.existsSync(candidate) ? candidate : undefined);
+}
+
 export function resolveOpenCodeBinaryPath(binaryPath: string): string {
   const normalizedBinaryPath = normalizeOpenCodeBinaryCommand(binaryPath);
+  if (process.platform === "win32") {
+    const resolvedWindowsCommand = resolveWindowsOpenCodeCommandCandidate(normalizedBinaryPath);
+    if (resolvedWindowsCommand) {
+      return resolvedWindowsCommand;
+    }
+  }
   if (Path.isAbsolute(normalizedBinaryPath)) {
     return normalizedBinaryPath;
   }
   const candidates = (() => {
     try {
-      return execFileSync(process.platform === "win32" ? "where" : "which", [normalizedBinaryPath], {
+      return execFileSync(process.platform === "win32" ? "where.exe" : "which", [normalizedBinaryPath], {
         encoding: "utf8",
         timeout: 3_000,
-        shell: process.platform === "win32",
       })
         .split(/\r?\n/u)
         .map((entry) => entry.trim())
@@ -752,12 +845,13 @@ export function resolveOpenCodeBinaryPath(binaryPath: string): string {
     }
   })();
   if (process.platform === "win32") {
-    return (
-      candidates.find((entry) => entry.toLowerCase().endsWith(".cmd")) ??
-      candidates.find((entry) => entry.toLowerCase().endsWith(".exe")) ??
-      candidates[0] ??
-      normalizedBinaryPath
-    );
+    for (const candidate of candidates) {
+      const resolvedCandidate = resolveWindowsOpenCodeCommandCandidate(candidate);
+      if (resolvedCandidate) {
+        return resolvedCandidate;
+      }
+    }
+    return candidates[0] ?? normalizedBinaryPath;
   }
   return candidates[0] ?? normalizedBinaryPath;
 }

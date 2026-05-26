@@ -36,10 +36,7 @@ import { RotatingFileSink } from "@t3tools/shared/logging";
 import { BrowserRuntimeRegistry } from "./browserRuntime";
 import { showDesktopConfirmDialog } from "./confirmDialog";
 import { fixPath } from "./fixPath";
-import {
-  getAutoUpdateDisabledReason,
-  shouldBroadcastDownloadProgress,
-} from "./updateState";
+import { getAutoUpdateDisabledReason, shouldBroadcastDownloadProgress } from "./updateState";
 import {
   createInitialDesktopUpdateState,
   reduceDesktopUpdateStateOnCheckFailure,
@@ -74,7 +71,8 @@ const UPDATE_INSTALL_CHANNEL = "desktop:update-install";
 const NOTIFICATIONS_IS_SUPPORTED_CHANNEL = "desktop:notifications-is-supported";
 const NOTIFICATIONS_SHOW_CHANNEL = "desktop:notifications-show";
 const NOTIFICATIONS_ACTION_CHANNEL = "desktop:notifications-action";
-const NOTIFICATIONS_CONSUME_PENDING_ACTIONS_CHANNEL = "desktop:notifications-consume-pending-actions";
+const NOTIFICATIONS_CONSUME_PENDING_ACTIONS_CHANNEL =
+  "desktop:notifications-consume-pending-actions";
 const BROWSER_GET_STATE_CHANNEL = "desktop:browser-get-state";
 const BROWSER_OPEN_CHANNEL = "desktop:browser-open";
 const BROWSER_CLOSE_PANE_CHANNEL = "desktop:browser-close-pane";
@@ -303,7 +301,8 @@ const browserRuntimeRegistry = new BrowserRuntimeRegistry({
     );
   },
 });
-const initialUpdateState = (): DesktopUpdateState => createInitialDesktopUpdateState(app.getVersion());
+const initialUpdateState = (): DesktopUpdateState =>
+  createInitialDesktopUpdateState(app.getVersion());
 
 function emitBrowserEvent(event: BrowserRuntimeEvent): void {
   for (const window of BrowserWindow.getAllWindows()) {
@@ -353,7 +352,9 @@ async function ensureComputerOverlayWindow(): Promise<BrowserWindow> {
   overlay.setIgnoreMouseEvents(true, { forward: true });
   overlay.setAlwaysOnTop(true, "screen-saver");
   overlay.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  await overlay.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(COMPUTER_OVERLAY_HTML)}`);
+  await overlay.loadURL(
+    `data:text/html;charset=utf-8,${encodeURIComponent(COMPUTER_OVERLAY_HTML)}`,
+  );
   computerOverlayWindow = overlay;
   overlay.on("closed", () => {
     if (computerOverlayWindow === overlay) {
@@ -449,10 +450,14 @@ function readWindowsLastNotificationAddedTime(appId: string): number | null {
   }
 
   const registryPath = `HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings\\${appId}`;
-  const result = ChildProcess.spawnSync("reg.exe", ["query", registryPath, "/v", "LastNotificationAddedTime"], {
-    encoding: "utf8",
-    windowsHide: true,
-  });
+  const result = ChildProcess.spawnSync(
+    "reg.exe",
+    ["query", registryPath, "/v", "LastNotificationAddedTime"],
+    {
+      encoding: "utf8",
+      windowsHide: true,
+    },
+  );
   if (result.status !== 0) {
     return null;
   }
@@ -537,11 +542,7 @@ function parseDesktopNotificationPayload(rawInput: unknown): DesktopNotification
 
   if (kind === "approval_required") {
     const requestKind = readRequiredString(input, "requestKind");
-    if (
-      requestKind !== "command" &&
-      requestKind !== "file-read" &&
-      requestKind !== "file-change"
-    ) {
+    if (requestKind !== "command" && requestKind !== "file-read" && requestKind !== "file-change") {
       throw new Error("requestKind must be command, file-read, or file-change.");
     }
     const detail = readOptionalString(input, "detail");
@@ -875,7 +876,12 @@ async function handleBrowserBridgeRequest(body: unknown): Promise<unknown> {
       if (typeof input.expression !== "string" || input.expression.trim().length === 0) {
         throw new Error("expression must be a non-empty string.");
       }
-      return { value: await browserRuntimeRegistry.evaluate(asProjectId(input.projectId), input.expression) };
+      return {
+        value: await browserRuntimeRegistry.evaluate(
+          asProjectId(input.projectId),
+          input.expression,
+        ),
+      };
     case "computer.show_overlay":
       if (!input.bounds || typeof input.bounds !== "object") {
         throw new Error("bounds must be provided for computer.show_overlay.");
@@ -1072,16 +1078,16 @@ function captureBackendOutput(child: ChildProcess.ChildProcess): void {
   const writeChunk =
     (target: "stdout" | "stderr") =>
     (chunk: unknown): void => {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
-    if (!app.isPackaged) {
-      if (target === "stdout") {
-        process.stdout.write(buffer);
-      } else {
-        process.stderr.write(buffer);
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "utf8");
+      if (!app.isPackaged) {
+        if (target === "stdout") {
+          process.stdout.write(buffer);
+        } else {
+          process.stderr.write(buffer);
+        }
       }
-    }
-    backendLogSink?.write(buffer);
-  };
+      backendLogSink?.write(buffer);
+    };
   child.stdout?.on("data", writeChunk("stdout"));
   child.stderr?.on("data", writeChunk("stderr"));
 }
@@ -1480,6 +1486,77 @@ function resolveBrandPngPath(): string | null {
   return FS.existsSync(repoAsset) ? repoAsset : null;
 }
 
+function resolveWindowsShellIconPath(): string | null {
+  const bundledIcon = resolveIconPath("ico");
+  if (!bundledIcon) {
+    return null;
+  }
+
+  const shellIconPath = Path.join(app.getPath("userData"), "shell-icon.ico");
+  try {
+    FS.mkdirSync(Path.dirname(shellIconPath), { recursive: true });
+    FS.copyFileSync(bundledIcon, shellIconPath);
+    return shellIconPath;
+  } catch (error) {
+    console.warn("[desktop] Failed to export Windows shell icon.", error);
+    return bundledIcon;
+  }
+}
+
+function ensureWindowsShortcutMetadata(
+  shortcutPath: string,
+  targetPath: string,
+  iconPath: string,
+): void {
+  const details = {
+    target: targetPath,
+    cwd: Path.dirname(targetPath),
+    args: "",
+    description: APP_DISPLAY_NAME,
+    icon: iconPath,
+    iconIndex: 0,
+    appUserModelId: APP_DESKTOP_APP_ID,
+    toastActivatorClsid: WINDOWS_TOAST_ACTIVATOR_CLSID,
+  };
+
+  const operation = FS.existsSync(shortcutPath) ? "update" : "create";
+  const wroteShortcut = shell.writeShortcutLink(shortcutPath, operation, details);
+  if (!wroteShortcut) {
+    console.warn("[desktop-notifications] Failed to persist Windows shortcut metadata.", {
+      shortcutPath,
+      operation,
+    });
+  }
+}
+
+function refreshExistingWindowsDesktopShortcuts(targetPath: string, iconPath: string): void {
+  const shortcutPaths = [
+    Path.join(app.getPath("desktop"), `${APP_DISPLAY_NAME}.lnk`),
+    ...(process.env.PUBLIC
+      ? [Path.join(process.env.PUBLIC, "Desktop", `${APP_DISPLAY_NAME}.lnk`)]
+      : []),
+  ];
+
+  for (const shortcutPath of shortcutPaths) {
+    if (!FS.existsSync(shortcutPath)) {
+      continue;
+    }
+
+    try {
+      const existing = shell.readShortcutLink(shortcutPath);
+      if (Path.normalize(existing.target) !== Path.normalize(targetPath)) {
+        continue;
+      }
+      ensureWindowsShortcutMetadata(shortcutPath, targetPath, iconPath);
+    } catch (error) {
+      console.warn("[desktop] Failed to refresh Windows desktop shortcut metadata.", {
+        shortcutPath,
+        error,
+      });
+    }
+  }
+}
+
 function ensureWindowsToastShortcut(): void {
   if (process.platform !== "win32" || !app.isReady()) {
     return;
@@ -1495,32 +1572,12 @@ function ensureWindowsToastShortcut(): void {
   );
   const shortcutDir = Path.dirname(shortcutPath);
   const targetPath = process.execPath;
-  const iconPath = resolveIconPath("ico") ?? targetPath;
-  const details = {
-    target: targetPath,
-    cwd: Path.dirname(targetPath),
-    args: "",
-    description: APP_DISPLAY_NAME,
-    icon: iconPath,
-    iconIndex: 0,
-    appUserModelId: APP_DESKTOP_APP_ID,
-    toastActivatorClsid: WINDOWS_TOAST_ACTIVATOR_CLSID,
-  };
+  const iconPath = resolveWindowsShellIconPath() ?? targetPath;
 
   try {
     FS.mkdirSync(shortcutDir, { recursive: true });
-    const operation = FS.existsSync(shortcutPath) ? "update" : "create";
-    const wroteShortcut = shell.writeShortcutLink(
-      shortcutPath,
-      operation,
-      details,
-    );
-    if (!wroteShortcut) {
-      console.warn(
-        "[desktop-notifications] Failed to persist Windows toast shortcut metadata.",
-        { shortcutPath, operation },
-      );
-    }
+    ensureWindowsShortcutMetadata(shortcutPath, targetPath, iconPath);
+    refreshExistingWindowsDesktopShortcuts(targetPath, iconPath);
   } catch (error) {
     console.warn(
       "[desktop-notifications] Failed to ensure Windows toast shortcut metadata.",
@@ -1608,7 +1665,9 @@ async function checkForUpdates(reason: string): Promise<void> {
     await autoUpdater.checkForUpdates();
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
-    setUpdateState(reduceDesktopUpdateStateOnCheckFailure(updateState, message, new Date().toISOString()));
+    setUpdateState(
+      reduceDesktopUpdateStateOnCheckFailure(updateState, message, new Date().toISOString()),
+    );
     console.error(`[desktop-updater] Failed to check for updates: ${message}`);
   } finally {
     updateCheckInFlight = false;
@@ -1776,7 +1835,11 @@ function createWindowsToastOptions(input: DesktopNotificationPayload): Record<st
 async function showWindowsRichNotification(input: DesktopNotificationPayload): Promise<boolean> {
   // In local dev, PowerToast falls back to a PowerShell bootstrap path that is
   // flaky on some Windows setups. Use Electron's built-in notification instead.
-  if (process.platform !== "win32" || windowsRichToastDisabledForSession !== null || isDevelopment) {
+  if (
+    process.platform !== "win32" ||
+    windowsRichToastDisabledForSession !== null ||
+    isDevelopment
+  ) {
     return false;
   }
 
@@ -1805,12 +1868,16 @@ async function showWindowsRichNotification(input: DesktopNotificationPayload): P
     });
     const nextAddedTime = readWindowsLastNotificationAddedTime(APP_DESKTOP_APP_ID);
     const delivered =
-      nextAddedTime !== null &&
-      (previousAddedTime === null || nextAddedTime > previousAddedTime);
+      nextAddedTime !== null && (previousAddedTime === null || nextAddedTime > previousAddedTime);
     if (!delivered) {
       console.warn(
         "[desktop-notifications] Windows rich toast was not recorded by the shell; falling back.",
-        { notificationId: input.notificationId, kind: input.kind, previousAddedTime, nextAddedTime },
+        {
+          notificationId: input.notificationId,
+          kind: input.kind,
+          previousAddedTime,
+          nextAddedTime,
+        },
       );
     }
     return delivered;
@@ -1898,9 +1965,7 @@ function configureAutoUpdater(): void {
   updaterConfigured = true;
 
   const githubToken =
-    process.env.T3CODE_DESKTOP_UPDATE_GITHUB_TOKEN?.trim() ||
-    process.env.GH_TOKEN?.trim() ||
-    "";
+    process.env.T3CODE_DESKTOP_UPDATE_GITHUB_TOKEN?.trim() || process.env.GH_TOKEN?.trim() || "";
   if (githubToken) {
     // When a token is provided, re-configure the feed with `private: true` so
     // electron-updater uses the GitHub API (api.github.com) instead of the
@@ -1925,7 +1990,13 @@ function configureAutoUpdater(): void {
     console.info("[desktop-updater] Looking for updates...");
   });
   autoUpdater.on("update-available", (info) => {
-    setUpdateState(reduceDesktopUpdateStateOnUpdateAvailable(updateState, info.version, new Date().toISOString()));
+    setUpdateState(
+      reduceDesktopUpdateStateOnUpdateAvailable(
+        updateState,
+        info.version,
+        new Date().toISOString(),
+      ),
+    );
     lastLoggedDownloadMilestone = -1;
     console.info(`[desktop-updater] Update available: ${info.version}`);
   });

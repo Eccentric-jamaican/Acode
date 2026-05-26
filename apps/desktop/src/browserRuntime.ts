@@ -300,7 +300,6 @@ const CAPTURE_SELECTION_SCRIPT = String.raw`
 const MAX_TEXT_LENGTH = 20_000;
 const WAIT_POLL_INTERVAL_MS = 100;
 const ATTACHED_BOUNDS_REAPPLY_DELAYS_MS = [0, 75, 200, 500] as const;
-const INTEGRATED_BROWSER_VIEWPORT_SELECTOR = '[data-integrated-browser-native-viewport="true"]';
 const DEFAULT_NEW_TAB_URL = "https://www.google.com";
 export const BROWSER_HIDDEN_RUNTIME_IDLE_TTL_MS = 15_000;
 export const BROWSER_STORAGE_PARTITION = "persist:t3-browser-default";
@@ -349,62 +348,6 @@ function normalizeBounds(bounds: BrowserPaneBounds): BrowserPaneBounds {
   };
 }
 
-async function readIntegratedBrowserViewportBounds(
-  window: BrowserWindow | null,
-): Promise<BrowserPaneBounds | null> {
-  if (!window) {
-    return null;
-  }
-
-  try {
-    const result = await window.webContents.executeJavaScript(
-      `(() => {
-        const element = document.querySelector(${JSON.stringify(INTEGRATED_BROWSER_VIEWPORT_SELECTOR)});
-        if (!(element instanceof HTMLElement)) {
-          return null;
-        }
-
-        const rect = element.getBoundingClientRect();
-        if (!(rect.width > 0 && rect.height > 0)) {
-          return null;
-        }
-
-        return {
-          x: rect.left,
-          y: rect.top,
-          width: rect.width,
-          height: rect.height,
-        };
-      })()`,
-      true,
-    );
-
-    if (
-      !result ||
-      typeof result !== "object" ||
-      !("x" in result) ||
-      !("y" in result) ||
-      !("width" in result) ||
-      !("height" in result)
-    ) {
-      return null;
-    }
-
-    const candidate = result as Record<string, unknown>;
-    const x = Number(candidate.x);
-    const y = Number(candidate.y);
-    const width = Number(candidate.width);
-    const height = Number(candidate.height);
-    if (![x, y, width, height].every(Number.isFinite)) {
-      return null;
-    }
-
-    return normalizeBounds({ x, y, width, height });
-  } catch {
-    return null;
-  }
-}
-
 function scaleBoundsByZoomFactor(bounds: BrowserPaneBounds, zoomFactor: number): BrowserPaneBounds {
   if (!Number.isFinite(zoomFactor) || Math.abs(zoomFactor - 1) < 0.001) {
     return normalizeBounds(bounds);
@@ -415,6 +358,11 @@ function scaleBoundsByZoomFactor(bounds: BrowserPaneBounds, zoomFactor: number):
     width: bounds.width * zoomFactor,
     height: bounds.height * zoomFactor,
   });
+}
+
+function hideView(view: Electron.WebContentsView): void {
+  view.setVisible(false);
+  view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
 }
 
 function toSessionSummary(tab: BrowserTabRuntimeRecord): BrowserSessionSummary {
@@ -505,6 +453,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
   private paneProjectId: ProjectId | null = null;
   private paneBounds: BrowserPaneBounds | null = null;
   private paneRequestVersion = 0;
+  private readonly attachedViews = new Set<Electron.WebContentsView>();
   private readonly hiddenRuntimeCleanupTimers = new Map<
     ProjectId,
     ReturnType<typeof globalThis.setTimeout>
@@ -594,18 +543,6 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
       this.emitStateUpdated(projectId);
       return this.snapshotForProject(projectId);
     }
-    const measuredBounds = await readIntegratedBrowserViewportBounds(this.window);
-    if (
-      requestVersion !== this.paneRequestVersion ||
-      !this.paneOpen ||
-      this.paneProjectId !== projectId ||
-      !this.paneBounds
-    ) {
-      return this.snapshotForProject(projectId);
-    }
-    if (measuredBounds) {
-      this.paneBounds = measuredBounds;
-    }
     if (this.window) {
       this.attachActiveTab(this.window, projectId, this.paneBounds);
     }
@@ -619,7 +556,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     this.paneOpen = false;
     this.paneBounds = null;
     if (this.window) {
-      this.detachAttachedView(this.window);
+      this.detachAllRuntimeViews(this.window);
     }
     if (projectId) {
       this.scheduleHiddenRuntimeCleanup(projectId);
@@ -1283,6 +1220,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     if (!sameAttachment) {
       this.cancelHiddenRuntimeCleanup(projectId);
       contentView.addChildView(activeTab.view);
+      this.attachedViews.add(activeTab.view);
     }
 
     this.applyBounds(activeTab, bounds, { forceViewportRefresh: !sameAttachment });
@@ -1296,13 +1234,12 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
   private scheduleAttachedBoundsReapply(projectId: ProjectId, tabId: BrowserTabId): void {
     for (const delayMs of ATTACHED_BOUNDS_REAPPLY_DELAYS_MS) {
       globalThis.setTimeout(() => {
-        void this.reapplyAttachedBounds(projectId, tabId);
+        this.reapplyAttachedBounds(projectId, tabId);
       }, delayMs);
     }
   }
 
-  private async reapplyAttachedBounds(projectId: ProjectId, tabId: BrowserTabId): Promise<void> {
-    const requestVersion = this.paneRequestVersion;
+  private reapplyAttachedBounds(projectId: ProjectId, tabId: BrowserTabId): void {
     if (
       !this.window ||
       !this.paneOpen ||
@@ -1318,22 +1255,40 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     if (!tab) {
       return;
     }
-    const measuredBounds = await readIntegratedBrowserViewportBounds(this.window);
-    if (
-      requestVersion !== this.paneRequestVersion ||
-      !this.window ||
-      !this.paneOpen ||
-      !this.paneBounds ||
-      this.paneProjectId !== projectId ||
-      this.attachedProjectId !== projectId ||
-      this.attachedTabId !== tabId
-    ) {
-      return;
-    }
-    if (measuredBounds) {
-      this.paneBounds = measuredBounds;
-    }
     this.applyBounds(tab, this.paneBounds, { forceViewportRefresh: true });
+  }
+
+  private removeViewFromWindow(window: BrowserWindow, view: Electron.WebContentsView): void {
+    try {
+      if (typeof window.isDestroyed === "function" && window.isDestroyed()) {
+        this.attachedViews.delete(view);
+        return;
+      }
+      const contentView = (window as BrowserWindow & {
+        contentView: { removeChildView: (view: Electron.WebContentsView) => void };
+      }).contentView;
+      hideView(view);
+      contentView.removeChildView(view);
+      this.attachedViews.delete(view);
+    } catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("Object has been destroyed")) {
+        throw error;
+      }
+      this.attachedViews.delete(view);
+    }
+  }
+
+  private detachAllRuntimeViews(window: BrowserWindow): void {
+    for (const projectRuntime of this.runtimes.values()) {
+      for (const tab of projectRuntime.tabs.values()) {
+        hideView(tab.view);
+      }
+    }
+    for (const view of this.attachedViews) {
+      this.removeViewFromWindow(window, view);
+    }
+    this.attachedProjectId = null;
+    this.attachedTabId = null;
   }
 
   private detachAttachedView(window: BrowserWindow): void {
@@ -1348,17 +1303,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
       return;
     }
     try {
-      if (typeof window.isDestroyed === "function" && window.isDestroyed()) {
-        return;
-      }
-      const contentView = (window as BrowserWindow & {
-        contentView: { removeChildView: (view: Electron.WebContentsView) => void };
-      }).contentView;
-      contentView.removeChildView(tab.view);
-    } catch (error) {
-      if (!(error instanceof Error) || !error.message.includes("Object has been destroyed")) {
-        throw error;
-      }
+      this.removeViewFromWindow(window, tab.view);
     } finally {
       this.attachedProjectId = null;
       this.attachedTabId = null;

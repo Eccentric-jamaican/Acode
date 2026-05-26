@@ -141,5 +141,14 @@ export function DesktopBrowserController() {
     });
   }, [navigate]);
 
+  useEffect(() => {
+    if (browserRouteThreadIdFromPathname(pathname) !== null) {
+      return;
+    }
+
+    const api = readNativeApi();
+    void api?.browser?.closePane().catch(() => undefined);
+  }, [pathname]);
+
   return null;
 }

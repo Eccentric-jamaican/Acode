@@ -143,7 +143,15 @@ function createOpenCodeFixture(input?: {
           id: "openai",
           name: "OpenAI",
           models: {
-            "gpt-5": { id: "gpt-5", name: "GPT-5" },
+            "gpt-5": {
+              id: "gpt-5",
+              name: "GPT-5",
+              variants: {
+                low: {},
+                medium: {},
+                high: {},
+              },
+            },
           },
         },
       ],
@@ -470,7 +478,24 @@ describe("OpencodeAdapter native commands", () => {
           }
 
           const models = yield* adapter.listModels();
-          expect(models.models).toEqual([{ slug: "openai/gpt-5", name: "OpenAI · GPT-5" }]);
+          expect(models.models).toEqual([
+            {
+              slug: "openai/gpt-5",
+              name: "OpenAI · GPT-5",
+              capabilities: {
+                reasoningEffortLevels: [],
+                supportsFastMode: false,
+                supportsThinkingToggle: false,
+                promptInjectedEffortLevels: [],
+                variantOptions: [
+                  { value: "low", label: "Low", isDefault: true },
+                  { value: "medium", label: "Medium" },
+                  { value: "high", label: "High" },
+                ],
+                agentOptions: [],
+              },
+            },
+          ]);
 
           yield* adapter.sendTurn({
             threadId,

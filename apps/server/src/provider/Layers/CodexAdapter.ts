@@ -39,6 +39,7 @@ import {
 import { CodexAdapter, type CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import {
   CodexAppServerManager,
+  type CodexAppServerPrewarmSessionResult,
   type CodexAppServerStartSessionInput,
 } from "../../codexAppServerManager.ts";
 import {
@@ -1425,29 +1426,8 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
       }
     };
 
-    const startSession: CodexAdapterShape["startSession"] = (input) => {
-      if (input.provider !== undefined && input.provider !== PROVIDER) {
-        return Effect.fail(
-          new ProviderAdapterValidationError({
-            provider: PROVIDER,
-            operation: "startSession",
-            issue: `Expected provider '${PROVIDER}' but received '${input.provider}'.`,
-          }),
-        );
-      }
-
-      releaseOverlay(input.threadId);
-      pruneStaleCodexHomeOverlays({
-        stateDir: serverConfig.stateDir,
-        preservePaths: Array.from(overlayHomePathByThreadId.values()),
-      });
-      const overlayHomePath = createCodexHomeOverlay({
-        threadId: input.threadId,
-        projectId: T3_COMPUTER_OVERLAY_PROJECT_ID,
-        runtimeMode: input.runtimeMode,
-        stateDir: serverConfig.stateDir,
-        preferredHomePath: input.providerOptions?.codex?.homePath,
-      });
+    const buildManagerInput = (input: Parameters<CodexAdapterShape["startSession"]>[0]) => {
+      const overlayHomePath = overlayHomePathByThreadId.get(input.threadId);
       const codexProviderOptions =
         input.providerOptions?.codex || overlayHomePath
           ? {
@@ -1456,7 +1436,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
             }
           : undefined;
 
-      const managerInput: CodexAppServerStartSessionInput = {
+      return {
         threadId: input.threadId,
         provider: "codex",
         ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
@@ -1472,7 +1452,48 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         runtimeMode: input.runtimeMode,
         ...(input.model !== undefined ? { model: input.model } : {}),
         ...(input.modelOptions?.codex?.fastMode ? { serviceTier: "fast" } : {}),
-      };
+      } satisfies CodexAppServerStartSessionInput;
+    };
+
+    const ensureOverlay = (input: Parameters<CodexAdapterShape["startSession"]>[0]) => {
+      const existing = overlayHomePathByThreadId.get(input.threadId);
+      if (existing) {
+        return existing;
+      }
+      const overlayHomePath = createCodexHomeOverlay({
+        threadId: input.threadId,
+        projectId: T3_COMPUTER_OVERLAY_PROJECT_ID,
+        runtimeMode: input.runtimeMode,
+        stateDir: serverConfig.stateDir,
+        preferredHomePath: input.providerOptions?.codex?.homePath,
+      });
+      if (overlayHomePath) {
+        overlayHomePathByThreadId.set(input.threadId, overlayHomePath);
+      }
+      return overlayHomePath;
+    };
+
+    const startSession: CodexAdapterShape["startSession"] = (input) => {
+      if (input.provider !== undefined && input.provider !== PROVIDER) {
+        return Effect.fail(
+          new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "startSession",
+            issue: `Expected provider '${PROVIDER}' but received '${input.provider}'.`,
+          }),
+        );
+      }
+
+      const hasPrewarmedSession = manager.hasPrewarmedSession(input.threadId);
+      if (!hasPrewarmedSession) {
+        releaseOverlay(input.threadId);
+      }
+      pruneStaleCodexHomeOverlays({
+        stateDir: serverConfig.stateDir,
+        preservePaths: Array.from(overlayHomePathByThreadId.values()),
+      });
+      const overlayHomePath = ensureOverlay(input);
+      const managerInput = buildManagerInput(input);
 
       return Effect.tryPromise({
         try: () => manager.startSession(managerInput),
@@ -1500,6 +1521,35 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         ),
         Effect.map((session) => session),
       );
+    };
+
+    const prewarmSession: NonNullable<CodexAdapterShape["prewarmSession"]> = (input) => {
+      if (input.provider !== undefined && input.provider !== PROVIDER) {
+        return Effect.fail(
+          new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "prewarmSession",
+            issue: `Expected provider '${PROVIDER}' but received '${input.provider}'.`,
+          }),
+        );
+      }
+
+      pruneStaleCodexHomeOverlays({
+        stateDir: serverConfig.stateDir,
+        preservePaths: Array.from(overlayHomePathByThreadId.values()),
+      });
+      ensureOverlay(input);
+      const managerInput = buildManagerInput(input);
+      return Effect.try({
+        try: (): CodexAppServerPrewarmSessionResult => manager.prewarmSession(managerInput),
+        catch: (cause) =>
+          new ProviderAdapterProcessError({
+            provider: PROVIDER,
+            threadId: input.threadId,
+            detail: toMessage(cause, "Failed to prewarm Codex adapter session."),
+            cause,
+          }),
+      });
     };
 
     const sendTurn: CodexAdapterShape["sendTurn"] = (input) =>
@@ -1763,6 +1813,7 @@ const makeCodexAdapter = (options?: CodexAdapterLiveOptions) =>
         supportsRuntimeModelList: true,
       },
       startSession,
+      prewarmSession,
       sendTurn,
       interruptTurn,
       readThread,

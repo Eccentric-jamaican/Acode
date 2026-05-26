@@ -10,6 +10,7 @@ import {
   ProjectScript,
   RuntimeMode,
   TaskId,
+  ThreadId,
   TurnId,
   type OrchestrationCheckpointSummary,
   type OrchestrationLatestTurn,
@@ -194,6 +195,19 @@ function computeSnapshotSequence(
   }
 
   return Number.isFinite(minSequence) ? minSequence : 0;
+}
+
+function uniqueThreadIds(ids: ReadonlyArray<ThreadId | undefined>): ThreadId[] {
+  const seen = new Set<string>();
+  const result: ThreadId[] = [];
+  for (const id of ids) {
+    if (id === undefined || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    result.push(id);
+  }
+  return result;
 }
 
 function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: string) {
@@ -521,9 +535,12 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
 
   const getSnapshot: ProjectionSnapshotQueryShape["getSnapshot"] = (input) => {
     const snapshotMode: OrchestrationGetSnapshotInput["mode"] = input?.mode ?? "full";
-    const heavyRowsThreadId = snapshotMode === "full" ? null : (input?.threadId ?? null);
-    const threadScopedInput =
-      heavyRowsThreadId !== null ? { threadId: heavyRowsThreadId } : null;
+    const heavyRowsThreadIds =
+      snapshotMode === "full"
+        ? null
+        : snapshotMode === "focused"
+          ? uniqueThreadIds([input?.threadId, ...(input?.threadIds ?? [])])
+          : [];
     const requestStartedAt = Date.now();
 
     return sql
@@ -548,6 +565,17 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               });
               return rows;
             });
+          const listThreadScopedRows = <A extends ReadonlyArray<unknown>, E, R>(
+            threadIds: ReadonlyArray<string>,
+            listRowsForThread: (input: {
+              readonly threadId: string;
+            }) => Effect.Effect<A, E, R>,
+          ): Effect.Effect<Array<A[number]>, E, R> =>
+            Effect.forEach(
+              threadIds,
+              (threadId) => listRowsForThread({ threadId }),
+              { concurrency: 1 },
+            ).pipe(Effect.map((rowsByThread) => rowsByThread.flat()));
 
           const projectRows = yield* measureRows(
             "projects",
@@ -597,8 +625,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             "threadMessages",
             (snapshotMode === "full"
               ? listThreadMessageRows(undefined)
-              : threadScopedInput
-                ? listThreadMessageRowsForThread(threadScopedInput)
+              : heavyRowsThreadIds && heavyRowsThreadIds.length > 0
+                ? listThreadScopedRows(heavyRowsThreadIds, listThreadMessageRowsForThread)
                 : Effect.succeed([])).pipe(
               Effect.mapError(
                 toPersistenceSqlOrDecodeError(
@@ -612,8 +640,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             "threadProposedPlans",
             (snapshotMode === "full"
               ? listThreadProposedPlanRows(undefined)
-              : threadScopedInput
-                ? listThreadProposedPlanRowsForThread(threadScopedInput)
+              : heavyRowsThreadIds && heavyRowsThreadIds.length > 0
+                ? listThreadScopedRows(heavyRowsThreadIds, listThreadProposedPlanRowsForThread)
                 : Effect.succeed([])).pipe(
               Effect.mapError(
                 toPersistenceSqlOrDecodeError(
@@ -627,8 +655,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             "threadActivities",
             (snapshotMode === "full"
               ? listThreadActivityRows(undefined)
-              : threadScopedInput
-                ? listThreadActivityRowsForThread(threadScopedInput)
+              : heavyRowsThreadIds && heavyRowsThreadIds.length > 0
+                ? listThreadScopedRows(heavyRowsThreadIds, listThreadActivityRowsForThread)
                 : Effect.succeed([])).pipe(
               Effect.mapError(
                 toPersistenceSqlOrDecodeError(
@@ -653,8 +681,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             "checkpoints",
             (snapshotMode === "full"
               ? listCheckpointRows(undefined)
-              : threadScopedInput
-                ? listCheckpointRowsForThread(threadScopedInput)
+              : heavyRowsThreadIds && heavyRowsThreadIds.length > 0
+                ? listThreadScopedRows(heavyRowsThreadIds, listCheckpointRowsForThread)
                 : Effect.succeed([])).pipe(
               Effect.mapError(
                 toPersistenceSqlOrDecodeError(
@@ -932,7 +960,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               totalDurationMs >= SNAPSHOT_WARN_LOG_THRESHOLD_MS ? Effect.logWarning : Effect.logInfo;
             yield* logEffect("projection snapshot query completed", {
               mode: snapshotMode,
-              threadId: heavyRowsThreadId,
+              threadIds: heavyRowsThreadIds,
               totalDurationMs,
               snapshotSequence: readModel.snapshotSequence,
               projectCount: readModel.projects.length,

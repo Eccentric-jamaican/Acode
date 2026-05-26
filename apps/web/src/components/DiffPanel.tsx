@@ -28,9 +28,15 @@ import {
   Undo2Icon,
   PlusIcon,
 } from "lucide-react";
-import { Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx";
 
+import {
+  type ComposerImageAttachment,
+  type ComposerPdfAnnotationDraft,
+  type PdfAnnotationCapture,
+  useComposerDraftStore,
+} from "../composerDraftStore";
 import { parseDiffRouteSearch } from "../diffRouteSearch";
 import { isElectronRuntime } from "../env";
 import {
@@ -59,6 +65,7 @@ import { preferredTerminalEditor, resolvePathLinkTarget } from "../terminal-link
 import type { Thread } from "../types";
 import { Button } from "./ui/button";
 import { PdfCanvasPreview } from "./PdfCanvasPreview";
+import { pdfAnnotationLabel } from "../pdfAnnotationCapture";
 import ChatMarkdown from "./ChatMarkdown";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "./ui/menu";
 import { toastManager } from "./ui/toast";
@@ -68,6 +75,8 @@ interface DiffPanelProps {
 }
 
 export { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
+
+const EMPTY_PDF_ANNOTATIONS_FOR_PANEL: ComposerPdfAnnotationDraft[] = [];
 
 function inferFileViewerLanguage(filePath: string): string {
   const extension = filePath.split(".").pop()?.toLowerCase() ?? "";
@@ -130,6 +139,33 @@ function isPdfFile(filePath: string): boolean {
   return filePath.split(".").pop()?.toLowerCase() === "pdf";
 }
 
+function dataUrlToFile(dataUrl: string, name: string): File {
+  const match = /^data:([^;]+);base64,(.+)$/i.exec(dataUrl);
+  if (!match?.[1] || !match[2]) {
+    throw new Error("Invalid annotation screenshot payload.");
+  }
+  const bytes = Uint8Array.from(atob(match[2]), (char) => char.charCodeAt(0));
+  return new File([bytes], name, { type: match[1] });
+}
+
+function createPdfAnnotationImageAttachment(dataUrl: string): ComposerImageAttachment {
+  const id =
+    typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `pdf-annotation-${Date.now()}`;
+  const file = dataUrlToFile(dataUrl, `pdf-annotation-${id}.png`);
+  return {
+    type: "image",
+    id,
+    name: file.name,
+    mimeType: file.type || "image/png",
+    sizeBytes: file.size,
+    source: "pdf-annotation",
+    previewUrl: dataUrl,
+    file,
+  };
+}
+
 export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
   const usesDesktopAppChrome = isElectronRuntime();
   const { resolvedTheme } = useTheme();
@@ -158,6 +194,35 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
   const addComment = useFilePanelStore((store) => store.addComment);
   const updateComment = useFilePanelStore((store) => store.updateComment);
   const deleteComment = useFilePanelStore((store) => store.deleteComment);
+  const addComposerImage = useComposerDraftStore((store) => store.addImage);
+  const addComposerPdfAnnotation = useComposerDraftStore((store) => store.addPdfAnnotation);
+  const composerPdfAnnotations = useComposerDraftStore((store) =>
+    activeThreadId
+      ? (store.draftsByThreadId[activeThreadId]?.pdfAnnotations ?? EMPTY_PDF_ANNOTATIONS_FOR_PANEL)
+      : EMPTY_PDF_ANNOTATIONS_FOR_PANEL,
+  );
+
+  const addPdfAnnotationToComposer = useCallback(
+    (capture: PdfAnnotationCapture) => {
+      if (!activeThreadId) {
+        return;
+      }
+
+      const image = createPdfAnnotationImageAttachment(capture.screenshotDataUrl);
+      const annotationId =
+        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `pdf-annotation-${Date.now()}`;
+      addComposerImage(activeThreadId, image);
+      addComposerPdfAnnotation(activeThreadId, {
+        id: annotationId,
+        label: pdfAnnotationLabel(capture),
+        capture,
+        imageId: image.id,
+      });
+    },
+    [activeThreadId, addComposerImage, addComposerPdfAnnotation],
+  );
 
   useEffect(() => {
     if (!activeThreadId || !diffSearch.diffFilePath) {
@@ -401,6 +466,8 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
             thread={activeThread}
             theme={resolvedTheme}
             commentsByFilePath={filePanelState.commentsByFilePath}
+            pdfAnnotations={composerPdfAnnotations}
+            onAddPdfAnnotation={addPdfAnnotationToComposer}
             onAddComment={(filePath, line, text, side) => {
               if (activeThreadId) {
                 addComment(activeThreadId, filePath, line, text, side);
@@ -424,6 +491,10 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
             filePath={activeFilePath}
             contentsBase64={activeFileQuery.data.contentsBase64}
             mimeType={activeFileQuery.data.mimeType}
+            onAddPdfAnnotation={addPdfAnnotationToComposer}
+            pdfAnnotations={composerPdfAnnotations.filter(
+              (annotation) => annotation.capture.filePath === activeFilePath,
+            )}
           />
         ) : activeFileQuery.data && activeFileQuery.data.status !== "text" ? (
           <PanelEmptyState
@@ -628,12 +699,14 @@ function ReviewSurface(props: {
   thread: Thread;
   theme: "light" | "dark";
   commentsByFilePath: Record<string, FilePanelComment[]>;
+  pdfAnnotations: readonly ComposerPdfAnnotationDraft[];
   onAddComment: (
     filePath: string,
     line: number,
     text: string,
     side: FilePanelComment["side"],
   ) => void;
+  onAddPdfAnnotation: (capture: PdfAnnotationCapture) => void;
   onUpdateComment: (filePath: string, commentId: string, text: string) => void;
   onDeleteComment: (filePath: string, commentId: string) => void;
 }) {
@@ -838,8 +911,14 @@ function ReviewSurface(props: {
                   <ReviewPdfDiff
                     cwd={props.cwd}
                     fileDiff={fileDiff}
+                    pdfAnnotations={props.pdfAnnotations.filter(
+                      (annotation) =>
+                        annotation.capture.filePath === fileDiff.name ||
+                        annotation.capture.filePath === (fileDiff.prevName ?? fileDiff.name),
+                    )}
                     scope={scope}
                     disabled={reviewActionMutation.isPending}
+                    onAddPdfAnnotation={props.onAddPdfAnnotation}
                     onAction={(action) => void runReviewAction(action, fileDiff.name)}
                   />
                 ) : (
@@ -999,6 +1078,8 @@ function ReviewPdfDiff(props: {
   cwd: string | null;
   disabled: boolean;
   fileDiff: FileDiffMetadata;
+  pdfAnnotations: readonly ComposerPdfAnnotationDraft[];
+  onAddPdfAnnotation: (capture: PdfAnnotationCapture) => void;
   onAction: (action: GitReviewAction) => void;
   scope: GitDiffScope;
 }) {
@@ -1051,11 +1132,20 @@ function ReviewPdfDiff(props: {
             contentsBase64={previewQuery.data.before.contentsBase64}
             status={previewQuery.data.before.status}
             filePath={props.fileDiff.prevName ?? props.fileDiff.name}
+            pdfAnnotations={props.pdfAnnotations.filter(
+              (annotation) =>
+                annotation.capture.filePath === (props.fileDiff.prevName ?? props.fileDiff.name),
+            )}
+            onAddPdfAnnotation={props.onAddPdfAnnotation}
           />
           <ReviewPdfSide
             contentsBase64={previewQuery.data.after.contentsBase64}
             status={previewQuery.data.after.status}
             filePath={props.fileDiff.name}
+            pdfAnnotations={props.pdfAnnotations.filter(
+              (annotation) => annotation.capture.filePath === props.fileDiff.name,
+            )}
+            onAddPdfAnnotation={props.onAddPdfAnnotation}
           />
         </div>
       )}
@@ -1066,6 +1156,8 @@ function ReviewPdfDiff(props: {
 function ReviewPdfSide(props: {
   contentsBase64?: string | undefined;
   filePath: string;
+  onAddPdfAnnotation: (capture: PdfAnnotationCapture) => void;
+  pdfAnnotations: readonly ComposerPdfAnnotationDraft[];
   status: "missing" | "present";
 }) {
   return (
@@ -1073,9 +1165,11 @@ function ReviewPdfSide(props: {
       {props.status === "present" && props.contentsBase64 ? (
         <PdfCanvasPreview
           bytes={bytesFromBase64(props.contentsBase64)}
+          annotations={props.pdfAnnotations}
           filePath={props.filePath}
           layout="embedded"
           mimeType="application/pdf"
+          onAddAnnotation={props.onAddPdfAnnotation}
         />
       ) : (
         <div className="flex h-72 items-center justify-center rounded-md border border-border/55 bg-background text-xs text-muted-foreground/70">
@@ -1392,6 +1486,8 @@ function OfficeDocumentViewer(props: {
   filePath: string;
   contentsBase64: string;
   mimeType: string;
+  onAddPdfAnnotation?: ((capture: PdfAnnotationCapture) => void) | undefined;
+  pdfAnnotations?: readonly ComposerPdfAnnotationDraft[] | undefined;
 }) {
   const kind = previewFileKind(props.filePath);
   const [docx, setDocx] = useState<ParsedDocx | null>(null);
@@ -1460,7 +1556,15 @@ function OfficeDocumentViewer(props: {
   }
 
   if (kind === "pdf") {
-    return <PdfCanvasPreview bytes={bytes} filePath={props.filePath} mimeType={props.mimeType} />;
+    return (
+      <PdfCanvasPreview
+        bytes={bytes}
+        annotations={props.pdfAnnotations}
+        filePath={props.filePath}
+        mimeType={props.mimeType}
+        onAddAnnotation={props.onAddPdfAnnotation}
+      />
+    );
   }
 
   if (kind === "image") {

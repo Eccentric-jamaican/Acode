@@ -19,6 +19,7 @@ import {
   ProviderRespondToUserInputInput,
   ProviderSendTurnInput,
   ProviderSessionStartInput,
+  ProviderPrewarmSessionInput,
   ProviderStopSessionInput,
   type ProviderRuntimeEvent,
   type ProviderSession,
@@ -310,6 +311,47 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
         return session;
       });
 
+    const prewarmSession: ProviderServiceShape["prewarmSession"] = (rawInput) =>
+      Effect.gen(function* () {
+        const parsed = yield* decodeInputOrValidationError({
+          operation: "ProviderService.prewarmSession",
+          schema: ProviderPrewarmSessionInput,
+          payload: rawInput,
+        });
+        const input = {
+          ...parsed,
+          provider: parsed.provider ?? "codex",
+        };
+        if (input.provider === "opencode") {
+          const settings = yield* serverSettings.getSettings;
+          if (!settings.providers.opencode.enabled) {
+            return {
+              threadId: input.threadId,
+              provider: input.provider,
+              status: "unsupported" as const,
+            };
+          }
+        }
+
+        const adapter = yield* registry.getByProvider(input.provider);
+        if (!adapter.prewarmSession) {
+          return {
+            threadId: input.threadId,
+            provider: adapter.provider,
+            status: "unsupported" as const,
+          };
+        }
+
+        const result = yield* adapter.prewarmSession(input);
+        yield* analytics.record("provider.session.prewarm_requested", {
+          provider: result.provider,
+          status: result.status,
+          hasCwd: typeof input.cwd === "string" && input.cwd.trim().length > 0,
+          hasModel: typeof input.model === "string" && input.model.trim().length > 0,
+        });
+        return result;
+      });
+
     const sendTurn: ProviderServiceShape["sendTurn"] = (rawInput) =>
       Effect.gen(function* () {
         const parsed = yield* decodeInputOrValidationError({
@@ -531,6 +573,7 @@ const makeProviderService = (options?: ProviderServiceLiveOptions) =>
 
     return {
       startSession,
+      prewarmSession,
       sendTurn,
       interruptTurn,
       respondToRequest,

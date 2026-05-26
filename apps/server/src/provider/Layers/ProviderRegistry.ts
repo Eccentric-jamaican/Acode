@@ -29,6 +29,13 @@ function mergeProviderList(
     .filter((provider): provider is ServerProviderStatus => provider !== undefined);
 }
 
+function sameProviderList(
+  left: ReadonlyArray<ServerProviderStatus>,
+  right: ReadonlyArray<ServerProviderStatus>,
+): boolean {
+  return left.length === right.length && left.every((provider, index) => provider === right[index]);
+}
+
 export const ProviderRegistryLive = Layer.effect(
   ProviderRegistry,
   Effect.gen(function* () {
@@ -55,13 +62,16 @@ export const ProviderRegistryLive = Layer.effect(
     const providersRef = yield* Ref.make<ReadonlyArray<ServerProviderStatus>>(initialProviders);
 
     const upsertProviders = (nextProviders: ReadonlyArray<ServerProviderStatus>) =>
-      Ref.updateAndGet(providersRef, (current) => mergeProviderList(current, nextProviders)).pipe(
-        Effect.tap((providers) => PubSub.publish(changes, providers).pipe(Effect.asVoid)),
+      Ref.modify(providersRef, (current) => {
+        const next = mergeProviderList(current, nextProviders);
+        const providers = sameProviderList(current, next) ? current : next;
+        return [{ changed: providers !== current, providers }, providers] as const;
+      }).pipe(
+        Effect.tap(({ changed, providers }) =>
+          changed ? PubSub.publish(changes, providers).pipe(Effect.asVoid) : Effect.void,
+        ),
+        Effect.map(({ providers }) => providers),
       );
-
-    yield* Effect.forkScoped(
-      Stream.runForEach(openCodeProvider.streamChanges, (provider) => upsertProviders([provider]).pipe(Effect.asVoid)),
-    );
 
     const refresh = (provider?: "codex" | "opencode" | "claudeAgent") =>
       Effect.gen(function* () {
@@ -103,6 +113,13 @@ export const ProviderRegistryLive = Layer.effect(
           refreshedOpenCode,
         ]);
       });
+
+    yield* Effect.forkScoped(
+      Stream.runForEach(openCodeProvider.streamChanges, (provider) =>
+        upsertProviders([provider]).pipe(Effect.asVoid),
+      ),
+    );
+    yield* Effect.forkScoped(refresh("opencode").pipe(Effect.ignore));
 
     return {
       getProviders: Ref.get(providersRef),

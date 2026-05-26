@@ -382,6 +382,53 @@ describe("BrowserRuntimeRegistry", () => {
     expect(tab.view.webContents.setZoomFactorCalls).toHaveLength(0);
   });
 
+  it("detaches tracked native views even if attachment ids are stale", async () => {
+    const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
+    const addChildView = vi.fn();
+    const removeChildView = vi.fn();
+    const window = {
+      contentView: {
+        addChildView,
+        removeChildView,
+      },
+    };
+    const projectId = ProjectId.makeUnsafe("project-stale-attachment");
+
+    registry.setWindow(window as never);
+    await registry.open(projectId, { x: 10, y: 20, width: 420, height: 320 });
+    const tab = getActiveTabRuntime(registry, projectId);
+    (registry as any).attachedProjectId = null;
+    (registry as any).attachedTabId = null;
+
+    await registry.closePane();
+
+    expect(removeChildView).toHaveBeenCalledWith(tab.view);
+    expect(tab.view.setVisibleCalls.at(-1)).toBe(false);
+    expect((registry as any).attachedViews.size).toBe(0);
+  });
+
+  it("hides runtime views on close even if they were not tracked as attached", async () => {
+    const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
+    const window = {
+      contentView: {
+        addChildView: vi.fn(),
+        removeChildView: vi.fn(),
+      },
+    };
+    const projectId = ProjectId.makeUnsafe("project-untracked-visible-view");
+
+    registry.setWindow(window as never);
+    await registry.open(projectId, { x: 10, y: 20, width: 420, height: 320 });
+    const tab = getActiveTabRuntime(registry, projectId);
+    (registry as any).attachedViews.clear();
+
+    await registry.closePane();
+
+    expect(tab.view.setVisibleCalls.at(-1)).toBe(false);
+    expect(tab.view.setBoundsCalls.at(-1)).toEqual({ x: 0, y: 0, width: 0, height: 0 });
+    expect(window.contentView.removeChildView).not.toHaveBeenCalled();
+  });
+
   it("clears attachment state if the window is already destroyed while detaching", async () => {
     const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
     const removeChildView = vi.fn(() => {
@@ -439,7 +486,7 @@ describe("BrowserRuntimeRegistry", () => {
     });
   });
 
-  it("avoids viewport remeasurement when resizing the already attached tab", async () => {
+  it("does not remeasure the host viewport when opening or resizing the pane", async () => {
     const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
     const measureViewport = vi.fn(async () => null);
     const window = {
@@ -457,7 +504,7 @@ describe("BrowserRuntimeRegistry", () => {
     await registry.open(projectId, { x: 500, y: 35, width: 200, height: 360 });
     await registry.open(projectId, { x: 560, y: 35, width: 240, height: 360 });
 
-    expect(measureViewport).toHaveBeenCalledTimes(1);
+    expect(measureViewport).not.toHaveBeenCalled();
   });
 
   it("scales renderer pane bounds by the host zoom factor before applying native bounds", async () => {
@@ -533,45 +580,41 @@ describe("BrowserRuntimeRegistry", () => {
     });
   });
 
-  it("ignores async viewport measurements after the pane closes", async () => {
+  it("ignores stale open requests after the pane closes", async () => {
     const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
-    let resolveViewportMeasurement: (value: {
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-    } | null) => void = () => undefined;
-    const viewportMeasurementGate = new Promise<{
-      x: number;
-      y: number;
-      width: number;
-      height: number;
-    } | null>((resolve) => {
-      resolveViewportMeasurement = resolve;
-    });
     const window = {
       contentView: {
         addChildView: vi.fn(),
         removeChildView: vi.fn(),
       },
-      webContents: {
-        executeJavaScript: vi.fn(() => viewportMeasurementGate),
-      },
     };
     const projectId = ProjectId.makeUnsafe("project-8");
 
     registry.setWindow(window as never);
+    let resolveFirstOpen: () => void = () => undefined;
+    const firstOpenGate = new Promise<void>((resolve) => {
+      resolveFirstOpen = () => resolve();
+    });
+    const originalEnsureRuntime = (registry as any).ensureRuntime.bind(registry) as (
+      projectId: ProjectId,
+    ) => Promise<unknown>;
+    (registry as any).ensureRuntime = vi.fn(async (nextProjectId: ProjectId) => {
+      await firstOpenGate;
+      return originalEnsureRuntime(nextProjectId);
+    });
+
     const openPromise = registry.open(projectId, { x: 10, y: 20, width: 320, height: 240 });
     await Promise.resolve();
 
     await registry.closePane();
-    resolveViewportMeasurement({ x: 25, y: 35, width: 480, height: 360 });
+    resolveFirstOpen();
 
     await openPromise;
     vi.advanceTimersByTime(500);
     await Promise.resolve();
     const tab = getActiveTabRuntime(registry, projectId);
     expect(tab.view.setBoundsCalls).toHaveLength(0);
+    expect(window.contentView.addChildView).not.toHaveBeenCalled();
     expect((registry as any).paneOpen).toBe(false);
     expect((registry as any).paneBounds).toBeNull();
     expect((registry as any).attachedProjectId).toBeNull();

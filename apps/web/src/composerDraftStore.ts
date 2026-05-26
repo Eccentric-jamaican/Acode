@@ -29,6 +29,7 @@ export interface PersistedComposerImageAttachment {
 
 export interface ComposerImageAttachment extends Omit<ChatAttachment, "previewUrl"> {
   localPath?: string;
+  source?: "pdf-annotation" | undefined;
   previewUrl: string;
   file: File;
 }
@@ -47,6 +48,29 @@ export interface ComposerInspectCaptureDraft {
   id: string;
   label: string;
   capture: BrowserInspectCapture;
+}
+
+export interface PdfAnnotationBoundingBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface PdfAnnotationCapture {
+  filePath: string;
+  pageNumber: number;
+  boundingBox: PdfAnnotationBoundingBox;
+  zoomPercent: number;
+  screenshotDataUrl: string;
+  capturedAt: string;
+}
+
+export interface ComposerPdfAnnotationDraft {
+  id: string;
+  label: string;
+  capture: PdfAnnotationCapture;
+  imageId?: string | undefined;
 }
 
 interface PersistedComposerThreadDraftState {
@@ -88,6 +112,7 @@ interface ComposerThreadDraftState {
   persistedAttachments: PersistedComposerImageAttachment[];
   pinnedSelections: PinnedSelectionDraft[];
   inspectCaptures: ComposerInspectCaptureDraft[];
+  pdfAnnotations: ComposerPdfAnnotationDraft[];
   provider: ProviderKind | null;
   model: string | null;
   runtimeMode: RuntimeMode | null;
@@ -170,6 +195,9 @@ interface ComposerDraftStoreState {
   addInspectCapture: (threadId: ThreadId, capture: ComposerInspectCaptureDraft) => void;
   removeInspectCapture: (threadId: ThreadId, captureId: string) => void;
   clearInspectCaptures: (threadId: ThreadId) => void;
+  addPdfAnnotation: (threadId: ThreadId, annotation: ComposerPdfAnnotationDraft) => void;
+  removePdfAnnotation: (threadId: ThreadId, annotationId: string) => void;
+  clearPdfAnnotations: (threadId: ThreadId) => void;
   clearPersistedAttachments: (threadId: ThreadId) => void;
   syncPersistedAttachments: (
     threadId: ThreadId,
@@ -190,11 +218,13 @@ const EMPTY_IDS: string[] = [];
 const EMPTY_PERSISTED_ATTACHMENTS: PersistedComposerImageAttachment[] = [];
 const EMPTY_PINNED_SELECTIONS: PinnedSelectionDraft[] = [];
 const EMPTY_INSPECT_CAPTURES: ComposerInspectCaptureDraft[] = [];
+const EMPTY_PDF_ANNOTATIONS: ComposerPdfAnnotationDraft[] = [];
 Object.freeze(EMPTY_IMAGES);
 Object.freeze(EMPTY_IDS);
 Object.freeze(EMPTY_PERSISTED_ATTACHMENTS);
 Object.freeze(EMPTY_PINNED_SELECTIONS);
 Object.freeze(EMPTY_INSPECT_CAPTURES);
+Object.freeze(EMPTY_PDF_ANNOTATIONS);
 const EMPTY_THREAD_DRAFT = Object.freeze({
   prompt: "",
   images: EMPTY_IMAGES,
@@ -202,6 +232,7 @@ const EMPTY_THREAD_DRAFT = Object.freeze({
   persistedAttachments: EMPTY_PERSISTED_ATTACHMENTS,
   pinnedSelections: EMPTY_PINNED_SELECTIONS,
   inspectCaptures: EMPTY_INSPECT_CAPTURES,
+  pdfAnnotations: EMPTY_PDF_ANNOTATIONS,
   provider: null,
   model: null,
   runtimeMode: null,
@@ -224,6 +255,7 @@ function createEmptyThreadDraft(): ComposerThreadDraftState {
     persistedAttachments: [],
     pinnedSelections: [],
     inspectCaptures: [],
+    pdfAnnotations: [],
     provider: null,
     model: null,
     runtimeMode: null,
@@ -248,6 +280,7 @@ function shouldRemoveDraft(draft: ComposerThreadDraftState): boolean {
     draft.persistedAttachments.length === 0 &&
     draft.pinnedSelections.length === 0 &&
     draft.inspectCaptures.length === 0 &&
+    draft.pdfAnnotations.length === 0 &&
     draft.provider === null &&
     draft.model === null &&
     draft.runtimeMode === null &&
@@ -630,6 +663,7 @@ function toHydratedThreadDraft(
     persistedAttachments: persistedDraft.attachments,
     pinnedSelections: persistedDraft.pinnedSelections ?? [],
     inspectCaptures: [],
+    pdfAnnotations: [],
     provider: persistedDraft.provider ?? null,
     model: persistedDraft.model ?? null,
     runtimeMode: persistedDraft.runtimeMode ?? null,
@@ -1363,6 +1397,76 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
           return { draftsByThreadId: nextDraftsByThreadId };
         });
       },
+      addPdfAnnotation: (threadId, annotation) => {
+        if (threadId.length === 0 || annotation.id.length === 0) {
+          return;
+        }
+        set((state) => {
+          const existing = state.draftsByThreadId[threadId] ?? createEmptyThreadDraft();
+          if (existing.pdfAnnotations.some((entry) => entry.id === annotation.id)) {
+            return state;
+          }
+          return {
+            draftsByThreadId: {
+              ...state.draftsByThreadId,
+              [threadId]: {
+                ...existing,
+                pdfAnnotations: [...existing.pdfAnnotations, annotation],
+              },
+            },
+          };
+        });
+      },
+      removePdfAnnotation: (threadId, annotationId) => {
+        if (threadId.length === 0 || annotationId.length === 0) {
+          return;
+        }
+        set((state) => {
+          const current = state.draftsByThreadId[threadId];
+          if (!current) {
+            return state;
+          }
+          const nextPdfAnnotations = current.pdfAnnotations.filter(
+            (annotation) => annotation.id !== annotationId,
+          );
+          if (nextPdfAnnotations.length === current.pdfAnnotations.length) {
+            return state;
+          }
+          const nextDraft: ComposerThreadDraftState = {
+            ...current,
+            pdfAnnotations: nextPdfAnnotations,
+          };
+          const nextDraftsByThreadId = { ...state.draftsByThreadId };
+          if (shouldRemoveDraft(nextDraft)) {
+            delete nextDraftsByThreadId[threadId];
+          } else {
+            nextDraftsByThreadId[threadId] = nextDraft;
+          }
+          return { draftsByThreadId: nextDraftsByThreadId };
+        });
+      },
+      clearPdfAnnotations: (threadId) => {
+        if (threadId.length === 0) {
+          return;
+        }
+        set((state) => {
+          const current = state.draftsByThreadId[threadId];
+          if (!current || current.pdfAnnotations.length === 0) {
+            return state;
+          }
+          const nextDraft: ComposerThreadDraftState = {
+            ...current,
+            pdfAnnotations: [],
+          };
+          const nextDraftsByThreadId = { ...state.draftsByThreadId };
+          if (shouldRemoveDraft(nextDraft)) {
+            delete nextDraftsByThreadId[threadId];
+          } else {
+            nextDraftsByThreadId[threadId] = nextDraft;
+          }
+          return { draftsByThreadId: nextDraftsByThreadId };
+        });
+      },
       clearPersistedAttachments: (threadId) => {
         if (threadId.length === 0) {
           return;
@@ -1457,6 +1561,7 @@ export const useComposerDraftStore = create<ComposerDraftStoreState>()(
             nonPersistedImageIds: [],
             persistedAttachments: [],
             inspectCaptures: [],
+            pdfAnnotations: [],
           };
           const nextDraftsByThreadId = { ...state.draftsByThreadId };
           if (shouldRemoveDraft(nextDraft)) {

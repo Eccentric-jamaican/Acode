@@ -81,6 +81,11 @@ export interface GeneratedImageArtifact {
   providerThreadId?: string;
 }
 
+export interface LocalServerArtifact {
+  url: string;
+  label: string;
+}
+
 export interface InvocationDiffFile {
   path: string;
   additions: number;
@@ -1334,6 +1339,57 @@ export function extractGeneratedImageArtifacts(
   const artifacts: GeneratedImageArtifact[] = [];
   const seen = new Set<string>();
   collectGeneratedImageArtifacts(payload, artifacts, seen, 0);
+  return artifacts;
+}
+
+const LOCAL_SERVER_URL_PATTERN =
+  /\bhttps?:\/\/(?:(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0)|\[[0:]+1\])(?::\d{1,5})?(?:\/[^\s<>"'`)]*)?/gi;
+
+function normalizeLocalServerUrl(value: string): string | null {
+  try {
+    const url = new URL(value.replace(/[.,;:]+$/g, ""));
+    const hostname = url.hostname.toLowerCase();
+    if (
+      hostname !== "localhost" &&
+      hostname !== "127.0.0.1" &&
+      hostname !== "0.0.0.0" &&
+      hostname !== "[::1]" &&
+      hostname !== "::1"
+    ) {
+      return null;
+    }
+    if (hostname === "0.0.0.0") {
+      url.hostname = "localhost";
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function labelForLocalServerUrl(urlValue: string): string {
+  try {
+    const url = new URL(urlValue);
+    return url.port ? `localhost:${url.port}` : url.host;
+  } catch {
+    return "Local app";
+  }
+}
+
+export function extractLocalServerArtifactsFromText(value: string): LocalServerArtifact[] {
+  const artifacts: LocalServerArtifact[] = [];
+  const seen = new Set<string>();
+  for (const match of value.matchAll(LOCAL_SERVER_URL_PATTERN)) {
+    const normalized = normalizeLocalServerUrl(match[0] ?? "");
+    if (!normalized) continue;
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    artifacts.push({
+      url: normalized,
+      label: labelForLocalServerUrl(normalized),
+    });
+  }
   return artifacts;
 }
 

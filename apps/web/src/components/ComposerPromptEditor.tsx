@@ -422,6 +422,7 @@ export interface ComposerPromptEditorHandle {
   focusAt: (cursor: number) => void;
   focusAtEnd: () => void;
   readSnapshot: () => { value: string; cursor: number };
+  syncValue: (value: string, cursor: number, options?: { focus?: boolean }) => void;
 }
 
 interface ComposerPromptEditorProps {
@@ -759,6 +760,25 @@ function ComposerPromptEditorInner({
     [editor],
   );
 
+  const syncValue = useCallback(
+    (nextValue: string, nextCursor: number, options?: { focus?: boolean }) => {
+      const normalizedCursor = clampCursor(nextValue, nextCursor);
+      const rootElement = editor.getRootElement();
+      if (options?.focus && rootElement) {
+        rootElement.focus();
+      }
+      editor.update(() => {
+        $setComposerEditorPrompt(nextValue);
+        $setSelectionAtComposerOffset(normalizedCursor);
+      });
+      snapshotRef.current = {
+        value: nextValue,
+        cursor: normalizedCursor,
+      };
+    },
+    [editor],
+  );
+
   const readSnapshot = useCallback((): { value: string; cursor: number } => {
     let snapshot = snapshotRef.current;
     editor.getEditorState().read(() => {
@@ -790,8 +810,9 @@ function ComposerPromptEditorInner({
         focusAt(snapshotRef.current.value.length);
       },
       readSnapshot,
+      syncValue,
     }),
-    [focusAt, readSnapshot],
+    [focusAt, readSnapshot, syncValue],
   );
 
   const handleEditorChange = useCallback((editorState: EditorState) => {

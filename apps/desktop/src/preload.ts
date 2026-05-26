@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, webUtils } from "electron";
 import type { DesktopBridge } from "@t3tools/contracts";
 import { getDesktopWindowChromeMetrics } from "./windowChromeMetrics";
 
@@ -39,6 +39,17 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   getWindowChromeMetrics: () => getDesktopWindowChromeMetrics(process.platform),
   pickFolder: () => ipcRenderer.invoke(PICK_FOLDER_CHANNEL),
   confirm: (message) => ipcRenderer.invoke(CONFIRM_CHANNEL, message),
+  getPathForFile: (file) => {
+    if (typeof File === "undefined" || !(file instanceof File)) {
+      return null;
+    }
+    try {
+      const filePath = webUtils.getPathForFile(file);
+      return filePath.length > 0 ? filePath : null;
+    } catch {
+      return null;
+    }
+  },
   showContextMenu: (items, position) => ipcRenderer.invoke(CONTEXT_MENU_CHANNEL, items, position),
   openExternal: (url: string) => ipcRenderer.invoke(OPEN_EXTERNAL_CHANNEL, url),
   onMenuAction: (listener) => {

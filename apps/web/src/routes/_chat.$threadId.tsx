@@ -217,6 +217,8 @@ function ViewerPanelSurface(props: {
         activeRuntimeMode={props.threadBrowserContext?.runtimeMode ?? null}
         open={true}
         layout="panel"
+        {...(props.expanded !== undefined ? { expanded: props.expanded } : {})}
+        {...(props.onToggleExpanded ? { onToggleExpanded: props.onToggleExpanded } : {})}
         onRequestOpen={() => {}}
         onRequestClose={props.onClosePanel}
       />
@@ -1297,7 +1299,7 @@ function SingleChatSurface(props: {
   }, [activePanel]);
 
   useEffect(() => {
-    if (activePanel !== "diff") {
+    if (activePanel === null) {
       setViewerExpanded(false);
     }
   }, [activePanel]);
@@ -1323,21 +1325,23 @@ function SingleChatSurface(props: {
           onClosePanel={closePanel}
           onOpenPanel={openPanel}
           onRevealFile={openFileViewer}
-          renderPanelContent={shouldRenderPanelContent}
+          renderPanelContent={
+            shouldRenderPanelContent && !(viewerExpanded && activePanel !== null)
+          }
           panel={activePanel}
           threadId={props.threadId}
           threadBrowserContext={props.threadBrowserContext}
-          {...(activePanel === "diff"
+          {...(activePanel !== null
             ? {
                 onToggleExpanded: () => setViewerExpanded((expanded) => !expanded),
                 expanded: viewerExpanded,
               }
             : {})}
         />
-        {viewerExpanded && activePanel === "diff" && shouldRenderPanelContent ? (
+        {viewerExpanded && activePanel !== null && shouldRenderPanelContent ? (
           <div className="absolute inset-0 z-40 flex min-h-0 min-w-0 bg-background">
             <ViewerPanelSurface
-              panelMode="diff"
+              panelMode={activePanel}
               threadId={props.threadId}
               cwd={props.threadBrowserContext.cwd}
               threadBrowserContext={props.threadBrowserContext}

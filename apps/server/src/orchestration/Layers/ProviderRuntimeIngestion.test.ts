@@ -58,6 +58,7 @@ function createProviderServiceHarness() {
   const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
   const service: ProviderServiceShape = {
     startSession: () => unsupported(),
+    prewarmSession: () => unsupported(),
     sendTurn: () => unsupported(),
     interruptTurn: () => unsupported(),
     respondToRequest: () => unsupported(),

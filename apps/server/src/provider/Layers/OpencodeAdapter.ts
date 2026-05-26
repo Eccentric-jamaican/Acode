@@ -41,6 +41,7 @@ import {
   ProviderAdapterValidationError,
 } from "../Errors.ts";
 import {
+  buildOpenCodeModelCapabilities,
   buildOpenCodeBasicAuthorizationHeader,
   connectToOpenCodeServer,
   createOpenCodeSdkClient,
@@ -2726,10 +2727,12 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
               if (isModelTemporarilyDisabled(slug)) {
                 return [];
               }
+              const variants = asObject(model?.variants);
               return [
                 {
                   slug,
                   name: `${providerName} · ${modelName}`,
+                  capabilities: buildOpenCodeModelCapabilities({ variants }),
                 },
               ];
             });

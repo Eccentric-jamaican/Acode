@@ -33,6 +33,7 @@ import { providerQueryKeys } from "../lib/providerReactQuery";
 import { collectActiveTerminalThreadIds } from "../lib/terminalStateCleanup";
 import { TaskCompletionNotifications } from "../notifications/taskCompletion";
 import { DesktopBrowserController } from "../components/DesktopBrowserController";
+import { resolveSplitViewThreadIds, useSplitViewStore } from "../splitViewStore";
 
 export const Route = createRootRouteWithContext<{
   queryClient: QueryClient;
@@ -152,10 +153,31 @@ function activeThreadIdFromPathname(pathname: string): ThreadId | undefined {
 
 function snapshotInputForLocation(pathname: string): OrchestrationGetSnapshotInput {
   const search = typeof window === "undefined" ? "" : window.location.search;
-  if (new URLSearchParams(search).has("splitViewId")) {
-    return { mode: "full" };
-  }
+  const searchParams = new URLSearchParams(search);
   const activeThreadId = activeThreadIdFromPathname(pathname);
+  const splitViewId = searchParams.get("splitViewId");
+  if (splitViewId) {
+    const splitView = useSplitViewStore.getState().splitViewsById[splitViewId] ?? null;
+    const threadIds = splitView
+      ? [
+          ...new Set([
+            ...resolveSplitViewThreadIds(splitView),
+            ...(activeThreadId ? [activeThreadId] : []),
+          ]),
+        ]
+      : activeThreadId
+        ? [activeThreadId]
+        : [];
+    const primaryThreadId = activeThreadId ?? threadIds[0];
+    if (primaryThreadId) {
+      return {
+        mode: "focused",
+        threadId: primaryThreadId,
+        threadIds,
+      };
+    }
+    return { mode: "bootstrap" };
+  }
   return activeThreadId ? { mode: "focused", threadId: activeThreadId } : { mode: "bootstrap" };
 }
 

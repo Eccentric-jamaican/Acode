@@ -1,5 +1,6 @@
 import { Schema } from "effect";
 import { TrimmedNonEmptyString } from "./baseSchemas";
+import { ModelCapabilities } from "./model";
 
 const ProviderDiscoveryKind = Schema.Literals(["codex", "opencode", "claudeAgent"]);
 
@@ -210,6 +211,7 @@ export type ProviderListModelsInput = typeof ProviderListModelsInput.Type;
 export const ProviderModelDescriptor = Schema.Struct({
   slug: TrimmedNonEmptyString,
   name: TrimmedNonEmptyString,
+  capabilities: Schema.optional(Schema.NullOr(ModelCapabilities)),
 });
 export type ProviderModelDescriptor = typeof ProviderModelDescriptor.Type;
 

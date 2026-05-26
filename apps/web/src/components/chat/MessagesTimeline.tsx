@@ -31,10 +31,12 @@ import {
   ExternalLinkIcon,
   EyeIcon,
   FileIcon,
+  FileTextIcon,
   FolderIcon,
   GlobeIcon,
   HammerIcon,
   type LucideIcon,
+  MessageSquareIcon,
   MousePointer2Icon,
   PinIcon,
   PlugIcon,
@@ -50,6 +52,7 @@ import {
   formatElapsed,
   formatTimestamp,
   type InvocationDiffFile,
+  type LocalServerArtifact,
   type WorkLogEntry,
 } from "../../session-logic";
 import { AUTO_SCROLL_BOTTOM_THRESHOLD_PX } from "../../chat-scroll";
@@ -98,7 +101,6 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
-import { PdfCanvasPreview } from "../PdfCanvasPreview";
 import { toastManager } from "../ui/toast";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 import {
@@ -113,6 +115,14 @@ const LARGE_THREAD_ROW_COUNT = 180;
 const HUGE_THREAD_ROW_COUNT = 420;
 const LARGE_THREAD_UNVIRTUALIZED_TAIL_ROWS = 5;
 const HUGE_THREAD_UNVIRTUALIZED_TAIL_ROWS = 3;
+const WORK_LOG_ROW_BOTTOM_PADDING_PX = 16;
+const WORK_LOG_GROUP_HEADER_HEIGHT_PX = 28;
+const WORK_LOG_GROUP_HEADER_TO_BODY_GAP_PX = 8;
+const WORK_LOG_ENTRY_LINE_HEIGHT_PX = 30;
+const WORK_LOG_ENTRY_LINE_GAP_PX = 4;
+const WORK_LOG_COLLAPSED_HEIGHT_PX = 48;
+const WORK_LOG_IMAGE_ROW_HEIGHT_PX = 220;
+const WORK_LOG_WEB_SEARCH_ROW_HEIGHT_PX = 28;
 const CHAT_SELECTION_REGION_ATTRIBUTE = "data-chat-selection-region";
 const CHAT_SELECTION_REGION_VALUE = "assistant-output";
 const CHAT_SELECTION_SOURCE_KIND_ATTRIBUTE = "data-chat-selection-source-kind";
@@ -132,7 +142,14 @@ const INLINE_EDIT_DIFF_MAX_CHANGED_LINES = 300;
 const INLINE_EDIT_DIFF_MAX_CONTENT_CHARS = 120_000;
 const USER_MESSAGE_MENTION_PATTERN = /(^|\s)([$/@])([^\s]+)(?=\s|$)/g;
 
-type AssistantArtifactKind = "document" | "image" | "markdown" | "slides" | "spreadsheet" | "pdf";
+type AssistantArtifactKind =
+  | "document"
+  | "image"
+  | "markdown"
+  | "slides"
+  | "spreadsheet"
+  | "pdf"
+  | "web";
 
 const ASSISTANT_ARTIFACT_EXTENSIONS: ReadonlyMap<string, AssistantArtifactKind> = new Map([
   ["avif", "image"],
@@ -140,6 +157,8 @@ const ASSISTANT_ARTIFACT_EXTENSIONS: ReadonlyMap<string, AssistantArtifactKind> 
   ["docx", "document"],
   ["gif", "image"],
   ["heic", "image"],
+  ["htm", "web"],
+  ["html", "web"],
   ["jpeg", "image"],
   ["jpg", "image"],
   ["markdown", "markdown"],
@@ -168,6 +187,7 @@ export interface MessagesTimelineProps {
   completionSummary: string | null;
   turnDiffSummaryByAssistantMessageId: Map<MessageId, TurnDiffSummary>;
   turnDiffSummaryByTurnId: Map<TurnId, TurnDiffSummary>;
+  localServerArtifactsByTurn: Map<TurnId, LocalServerArtifact[]>;
   nowIso: string;
   expandedWorkGroups: Record<string, boolean>;
   onToggleWorkGroup: (groupId: string) => void;
@@ -176,6 +196,11 @@ export interface MessagesTimelineProps {
   onRevertUserMessage: (messageId: MessageId) => void;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
+  onOpenLocalServerUrl: (url: string) => void;
+  onOpenBrowserPreview: (
+    path: string,
+    options?: { cwd?: string | undefined; displayName?: string | undefined },
+  ) => void;
   onOpenThread?: ((threadId: ThreadId) => void) | undefined;
   onOpenFilePath?:
     | ((
@@ -1241,6 +1266,64 @@ function estimateTimelineProposedPlanHeight(proposedPlan: TimelineProposedPlan):
   return 120 + Math.min(estimatedLines * 22, 880);
 }
 
+function visibleWorkEntriesForEstimate(
+  entries: ReadonlyArray<WorkLogEntry>,
+  isExpanded: boolean,
+): ReadonlyArray<WorkLogEntry> {
+  if (entries.length <= MAX_VISIBLE_WORK_LOG_ENTRIES || isExpanded) {
+    return entries;
+  }
+  return entries.slice(-MAX_VISIBLE_WORK_LOG_ENTRIES);
+}
+
+function estimateTimelineWorkGroupHeight(input: {
+  row: Extract<TimelineRow, { kind: "work" }>;
+  isExpanded: boolean;
+}): number {
+  const entries = input.row.groupedEntries;
+  if (entries.length === 0) {
+    return WORK_LOG_COLLAPSED_HEIGHT_PX;
+  }
+
+  const visibleEntries = visibleWorkEntriesForEstimate(entries, input.isExpanded);
+  const hasOverflow = entries.length > visibleEntries.length;
+  const headerHeight = WORK_LOG_GROUP_HEADER_HEIGHT_PX + (hasOverflow ? 2 : 0);
+  if (entries.every(isEditWorkEntry)) {
+    return WORK_LOG_ROW_BOTTOM_PADDING_PX + WORK_LOG_COLLAPSED_HEIGHT_PX + (hasOverflow ? 8 : 0);
+  }
+
+  if (
+    entries.every(
+      (entry) => entry.itemType === "image_view" && (entry.generatedImages?.length ?? 0) > 0,
+    )
+  ) {
+    return (
+      WORK_LOG_ROW_BOTTOM_PADDING_PX +
+      visibleEntries.length * WORK_LOG_IMAGE_ROW_HEIGHT_PX +
+      Math.max(0, visibleEntries.length - 1) * WORK_LOG_GROUP_HEADER_TO_BODY_GAP_PX
+    );
+  }
+
+  if (entries.every(isWebSearchWorkEntry)) {
+    const itemCount = Math.max(webSearchDisplayItemsForEntries(visibleEntries).length, 1);
+    return (
+      WORK_LOG_ROW_BOTTOM_PADDING_PX +
+      headerHeight +
+      WORK_LOG_GROUP_HEADER_TO_BODY_GAP_PX +
+      itemCount * WORK_LOG_WEB_SEARCH_ROW_HEIGHT_PX +
+      Math.max(0, itemCount - 1) * WORK_LOG_ENTRY_LINE_GAP_PX
+    );
+  }
+
+  return (
+    WORK_LOG_ROW_BOTTOM_PADDING_PX +
+    headerHeight +
+    WORK_LOG_GROUP_HEADER_TO_BODY_GAP_PX +
+    visibleEntries.length * WORK_LOG_ENTRY_LINE_HEIGHT_PX +
+    Math.max(0, visibleEntries.length - 1) * WORK_LOG_ENTRY_LINE_GAP_PX
+  );
+}
+
 const VscodeEntryIcon = memo(function VscodeEntryIcon(props: {
   pathValue: string;
   kind: "file" | "directory";
@@ -1340,6 +1423,8 @@ function artifactKindLabel(kind: AssistantArtifactKind): string {
       return "Spreadsheet";
     case "pdf":
       return "PDF";
+    case "web":
+      return "Web preview";
   }
 }
 
@@ -1353,60 +1438,73 @@ function generatedImagePreviewSrc(input: {
   return `data:${input.mimeType};base64,${input.contentsBase64}`;
 }
 
-async function fetchAttachmentBytes(previewUrl: string): Promise<Uint8Array> {
-  const response = await fetch(previewUrl);
-  if (!response.ok) {
-    throw new Error("Attachment preview is unavailable.");
-  }
-  const buffer = await response.arrayBuffer();
-  return new Uint8Array(buffer);
+function isPdfAnnotationAttachment(attachment: ChatAttachment): boolean {
+  return (
+    attachment.type === "image" &&
+    (attachment.source === "pdf-annotation" || attachment.name.startsWith("pdf-annotation-"))
+  );
 }
 
-function UserPdfAttachmentPreview(props: { attachment: Extract<ChatAttachment, { type: "pdf" }> }) {
-  const previewQuery = useQuery({
-    queryKey: ["chat-attachment-pdf-preview", props.attachment.id, props.attachment.previewUrl],
-    queryFn: async () => {
-      if (!props.attachment.previewUrl) {
-        throw new Error("Attachment preview is unavailable.");
-      }
-      return fetchAttachmentBytes(props.attachment.previewUrl);
-    },
-    enabled: props.attachment.previewUrl !== undefined,
-    staleTime: 60_000,
-  });
-
-  if (!props.attachment.previewUrl) {
-    return (
-      <div className="flex min-h-[72px] items-center justify-center px-2 py-2.5 text-center text-[11px] text-muted-foreground/70">
-        {props.attachment.name}
-      </div>
-    );
-  }
-
-  if (previewQuery.isError) {
-    return (
-      <div className="flex min-h-[72px] items-center justify-center px-2 py-2.5 text-center text-[11px] text-muted-foreground/70">
-        {props.attachment.name}
-      </div>
-    );
-  }
-
-  if (!previewQuery.data) {
-    return (
-      <div className="flex min-h-[72px] items-center justify-center px-2 py-2.5 text-center text-[11px] text-muted-foreground/70">
-        Loading PDF...
-      </div>
-    );
-  }
-
+function UserPdfAttachmentChip(props: { attachment: Extract<ChatAttachment, { type: "pdf" }> }) {
   return (
-    <div className="max-h-[220px] overflow-auto">
-      <PdfCanvasPreview
-        bytes={previewQuery.data}
-        filePath={props.attachment.name}
-        layout="embedded"
-        mimeType={props.attachment.mimeType}
-      />
+    <div className="flex h-14 w-56 max-w-full items-center gap-2 rounded-lg border border-border/70 bg-background/70 px-2.5 shadow-sm">
+      <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-red-500 text-white">
+        <FileTextIcon className="size-4" />
+      </div>
+      <div className="min-w-0">
+        <div className="truncate text-sm font-semibold text-foreground">{props.attachment.name}</div>
+        <div className="mt-0.5 text-xs font-medium text-muted-foreground">PDF</div>
+      </div>
+    </div>
+  );
+}
+
+function UserAnnotationAttachmentSummary(props: {
+  attachments: ReadonlyArray<Extract<ChatAttachment, { type: "image" }>>;
+  onImageExpand: (preview: ExpandedImagePreview) => void;
+  onImageLoad: () => void;
+}) {
+  const previewAttachments = props.attachments.slice(0, 3);
+  return (
+    <div className="mb-1.5 flex justify-end">
+      <div className="flex flex-col items-end gap-1">
+        <div className="flex items-center justify-end gap-1">
+          {previewAttachments.map((attachment) =>
+            attachment.previewUrl ? (
+              <button
+                key={attachment.id}
+                type="button"
+                className="size-14 overflow-hidden rounded-lg border border-border/70 bg-background/70"
+                aria-label={`Preview annotation ${attachment.name}`}
+                onClick={() => {
+                  const preview = buildExpandedImagePreview(
+                    props.attachments,
+                    attachment.id,
+                  );
+                  if (preview) {
+                    props.onImageExpand(preview);
+                  }
+                }}
+              >
+                <img
+                  src={attachment.previewUrl}
+                  alt=""
+                  className="h-full w-full object-cover"
+                  onLoad={props.onImageLoad}
+                  onError={props.onImageLoad}
+                />
+              </button>
+            ) : null,
+          )}
+        </div>
+        <div className="inline-flex items-center gap-1.5 rounded-full border border-border/70 bg-muted/60 px-2 py-1 text-xs font-medium text-foreground/85">
+          <MessageSquareIcon className="size-3.5 text-muted-foreground" />
+          <span>
+            {props.attachments.length}{" "}
+            {props.attachments.length === 1 ? "annotation" : "annotations"}
+          </span>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1433,7 +1531,7 @@ function collectMentionedAssistantArtifacts(input: {
   const artifacts: AssistantArtifact[] = [];
   const seenPaths = new Set(input.existingPaths);
   const artifactPattern =
-    /(?:^|[\s`"'(])((?:[A-Za-z]:\/)?(?:[\w .@()[\]-]+\/)*[\w .@()[\]-]+\.(?:avif|bmp|gif|heic|jpe?g|png|webp|markdown|mdown|mdx?|mkd|docx|pptx|xlsx|xls|pdf))(?=$|[\s`"',).])/gi;
+    /(?:^|[\s`"'(])((?:[A-Za-z]:\/)?(?:[\w .@()[\]-]+\/)*[\w .@()[\]-]+\.(?:avif|bmp|gif|heic|html?|jpe?g|png|webp|markdown|mdown|mdx?|mkd|docx|pptx|xlsx|xls|pdf))(?=$|[\s`"',).])/gi;
 
   for (const match of normalizedText.matchAll(artifactPattern)) {
     const rawPath = match[1]?.trim();
@@ -1467,6 +1565,10 @@ const AssistantArtifactCards = memo(function AssistantArtifactCards(props: {
         options?: { cwd?: string | undefined; displayName?: string | undefined },
       ) => void)
     | undefined;
+  onOpenBrowserPreview: (
+    path: string,
+    options?: { cwd?: string | undefined; displayName?: string | undefined },
+  ) => void;
 }) {
   if (props.artifacts.length === 0) return null;
 
@@ -1475,7 +1577,8 @@ const AssistantArtifactCards = memo(function AssistantArtifactCards(props: {
       {props.artifacts.map((artifact) => {
         const extension = fileExtension(artifact.path).toUpperCase();
         const title = artifactFileName(artifact.path);
-        const canOpen = Boolean(props.onOpenFilePath);
+        const isWebPreview = artifact.artifactKind === "web";
+        const canOpen = isWebPreview || Boolean(props.onOpenFilePath);
         return (
           <div
             key={`assistant-artifact:${artifact.path}`}
@@ -1503,8 +1606,63 @@ const AssistantArtifactCards = memo(function AssistantArtifactCards(props: {
               size="xs"
               variant="outline"
               disabled={!canOpen}
-              onClick={() => props.onOpenFilePath?.(artifact.path, { cwd: artifact.cwd })}
-              title={canOpen ? `Open ${title}` : "File viewer is unavailable"}
+              onClick={() =>
+                isWebPreview
+                  ? props.onOpenBrowserPreview(artifact.path, {
+                      cwd: artifact.cwd,
+                      displayName: title,
+                    })
+                  : props.onOpenFilePath?.(artifact.path, { cwd: artifact.cwd })
+              }
+              title={
+                canOpen
+                  ? `${isWebPreview ? "Preview" : "Open"} ${title}`
+                  : "File viewer is unavailable"
+              }
+              className="shrink-0"
+            >
+              <span>{isWebPreview ? "Preview" : "Open"}</span>
+              <ExternalLinkIcon className="size-3" />
+            </Button>
+          </div>
+        );
+      })}
+    </div>
+  );
+});
+
+const LocalServerArtifactCards = memo(function LocalServerArtifactCards(props: {
+  artifacts: ReadonlyArray<LocalServerArtifact>;
+  onOpenLocalServerUrl: (url: string) => void;
+}) {
+  if (props.artifacts.length === 0) return null;
+
+  return (
+    <div className="mt-2 space-y-2">
+      {props.artifacts.map((artifact) => {
+        const title = artifact.label || "Local app";
+        return (
+          <div
+            key={`local-server-artifact:${artifact.url}`}
+            className="flex min-w-0 items-center gap-3 rounded-lg border border-border/80 bg-card/55 p-2.5"
+          >
+            <div className="flex size-9 shrink-0 items-center justify-center rounded-md bg-background/80">
+              <GlobeIcon className="size-5 text-muted-foreground" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium text-foreground" title={title}>
+                {title}
+              </p>
+              <p className="mt-0.5 truncate text-xs text-muted-foreground" title={artifact.url}>
+                App preview
+              </p>
+            </div>
+            <Button
+              type="button"
+              size="xs"
+              variant="outline"
+              onClick={() => props.onOpenLocalServerUrl(artifact.url)}
+              title={`Open ${title} in browser pane`}
               className="shrink-0"
             >
               <span>Open</span>
@@ -1866,9 +2024,11 @@ const WorkLogGroup = memo(function WorkLogGroup(props: {
     | undefined;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onImageLoad: () => void;
+  onContentSizeChange: () => void;
   homeDirectory: string | undefined;
   workspaceRoot: string | undefined;
 }) {
+  const onContentSizeChange = props.onContentSizeChange;
   const [expandedEntryId, setExpandedEntryId] = useState<string | null>(null);
   const [isGroupCollapsed, setIsGroupCollapsed] = useState(() =>
     props.groupedEntries.every(isEditWorkEntry),
@@ -1924,6 +2084,18 @@ const WorkLogGroup = memo(function WorkLogGroup(props: {
     }
   }, [expandedEntryId, props.visibleEntries]);
 
+  useEffect(() => {
+    onContentSizeChange();
+  }, [
+    expandedEntryId,
+    isGroupCollapsed,
+    onContentSizeChange,
+    props.hasOverflow,
+    props.hiddenCount,
+    props.isExpanded,
+    props.visibleEntries.length,
+  ]);
+
   return (
     <div className="max-w-full space-y-2">
       <div className="flex items-center gap-2 text-muted-foreground/78">
@@ -1933,6 +2105,7 @@ const WorkLogGroup = memo(function WorkLogGroup(props: {
           onClick={() => {
             setIsGroupCollapsed((current) => !current);
             setExpandedEntryId(null);
+            onContentSizeChange();
           }}
           aria-expanded={!isGroupCollapsed}
         >
@@ -1979,7 +2152,10 @@ const WorkLogGroup = memo(function WorkLogGroup(props: {
           <button
             type="button"
             className="rounded px-1.5 py-0.5 text-xs text-muted-foreground/55 transition-colors hover:bg-accent/30 hover:text-foreground/75"
-            onClick={() => props.onToggleWorkGroup(props.groupId)}
+            onClick={() => {
+              props.onToggleWorkGroup(props.groupId);
+              onContentSizeChange();
+            }}
           >
             {props.isExpanded ? "Show less" : `Show ${props.hiddenCount} more`}
           </button>
@@ -2016,6 +2192,7 @@ const WorkLogGroup = memo(function WorkLogGroup(props: {
                       setExpandedEntryId((current) =>
                         current === workEntry.id ? null : workEntry.id,
                       );
+                      onContentSizeChange();
                     }}
                   />
                   {isEntryExpanded ? (
@@ -3493,7 +3670,12 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
     estimateSize: (index: number) => {
       const row = rows[index];
       if (!row) return 96;
-      if (row.kind === "work") return 112;
+      if (row.kind === "work") {
+        return estimateTimelineWorkGroupHeight({
+          row,
+          isExpanded: expandedWorkGroups[row.id] ?? false,
+        });
+      }
       if (row.kind === "proposed-plan") return estimateTimelineProposedPlanHeight(row.proposedPlan);
       if (row.kind === "working") return 40;
       return estimateTimelineMessageHeight(row.message, { timelineWidthPx });
@@ -3521,13 +3703,18 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
   }, [rowVirtualizer]);
 
   const pendingMeasureFrameRef = useRef<number | null>(null);
-  const onTimelineImageLoad = useCallback(() => {
+  const scheduleTimelineMeasure = useCallback(() => {
     if (pendingMeasureFrameRef.current !== null) return;
     pendingMeasureFrameRef.current = window.requestAnimationFrame(() => {
       pendingMeasureFrameRef.current = null;
       rowVirtualizer.measure();
     });
   }, [rowVirtualizer]);
+  const onTimelineImageLoad = scheduleTimelineMeasure;
+
+  useEffect(() => {
+    scheduleTimelineMeasure();
+  }, [expandedWorkGroups, scheduleTimelineMeasure]);
 
   useEffect(() => {
     return () => {
@@ -3790,6 +3977,7 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
               onOpenFilePath={props.onOpenFilePath}
               onImageExpand={onImageExpand}
               onImageLoad={onTimelineImageLoad}
+              onContentSizeChange={scheduleTimelineMeasure}
               homeDirectory={props.homeDirectory}
               workspaceRoot={workspaceRoot}
             />
@@ -3800,6 +3988,13 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
         row.message.role === "user" &&
         (() => {
           const userAttachments = row.message.attachments ?? [];
+          const annotationAttachments = userAttachments.filter(
+            (attachment): attachment is Extract<ChatAttachment, { type: "image" }> =>
+              isPdfAnnotationAttachment(attachment),
+          );
+          const visibleUserAttachments = userAttachments.filter(
+            (attachment) => !isPdfAnnotationAttachment(attachment),
+          );
           const canRevertAgentWork = revertTurnCountByUserMessageId.has(row.message.id);
           return (
             <div className="flex justify-end">
@@ -3808,13 +4003,23 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
                   data-user-message-bubble="true"
                   className="relative w-full rounded-2xl rounded-br-sm border border-border bg-secondary px-3 py-2"
                 >
-                  {userAttachments.length > 0 && (
+                  {annotationAttachments.length > 0 ? (
+                    <UserAnnotationAttachmentSummary
+                      attachments={annotationAttachments}
+                      onImageExpand={onImageExpand}
+                      onImageLoad={onTimelineImageLoad}
+                    />
+                  ) : null}
+                  {visibleUserAttachments.length > 0 && (
                     <div className="mb-1.5 grid max-w-[420px] grid-cols-2 gap-1.5">
-                      {userAttachments.map(
+                      {visibleUserAttachments.map(
                         (attachment: NonNullable<TimelineMessage["attachments"]>[number]) => (
                           <div
                             key={attachment.id}
-                            className="overflow-hidden rounded-lg border border-border/80 bg-background/70"
+                            className={cn(
+                              "overflow-hidden rounded-lg border border-border/80 bg-background/70",
+                              attachment.type === "pdf" && "border-0 bg-transparent",
+                            )}
                           >
                             {attachment.type === "image" && attachment.previewUrl ? (
                               <button
@@ -3823,7 +4028,7 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
                                 aria-label={`Preview ${attachment.name}`}
                                 onClick={() => {
                                   const preview = buildExpandedImagePreview(
-                                    userAttachments,
+                                    visibleUserAttachments,
                                     attachment.id,
                                   );
                                   if (!preview) return;
@@ -3839,7 +4044,7 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
                                 />
                               </button>
                             ) : attachment.type === "pdf" ? (
-                              <UserPdfAttachmentPreview attachment={attachment} />
+                              <UserPdfAttachmentChip attachment={attachment} />
                             ) : (
                               <div className="flex min-h-[72px] items-center justify-center px-2 py-2.5 text-center text-[11px] text-muted-foreground/70">
                                 {attachment.name}
@@ -3924,12 +4129,23 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
                     workspaceRoot,
                     homeDirectory: props.homeDirectory,
                   });
+                  const localServerArtifacts =
+                    !row.message.streaming && row.message.turnId
+                      ? (props.localServerArtifactsByTurn.get(row.message.turnId) ?? [])
+                      : [];
                   return (
-                    <AssistantArtifactCards
-                      artifacts={mentionedArtifacts}
-                      resolvedTheme={resolvedTheme}
-                      onOpenFilePath={props.onOpenFilePath}
-                    />
+                    <>
+                      <AssistantArtifactCards
+                        artifacts={mentionedArtifacts}
+                        resolvedTheme={resolvedTheme}
+                        onOpenFilePath={props.onOpenFilePath}
+                        onOpenBrowserPreview={props.onOpenBrowserPreview}
+                      />
+                      <LocalServerArtifactCards
+                        artifacts={localServerArtifacts}
+                        onOpenLocalServerUrl={props.onOpenLocalServerUrl}
+                      />
+                    </>
                   );
                 })()}
                 <div

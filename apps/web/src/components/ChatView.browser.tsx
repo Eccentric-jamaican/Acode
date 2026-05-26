@@ -350,6 +350,76 @@ function createChatViewSnapshot(options: {
   };
 }
 
+function createCommandGroupVirtualizationSnapshot(): OrchestrationReadModel {
+  const messages: Array<OrchestrationReadModel["threads"][number]["messages"][number]> = [];
+  const activities: Array<OrchestrationReadModel["threads"][number]["activities"][number]> = [];
+
+  for (let groupIndex = 0; groupIndex < 18; groupIndex += 1) {
+    const groupOffsetSeconds = groupIndex * 20;
+    messages.push(
+      createUserMessage({
+        id: `msg-user-command-group-${groupIndex}` as MessageId,
+        text: `run command group ${groupIndex}`,
+        offsetSeconds: groupOffsetSeconds,
+      }),
+    );
+
+    for (let commandIndex = 0; commandIndex < 8; commandIndex += 1) {
+      const command = [
+        "rg",
+        "-n",
+        `virtualized-command-group-${groupIndex}-${commandIndex}`,
+        "apps/web/src/components/chat/MessagesTimeline.tsx",
+      ];
+      activities.push({
+        id: EventId.makeUnsafe(`activity-command-group-${groupIndex}-${commandIndex}`),
+        tone: "tool",
+        kind: "tool.completed",
+        summary: "Ran command",
+        payload: {
+          itemType: "command_execution",
+          title: "rg",
+          status: "completed",
+          data: {
+            item: {
+              command,
+              result: {
+                content: "",
+                exitCode: 0,
+              },
+            },
+          },
+        },
+        turnId: null,
+        sequence: groupIndex * 10 + commandIndex,
+        createdAt: isoAt(groupOffsetSeconds + commandIndex + 1),
+      });
+    }
+
+    messages.push(
+      createAssistantMessage({
+        id: `msg-assistant-command-group-${groupIndex}` as MessageId,
+        text: `finished command group ${groupIndex}`,
+        offsetSeconds: groupOffsetSeconds + 10,
+      }),
+    );
+  }
+
+  const snapshot = createChatViewSnapshot({ messages });
+  const thread = snapshot.threads[0];
+  if (!thread) return snapshot;
+
+  return {
+    ...snapshot,
+    threads: [
+      {
+        ...thread,
+        activities,
+      },
+    ],
+  };
+}
+
 function createSelectionFeatureSnapshot(): OrchestrationReadModel {
   return {
     snapshotSequence: 1,
@@ -1348,6 +1418,16 @@ function elementWidthBySelector(selector: string): number {
   const element = document.querySelector<HTMLElement>(selector);
   expect(element).not.toBeNull();
   return Math.round(element!.getBoundingClientRect().width);
+}
+
+function visibleVirtualTimelineRowBounds(scrollContainer: HTMLElement): DOMRect[] {
+  const containerRect = scrollContainer.getBoundingClientRect();
+  return Array.from(
+    scrollContainer.querySelectorAll<HTMLElement>("[data-index] > [data-timeline-row-kind]"),
+  )
+    .map((row) => row.getBoundingClientRect())
+    .filter((rect) => rect.bottom > containerRect.top && rect.top < containerRect.bottom)
+    .toSorted((left, right) => left.top - right.top);
 }
 
 async function waitForThreadContextPanelText(): Promise<string> {
@@ -2374,6 +2454,40 @@ describe("ChatView timeline estimator parity (full app)", () => {
       expect(window.getComputedStyle(chatViewRoot).overflowY).toBe("hidden");
       expect(chatViewRoot.scrollHeight).toBeLessThanOrEqual(chatViewRoot.clientHeight + 1);
       expect(isElementFullyVisible(header)).toBe(true);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("keeps virtualized command work groups from overlapping while viewing older history", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createCommandGroupVirtualizationSnapshot(),
+    });
+
+    try {
+      const scrollContainer = await waitForMessagesScrollContainer();
+      await expect
+        .poll(() => scrollContainer.scrollHeight > scrollContainer.clientHeight)
+        .toBe(true);
+
+      scrollContainer.scrollTop = 0;
+      scrollContainer.dispatchEvent(new Event("scroll"));
+      await waitForLayout();
+
+      await vi.waitFor(
+        () => {
+          const bounds = visibleVirtualTimelineRowBounds(scrollContainer);
+          expect(bounds.length).toBeGreaterThan(3);
+
+          for (let index = 1; index < bounds.length; index += 1) {
+            const previous = bounds[index - 1]!;
+            const current = bounds[index]!;
+            expect(previous.bottom).toBeLessThanOrEqual(current.top + 1);
+          }
+        },
+        { timeout: 4_000, interval: 16 },
+      );
     } finally {
       await mounted.cleanup();
     }

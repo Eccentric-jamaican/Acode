@@ -20,6 +20,8 @@ import type {
   ProviderSendTurnInput,
   ProviderSession,
   ProviderSessionStartInput,
+  ProviderPrewarmSessionInput,
+  ProviderPrewarmSessionResult,
   ProviderStopSessionInput,
   ThreadId,
   ProviderTurnStartResult,
@@ -41,6 +43,13 @@ export interface ProviderServiceShape {
     threadId: ThreadId,
     input: ProviderSessionStartInput,
   ) => Effect.Effect<ProviderSession, ProviderServiceError>;
+
+  /**
+   * Warm provider runtime resources before a session needs its first turn.
+   */
+  readonly prewarmSession: (
+    input: ProviderPrewarmSessionInput,
+  ) => Effect.Effect<ProviderPrewarmSessionResult, ProviderServiceError>;
 
   /**
    * Send a provider turn.

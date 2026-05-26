@@ -60,6 +60,7 @@ import {
   ProviderReadPluginInput,
   ProviderListSkillsInput,
 } from "./providerDiscovery";
+import { ProviderPrewarmSessionInput } from "./provider";
 import {
   ServerCancelProviderLoginInput,
   ServerLogoutProviderInput,
@@ -139,6 +140,7 @@ export const WS_METHODS = {
   providerListPlugins: "provider.listPlugins",
   providerReadPlugin: "provider.readPlugin",
   providerListModels: "provider.listModels",
+  providerPrewarmSession: "provider.prewarmSession",
 } as const;
 
 // ── Push Event Channels ──────────────────────────────────────────────
@@ -244,6 +246,7 @@ const WebSocketRequestBody = Schema.Union([
   tagRequestBody(WS_METHODS.providerListPlugins, ProviderListPluginsInput),
   tagRequestBody(WS_METHODS.providerReadPlugin, ProviderReadPluginInput),
   tagRequestBody(WS_METHODS.providerListModels, ProviderListModelsInput),
+  tagRequestBody(WS_METHODS.providerPrewarmSession, ProviderPrewarmSessionInput),
 ]);
 
 export const WebSocketRequest = Schema.Struct({

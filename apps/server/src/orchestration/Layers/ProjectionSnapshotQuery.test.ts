@@ -389,6 +389,20 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
       assert.equal(focusedThread1?.messages.length, 1);
       assert.equal(focusedThread2?.messages.length, 0);
 
+      const multiFocusedSnapshot = yield* snapshotQuery.getSnapshot({
+        mode: "focused",
+        threadId: ThreadId.makeUnsafe("thread-1"),
+        threadIds: [ThreadId.makeUnsafe("thread-1"), ThreadId.makeUnsafe("thread-2")],
+      });
+      const multiFocusedThread1 = multiFocusedSnapshot.threads.find(
+        (thread) => thread.id === "thread-1",
+      );
+      const multiFocusedThread2 = multiFocusedSnapshot.threads.find(
+        (thread) => thread.id === "thread-2",
+      );
+      assert.equal(multiFocusedThread1?.messages.length, 1);
+      assert.equal(multiFocusedThread2?.messages.length, 1);
+
       const bootstrapSnapshot = yield* snapshotQuery.getSnapshot({ mode: "bootstrap" });
       assert.equal(bootstrapSnapshot.threads.find((thread) => thread.id === "thread-1")?.messages.length, 0);
       assert.equal(bootstrapSnapshot.threads.find((thread) => thread.id === "thread-2")?.messages.length, 0);

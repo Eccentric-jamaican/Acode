@@ -346,6 +346,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const terminalManager = yield* TerminalManager;
   const keybindingsManager = yield* Keybindings;
   const providerHealth = yield* ProviderHealth;
+  const providerService = yield* ProviderService;
   const providerDiscovery = yield* ProviderDiscoveryService;
   const providerRegistry = Option.getOrUndefined(yield* Effect.serviceOption(ProviderRegistry)) ?? {
     getProviders: providerHealth.getStatuses,
@@ -615,7 +616,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
               404,
               {
                 "Content-Type": "text/plain",
-                "Cache-Control": "public, max-age=3600",
+                "Cache-Control": "no-store",
               },
               "Not Found",
             );
@@ -1555,6 +1556,11 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       case WS_METHODS.providerListModels: {
         const body = stripRequestTag(request.body);
         return yield* providerDiscovery.listModels(body);
+      }
+
+      case WS_METHODS.providerPrewarmSession: {
+        const body = stripRequestTag(request.body);
+        return yield* providerService.prewarmSession(body);
       }
 
       default: {

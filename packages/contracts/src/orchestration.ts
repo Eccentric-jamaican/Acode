@@ -1569,6 +1569,7 @@ export type DispatchResult = typeof DispatchResult.Type;
 export const OrchestrationGetSnapshotInput = Schema.Struct({
   mode: Schema.optional(OrchestrationSnapshotMode),
   threadId: Schema.optional(ThreadId),
+  threadIds: Schema.optional(Schema.Array(ThreadId)),
 });
 export type OrchestrationGetSnapshotInput = typeof OrchestrationGetSnapshotInput.Type;
 const OrchestrationGetSnapshotResult = OrchestrationReadModel;

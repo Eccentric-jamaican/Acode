@@ -6,7 +6,15 @@ import type {
   RuntimeMode,
   ThreadId,
 } from "@t3tools/contracts";
-import { ArrowLeftIcon, ArrowRightIcon, RefreshCwIcon, SearchIcon, XIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  Maximize2Icon,
+  Minimize2Icon,
+  RefreshCwIcon,
+  SearchIcon,
+  XIcon,
+} from "lucide-react";
 import {
   type CSSProperties,
   type KeyboardEvent,
@@ -14,7 +22,6 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -29,9 +36,7 @@ import { useComposerDraftStore } from "~/composerDraftStore";
 import { inspectCaptureLabel } from "~/browserInspectCapture";
 import { readNativeApi } from "~/nativeApi";
 import { cn } from "~/lib/utils";
-import {
-  resolveBrowserNavigationUrl,
-} from "./IntegratedBrowserPane.logic";
+import { resolveBrowserNavigationUrl } from "./IntegratedBrowserPane.logic";
 
 const BOUNDS_SETTLE_DELAYS_MS = [0, 50, 150, 300] as const;
 const CHAT_MIN_WIDTH_PX = 540;
@@ -140,6 +145,8 @@ interface BrowserPaneProps {
   activeRuntimeMode: RuntimeMode | null;
   open: boolean;
   layout?: "aside" | "panel";
+  expanded?: boolean;
+  onToggleExpanded?: () => void;
   onRequestOpen: () => void;
   onRequestClose: () => void;
 }
@@ -205,8 +212,10 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
   const {
     activeProjectId,
     activeThreadId,
+    expanded = false,
     open,
     layout = "aside",
+    onToggleExpanded,
     onRequestClose,
   } = props;
   const usesAsideLayout = layout === "aside";
@@ -599,6 +608,14 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
     });
   };
 
+  const requestClose = useCallback(() => {
+    lastDispatchedBoundsRef.current = null;
+    latestBoundsRequestSeqRef.current += 1;
+    latestBoundsResponseSeqRef.current = latestBoundsRequestSeqRef.current;
+    void api?.browser?.closePane().catch(() => undefined);
+    onRequestClose();
+  }, [api, onRequestClose]);
+
   const browserOpen = open && isDesktopBrowserAvailable && activeProjectId !== null;
   const controlsDisabled = !browserOpen || !activeProjectId || !api?.browser;
 
@@ -712,6 +729,22 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
               className="flex shrink-0 items-center gap-1"
               data-testid="integrated-browser-header-actions"
             >
+              {onToggleExpanded ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label={expanded ? "Collapse expanded browser" : "Expand browser"}
+                  title={expanded ? "Collapse expanded browser" : "Expand browser"}
+                  onClick={onToggleExpanded}
+                >
+                  {expanded ? (
+                    <Minimize2Icon className="size-3.5" />
+                  ) : (
+                    <Maximize2Icon className="size-3.5" />
+                  )}
+                </Button>
+              ) : null}
               <Toggle
                 pressed={activeTab?.inspectMode === true}
                 onPressedChange={(next) => {
@@ -738,7 +771,7 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
                 variant="ghost"
                 size="icon-xs"
                 aria-label="Collapse browser"
-                onClick={onRequestClose}
+                onClick={requestClose}
               >
                 <XIcon />
               </Button>
@@ -881,6 +914,22 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
               className="flex shrink-0 items-center gap-1"
               data-testid="integrated-browser-header-actions"
             >
+              {onToggleExpanded ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label={expanded ? "Collapse expanded browser" : "Expand browser"}
+                  title={expanded ? "Collapse expanded browser" : "Expand browser"}
+                  onClick={onToggleExpanded}
+                >
+                  {expanded ? (
+                    <Minimize2Icon className="size-3.5" />
+                  ) : (
+                    <Maximize2Icon className="size-3.5" />
+                  )}
+                </Button>
+              ) : null}
               <Toggle
                 pressed={activeTab?.inspectMode === true}
                 onPressedChange={(next) => {
@@ -907,7 +956,7 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
                 variant="ghost"
                 size="icon-xs"
                 aria-label="Collapse browser"
-                onClick={onRequestClose}
+                onClick={requestClose}
               >
                 <XIcon />
               </Button>

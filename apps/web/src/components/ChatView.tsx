@@ -57,6 +57,7 @@ import { useDebouncedValue } from "@tanstack/react-pacer";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import {
   gitBranchesQueryOptions,
+  gitCheckoutMutationOptions,
   gitCreateWorktreeMutationOptions,
   gitStatusQueryOptions,
 } from "~/lib/gitReactQuery";
@@ -111,10 +112,12 @@ import {
   PROVIDER_OPTIONS,
   deriveWorkLogEntries,
   extractGeneratedImageArtifacts,
+  extractLocalServerArtifactsFromText,
   hasToolActivityForTurn,
   isLatestTurnSettled,
   formatElapsed,
   formatTimestamp,
+  type LocalServerArtifact,
 } from "../session-logic";
 import { isScrollContainerNearBottom } from "../chat-scroll";
 import {
@@ -166,6 +169,7 @@ import {
   EllipsisIcon,
   ChevronDownIcon,
   CircleAlertIcon,
+  FileTextIcon,
   FilesIcon,
   FolderClosedIcon,
   GlobeIcon,
@@ -250,6 +254,7 @@ import {
 import {
   type ComposerImageAttachment,
   type ComposerInspectCaptureDraft,
+  type ComposerPdfAnnotationDraft,
   type DraftThreadEnvMode,
   type DraftThreadState,
   type PinnedSelectionDraft,
@@ -258,6 +263,7 @@ import {
   useComposerThreadDraft,
 } from "../composerDraftStore";
 import { buildInspectPrompt } from "../browserInspectCapture";
+import { buildPdfAnnotationPrompt } from "../pdfAnnotationCapture";
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
 import {
   ComposerPromptEditor,
@@ -349,6 +355,9 @@ function toOptimisticChatAttachment(attachment: ComposerImageAttachment): ChatAt
     mimeType: attachment.mimeType,
     sizeBytes: attachment.sizeBytes,
     previewUrl: attachment.previewUrl,
+    ...(attachment.source === "pdf-annotation" || attachment.name.startsWith("pdf-annotation-")
+      ? { source: "pdf-annotation" as const }
+      : {}),
   };
 }
 
@@ -380,6 +389,8 @@ const THREAD_CONTEXT_ARTIFACT_EXTENSIONS = new Set([
   "docx",
   "gif",
   "heic",
+  "htm",
+  "html",
   "jpeg",
   "jpg",
   "md",
@@ -453,6 +464,27 @@ function normalizeThreadContextPath(pathValue: string): string {
 
 function isThreadContextArtifactPath(pathValue: string): boolean {
   return THREAD_CONTEXT_ARTIFACT_EXTENSIONS.has(extensionOf(pathValue));
+}
+
+function isBrowserPreviewArtifactPath(pathValue: string): boolean {
+  const extension = extensionOf(pathValue);
+  return extension === "html" || extension === "htm";
+}
+
+function pathToBrowserFileUrl(pathValue: string, cwd?: string | undefined): string {
+  const normalizedPath = pathValue.replaceAll("\\", "/").trim();
+  const normalizedCwd = cwd?.replaceAll("\\", "/").trim();
+  const absolutePath =
+    /^[A-Za-z]:\//.test(normalizedPath) || normalizedPath.startsWith("/")
+      ? normalizedPath
+      : normalizedCwd
+        ? `${normalizedCwd.replace(/\/+$/g, "")}/${normalizedPath.replace(/^\/+/g, "")}`
+        : normalizedPath;
+  const withLeadingSlash = /^[A-Za-z]:\//.test(absolutePath) ? `/${absolutePath}` : absolutePath;
+  return `file://${withLeadingSlash
+    .split("/")
+    .map((part, index) => (index === 0 || /^[A-Za-z]:$/.test(part) ? part : encodeURIComponent(part)))
+    .join("/")}`;
 }
 
 function compareThreadContextActivities(
@@ -829,6 +861,69 @@ function collectThreadContextSources(thread: Thread): ThreadContextSource[] {
   return [...sources.values()];
 }
 
+function collectLocalServerArtifactsByTurn(thread: Thread): Map<TurnId, LocalServerArtifact[]> {
+  const byTurn = new Map<TurnId, LocalServerArtifact[]>();
+  const seenByTurn = new Map<TurnId, Set<string>>();
+  const pushArtifacts = (turnId: TurnId | null | undefined, text: string | undefined) => {
+    if (!turnId || !text) {
+      return;
+    }
+    const artifacts = extractLocalServerArtifactsFromText(text);
+    if (artifacts.length === 0) {
+      return;
+    }
+    const existing = byTurn.get(turnId) ?? [];
+    const seen = seenByTurn.get(turnId) ?? new Set<string>();
+    for (const artifact of artifacts) {
+      const key = artifact.url.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      existing.push(artifact);
+    }
+    byTurn.set(turnId, existing);
+    seenByTurn.set(turnId, seen);
+  };
+
+  for (const activity of thread.activities) {
+    const payload =
+      activity.payload && typeof activity.payload === "object"
+        ? (activity.payload as Record<string, unknown>)
+        : null;
+    const detail = typeof payload?.detail === "string" ? payload.detail : "";
+    const data =
+      payload?.data && typeof payload.data === "object"
+        ? (payload.data as Record<string, unknown>)
+        : null;
+    const item =
+      data?.item && typeof data.item === "object" ? (data.item as Record<string, unknown>) : null;
+    const result =
+      item?.result && typeof item.result === "object"
+        ? (item.result as Record<string, unknown>)
+        : null;
+    pushArtifacts(activity.turnId, detail);
+    const outputCandidates = [
+      result?.output,
+      result?.stdout,
+      result?.stderr,
+      data?.output,
+      data?.stdout,
+    ];
+    for (const value of outputCandidates) {
+      if (typeof value === "string") {
+        pushArtifacts(activity.turnId, value);
+      }
+    }
+  }
+
+  for (const message of thread.messages) {
+    if (message.role === "assistant") {
+      pushArtifacts(message.turnId, message.text);
+    }
+  }
+
+  return byTurn;
+}
+
 type SelectedComposerShortcut = {
   id: string;
   command: Extract<ComposerSlashCommand, "browser" | "review" | "subagents">;
@@ -1162,6 +1257,25 @@ function displayPromptWithInspectCaptures(input: {
   return cleanPrompt ? `${inspectTokens} ${cleanPrompt}` : inspectTokens;
 }
 
+function promptWithPdfAnnotations(input: {
+  prompt: string;
+  annotations: readonly ComposerPdfAnnotationDraft[];
+}): string {
+  if (input.annotations.length === 0) return input.prompt;
+  const annotationPrompt = input.annotations
+    .map((entry) => buildPdfAnnotationPrompt(entry.capture))
+    .join("\n\n");
+  const cleanPrompt = input.prompt.trim();
+  return cleanPrompt ? `${annotationPrompt}\n\n${cleanPrompt}` : annotationPrompt;
+}
+
+function displayPromptWithPdfAnnotations(input: {
+  prompt: string;
+  annotations: readonly ComposerPdfAnnotationDraft[];
+}): string {
+  return input.prompt;
+}
+
 function flattenFilePanelComments(
   commentsByFilePath: Record<string, FilePanelComment[]>,
 ): Array<{ filePath: string; comment: FilePanelComment }> {
@@ -1321,6 +1435,7 @@ type QueuedComposerChatTurn = {
   displayText?: string | undefined;
   shortcuts?: SelectedComposerShortcut[] | undefined;
   inspectCaptures?: ComposerInspectCaptureDraft[] | undefined;
+  pdfAnnotations?: ComposerPdfAnnotationDraft[] | undefined;
   images: ComposerImageAttachment[];
   selectedProvider: ProviderKind;
   selectedModel: ModelSlug | null;
@@ -1352,9 +1467,14 @@ type QueuedComposerTurn = QueuedComposerChatTurn | QueuedComposerPlanFollowUp;
 function buildQueuedComposerPreviewText(input: {
   trimmedPrompt: string;
   images: ReadonlyArray<ComposerImageAttachment>;
+  annotations?: ReadonlyArray<ComposerPdfAnnotationDraft> | undefined;
 }): string {
   if (input.trimmedPrompt.length > 0) {
     return input.trimmedPrompt;
+  }
+  if ((input.annotations?.length ?? 0) > 0) {
+    const count = input.annotations?.length ?? 0;
+    return `${count} ${count === 1 ? "annotation" : "annotations"}`;
   }
   const firstAttachment = input.images[0];
   if (firstAttachment) {
@@ -1383,6 +1503,11 @@ function readFileAsDataUrl(file: File): Promise<string> {
 }
 
 function localFilesystemPathForFile(file: File): string | null {
+  const bridgePath = window.desktopBridge?.getPathForFile?.(file);
+  if (typeof bridgePath === "string" && bridgePath.trim().length > 0) {
+    return bridgePath.trim();
+  }
+
   const maybePath = (file as FileWithLocalPath).path;
   if (typeof maybePath !== "string") {
     return null;
@@ -1511,6 +1636,7 @@ export default function ChatView({
   const prompt = composerDraft.prompt;
   const composerImages = composerDraft.images;
   const composerInspectCaptures = composerDraft.inspectCaptures;
+  const composerPdfAnnotations = composerDraft.pdfAnnotations;
   const composerPinnedSelections = composerDraft.pinnedSelections;
   const filePanelCommentsByFilePath = useFilePanelStore(
     (store) => getFilePanelThreadState(store, threadId).commentsByFilePath,
@@ -1520,6 +1646,19 @@ export default function ChatView({
     [filePanelCommentsByFilePath],
   );
   const nonPersistedComposerImageIds = composerDraft.nonPersistedImageIds;
+  const composerPdfAnnotationImageIds = useMemo(
+    () =>
+      new Set(
+        composerPdfAnnotations.flatMap((annotation) =>
+          annotation.imageId ? [annotation.imageId] : [],
+        ),
+      ),
+    [composerPdfAnnotations],
+  );
+  const visibleComposerImages = useMemo(
+    () => composerImages.filter((image) => !composerPdfAnnotationImageIds.has(image.id)),
+    [composerImages, composerPdfAnnotationImageIds],
+  );
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
   const setComposerDraftProvider = useComposerDraftStore((store) => store.setProvider);
   const setComposerDraftModel = useComposerDraftStore((store) => store.setModel);
@@ -1539,7 +1678,14 @@ export default function ChatView({
   const removeComposerDraftInspectCapture = useComposerDraftStore(
     (store) => store.removeInspectCapture,
   );
+  const removeComposerDraftPdfAnnotation = useComposerDraftStore(
+    (store) => store.removePdfAnnotation,
+  );
+  const clearComposerDraftPdfAnnotations = useComposerDraftStore(
+    (store) => store.clearPdfAnnotations,
+  );
   const addComposerDraftInspectCapture = useComposerDraftStore((store) => store.addInspectCapture);
+  const addComposerDraftPdfAnnotation = useComposerDraftStore((store) => store.addPdfAnnotation);
   const addComposerDraftPinnedSelection = useComposerDraftStore(
     (store) => store.addPinnedSelection,
   );
@@ -1652,6 +1798,7 @@ export default function ChatView({
   const attachmentPreviewHandoffByMessageIdRef = useRef<Record<string, string[]>>({});
   const attachmentPreviewHandoffTimeoutByMessageIdRef = useRef<Record<string, number>>({});
   const sendInFlightRef = useRef(false);
+  const codexPrewarmKeyRef = useRef<string | null>(null);
   const dragDepthRef = useRef(0);
   const terminalOpenByThreadRef = useRef<Record<string, boolean>>({});
   const setMessagesScrollContainerRef = useCallback((element: HTMLDivElement | null) => {
@@ -1773,7 +1920,8 @@ export default function ChatView({
     prompt.trim().length === 0 &&
     selectedComposerExtensions.length === 0 &&
     selectedComposerShortcuts.length === 0 &&
-    composerInspectCaptures.length === 0;
+    composerInspectCaptures.length === 0 &&
+    composerPdfAnnotations.length === 0;
   const selectedServiceTierSetting = settings.codexServiceTier;
   const selectedServiceTier = resolveAppServiceTier(selectedServiceTierSetting);
   const serverConfigQuery = useQuery(serverConfigQueryOptions());
@@ -1876,11 +2024,20 @@ export default function ChatView({
       resolveModelForProviderPicker(selectedProvider, draftModel, providerOptions) ?? fallbackModel
     );
   }, [baseThreadModel, composerDraft.model, modelOptionsByProvider, selectedProvider]);
-  const selectedOpencodeModelCapabilities =
+  const providerStatusOpencodeModelCapabilities =
     selectedProvider === "opencode"
       ? (providerStatuses
           .find((provider) => provider.provider === "opencode")
           ?.models?.find((model) => model.slug === selectedModel)?.capabilities ?? null)
+      : null;
+  const runtimeOpencodeModelCapabilities =
+    selectedProvider === "opencode"
+      ? (opencodeRuntimeModelsQuery.data?.models.find((model) => model.slug === selectedModel)
+          ?.capabilities ?? null)
+      : null;
+  const selectedOpencodeModelCapabilities =
+    selectedProvider === "opencode"
+      ? (runtimeOpencodeModelCapabilities ?? providerStatusOpencodeModelCapabilities)
       : null;
   const newThreadSuggestionsCwd = activeThread?.worktreePath ?? activeProject?.cwd ?? null;
   const newThreadGitStatusQuery = useQuery(gitStatusQueryOptions(newThreadSuggestionsCwd));
@@ -1933,6 +2090,70 @@ export default function ChatView({
     selectedProvider,
     supportsReasoningEffort,
   ]);
+
+  useEffect(() => {
+    if (selectedProvider !== "codex" || !activeThread || !activeProject) {
+      return;
+    }
+    if (activeLatestTurn && !latestTurnSettled) {
+      return;
+    }
+
+    const cwd = activeThread.worktreePath ?? activeProject.cwd;
+    if (!cwd) {
+      return;
+    }
+
+    const modelOptionsKey = JSON.stringify(selectedModelOptionsForDispatch ?? null);
+    const prewarmKey = [
+      activeThread.id,
+      cwd,
+      runtimeMode,
+      selectedModel,
+      selectedServiceTier ?? "default",
+      modelOptionsKey,
+    ].join("\u0000");
+    if (codexPrewarmKeyRef.current === prewarmKey) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      if (codexPrewarmKeyRef.current === prewarmKey) {
+        return;
+      }
+      codexPrewarmKeyRef.current = prewarmKey;
+      const api = readNativeApi();
+      if (!api) {
+        return;
+      }
+      void api.provider
+        .prewarmSession({
+          threadId: activeThread.id,
+          provider: "codex",
+          cwd,
+          model: selectedModel,
+          serviceTier: selectedServiceTier,
+          ...(selectedModelOptionsForDispatch
+            ? { modelOptions: selectedModelOptionsForDispatch }
+            : {}),
+          runtimeMode,
+        })
+        .catch(() => undefined);
+    }, 350);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [
+    activeLatestTurn,
+    activeProject,
+    activeThread,
+    latestTurnSettled,
+    runtimeMode,
+    selectedModel,
+    selectedModelOptionsForDispatch,
+    selectedProvider,
+    selectedServiceTier,
+  ]);
+
   const selectedModelForPicker = selectedModel;
   const selectedModelForPickerWithCustomFallback = useMemo(() => {
     const currentOptions = modelOptionsByProvider[selectedProvider];
@@ -2046,6 +2267,10 @@ export default function ChatView({
         threads: allThreads,
       }),
     [activeThread?.id, allThreads, rawWorkLogEntries],
+  );
+  const localServerArtifactsByTurn = useMemo(
+    () => (activeThread ? collectLocalServerArtifactsByTurn(activeThread) : new Map()),
+    [activeThread],
   );
   const latestTurnHasToolActivity = useMemo(
     () => hasToolActivityForTurn(threadActivities, activeLatestTurn?.turnId),
@@ -2750,6 +2975,51 @@ export default function ChatView({
         ),
     });
   }, [browserPaneOpen, navigate, onToggleBrowserPanel, threadId]);
+  const onOpenLocalServerUrl = useCallback(
+    (url: string) => {
+      if (!activeProject?.id) {
+        return;
+      }
+      const api = readNativeApi();
+      if (!api?.browser) {
+        window.open(url, "_blank", "noopener,noreferrer");
+        return;
+      }
+      if (!resolvedBrowserPaneOpen) {
+        onToggleBrowser();
+      }
+      void api.browser.navigate({ projectId: activeProject.id, url }).catch((error) => {
+        toastManager.add({
+          type: "error",
+          title: "Unable to open preview",
+          description: error instanceof Error ? error.message : "The browser could not navigate.",
+        });
+      });
+    },
+    [activeProject?.id, onToggleBrowser, resolvedBrowserPaneOpen],
+  );
+  const onOpenBrowserPreview = useCallback(
+    (path: string, options?: { cwd?: string | undefined; displayName?: string | undefined }) => {
+      const api = readNativeApi();
+      const projectId = activeProject?.id;
+      const url = pathToBrowserFileUrl(path, options?.cwd ?? threadWorkspaceCwd ?? undefined);
+      if (!api?.browser || !projectId) {
+        window.open(url, "_blank", "noopener,noreferrer");
+        return;
+      }
+      if (!resolvedBrowserPaneOpen) {
+        onToggleBrowser();
+      }
+      void api.browser.navigate({ projectId, url }).catch((error) => {
+        toastManager.add({
+          type: "error",
+          title: "Unable to open preview",
+          description: error instanceof Error ? error.message : "The browser could not navigate.",
+        });
+      });
+    },
+    [activeProject?.id, onToggleBrowser, resolvedBrowserPaneOpen, threadWorkspaceCwd],
+  );
   const onToggleFiles = useCallback(() => {
     if (onToggleFilesPanel) {
       onToggleFilesPanel();
@@ -3913,6 +4183,9 @@ export default function ChatView({
         for (const capture of queuedTurn.inspectCaptures ?? []) {
           addComposerDraftInspectCapture(activeThread.id, capture);
         }
+        for (const annotation of queuedTurn.pdfAnnotations ?? []) {
+          addComposerDraftPdfAnnotation(activeThread.id, annotation);
+        }
       }
       if (queuedTurn.kind === "chat" && queuedTurn.images.length > 0) {
         addComposerImagesToDraft(queuedTurn.images);
@@ -3946,6 +4219,7 @@ export default function ChatView({
       activeThread,
       addComposerImagesToDraft,
       addComposerDraftInspectCapture,
+      addComposerDraftPdfAnnotation,
       clearComposerDraftContent,
       focusComposer,
       setComposerDraftCodexFastMode,
@@ -3982,6 +4256,8 @@ export default function ChatView({
     const composerImagesForSend = queuedChatTurn?.images ?? composerImages;
     const composerInspectCapturesForSend =
       queuedChatTurn?.inspectCaptures ?? composerInspectCaptures;
+    const composerPdfAnnotationsForSend =
+      queuedChatTurn?.pdfAnnotations ?? composerPdfAnnotations;
     const selectedProviderForSend = queuedChatTurn?.selectedProvider ?? selectedProvider;
     const rawPromptForSend = queuedChatTurn?.displayText ?? promptRef.current;
     const desktopAppsForSend =
@@ -4032,9 +4308,12 @@ export default function ChatView({
     const promptForSend =
       queuedChatTurn?.prompt ??
       promptWithFilePanelComments({
-        prompt: promptWithInspectCaptures({
-          prompt: shortcutPromptForSend,
-          captures: composerInspectCapturesForSend,
+        prompt: promptWithPdfAnnotations({
+          prompt: promptWithInspectCaptures({
+            prompt: shortcutPromptForSend,
+            captures: composerInspectCapturesForSend,
+          }),
+          annotations: composerPdfAnnotationsForSend,
         }),
         commentsByFilePath: filePanelCommentsByFilePath,
       });
@@ -4047,9 +4326,12 @@ export default function ChatView({
     const displayPromptForSend =
       queuedChatTurn?.displayText ??
       displayPromptWithFilePanelComments({
-        prompt: displayPromptWithInspectCaptures({
-          prompt: shortcutDisplayPromptForSend,
-          captures: composerInspectCapturesForSend,
+        prompt: displayPromptWithPdfAnnotations({
+          prompt: displayPromptWithInspectCaptures({
+            prompt: shortcutDisplayPromptForSend,
+            captures: composerInspectCapturesForSend,
+          }),
+          annotations: composerPdfAnnotationsForSend,
         }),
         commentsByFilePath: filePanelCommentsByFilePath,
       });
@@ -4113,7 +4395,8 @@ export default function ChatView({
       composerImagesForSend.length === 0 &&
       selectedComposerExtensionsForSend.length === 0 &&
       selectedComposerShortcuts.length === 0 &&
-      composerInspectCapturesForSend.length === 0
+      composerInspectCapturesForSend.length === 0 &&
+      composerPdfAnnotationsForSend.length === 0
     ) {
       const handledStandaloneSlashCommand = await handleStandaloneSlashCommand(trimmed);
       if (handledStandaloneSlashCommand) {
@@ -4137,11 +4420,13 @@ export default function ChatView({
         previewText: buildQueuedComposerPreviewText({
           trimmedPrompt: displayTrimmed,
           images: composerImagesForSend,
+          annotations: composerPdfAnnotationsForSend,
         }),
         prompt: promptForSend,
         displayText: displayPromptForSend,
         shortcuts: selectedComposerShortcuts,
         inspectCaptures: composerInspectCapturesForSend,
+        pdfAnnotations: composerPdfAnnotationsForSend,
         images: composerImagesForSend.map(cloneComposerImageForRetry),
         selectedProvider: selectedProviderForSend,
         selectedModel: selectedModelForSend,
@@ -4198,12 +4483,14 @@ export default function ChatView({
     const optimisticAttachments = composerImagesSnapshot.map((image) =>
       toOptimisticChatAttachment(image),
     );
+    const fallbackDisplayText =
+      composerPdfAnnotationsForSend.length > 0 ? "" : ATTACHMENT_ONLY_BOOTSTRAP_PROMPT;
     setOptimisticUserMessages((existing) => [
       ...existing,
       {
         id: messageIdForSend,
         role: "user",
-        text: displayTrimmed || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
+        text: displayTrimmed || fallbackDisplayText,
         ...(optimisticAttachments.length > 0 ? { attachments: optimisticAttachments } : {}),
         createdAt: messageCreatedAt,
         streaming: false,
@@ -4392,7 +4679,7 @@ export default function ChatView({
         message: {
           messageId: messageIdForSend,
           role: "user",
-          text: displayTrimmed || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
+          text: displayTrimmed || fallbackDisplayText,
           attachments: turnAttachments,
           ...(providerInputTextForSend !== displayPromptForSend
             ? { providerInputText: providerInputTextForSend }
@@ -5030,7 +5317,7 @@ export default function ChatView({
         <>
           {variantOptions.length > 0 ? (
             <>
-              <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Variant</div>
+              <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Reasoning</div>
               <MenuRadioGroup
                 value={
                   selectedOpencodeVariant ??
@@ -5323,9 +5610,7 @@ export default function ChatView({
       }
       setComposerCursor(next.cursor);
       setComposerTrigger(detectComposerTrigger(next.text, next.cursor));
-      window.requestAnimationFrame(() => {
-        composerEditorRef.current?.focusAt(next.cursor);
-      });
+      composerEditorRef.current?.syncValue(next.text, next.cursor, { focus: true });
       return true;
     },
     [activePendingProgress?.activeQuestion, activePendingUserInput, setPrompt],
@@ -5975,15 +6260,16 @@ export default function ChatView({
       </div>
 
       {!resolvedDiffOpen && !resolvedBrowserPaneOpen ? (
-        <ThreadContextPanel
-          thread={activeThread}
-          gitCwd={gitCwd}
-          workspaceCwd={threadWorkspaceCwd}
-          homeDirectory={homeDirectory ?? undefined}
-          activeThreadId={activeThread.id}
-          onOpenFilePath={onOpenFilePath}
-          onOpenChanges={onToggleDiff}
-        />
+      <ThreadContextPanel
+        thread={activeThread}
+        gitCwd={gitCwd}
+        workspaceCwd={threadWorkspaceCwd}
+        homeDirectory={homeDirectory ?? undefined}
+        activeThreadId={activeThread.id}
+        onOpenFilePath={onOpenFilePath}
+        onOpenBrowserPreview={onOpenBrowserPreview}
+        onOpenChanges={onToggleDiff}
+      />
       ) : null}
 
       {/* Messages */}
@@ -6076,6 +6362,7 @@ export default function ChatView({
               completionSummary={completionSummary}
               turnDiffSummaryByAssistantMessageId={turnDiffSummaryByAssistantMessageId}
               turnDiffSummaryByTurnId={turnDiffSummaryByTurnId}
+              localServerArtifactsByTurn={localServerArtifactsByTurn}
               nowIso={nowIso}
               expandedWorkGroups={expandedWorkGroups}
               onToggleWorkGroup={onToggleWorkGroup}
@@ -6084,6 +6371,8 @@ export default function ChatView({
               onRevertUserMessage={onRevertUserMessage}
               isRevertingCheckpoint={isRevertingCheckpoint}
               onImageExpand={onExpandTimelineImage}
+              onOpenLocalServerUrl={onOpenLocalServerUrl}
+              onOpenBrowserPreview={onOpenBrowserPreview}
               onOpenThread={(threadId) => {
                 void navigate({
                   to: "/$threadId",
@@ -6287,6 +6576,7 @@ export default function ChatView({
                 effectivePendingUserInputs.length === 0 &&
                 (selectedComposerShortcuts.length > 0 ||
                   composerInspectCaptures.length > 0 ||
+                  composerPdfAnnotations.length > 0 ||
                   filePanelCommentCount > 0) ? (
                   <div className="mb-2 flex items-center gap-2 overflow-x-auto pb-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
                     {filePanelCommentCount > 0 ? (
@@ -6329,6 +6619,109 @@ export default function ChatView({
                         <XIcon className="size-3 opacity-0 transition-opacity group-hover:opacity-70 group-focus-visible:opacity-70" />
                       </button>
                     ))}
+                    {composerPdfAnnotations.length > 0 ? (
+                      <Popover>
+                        <div className="group inline-flex shrink-0 items-center overflow-hidden rounded-full border border-border/70 bg-muted/35 text-sm font-medium text-foreground/85 shadow-sm">
+                          <PopoverTrigger
+                            render={
+                              <button
+                                type="button"
+                                className="inline-flex items-center gap-1.5 px-2 py-1 outline-none transition-colors hover:bg-muted/55 focus-visible:ring-2 focus-visible:ring-ring/45"
+                                aria-label={`${composerPdfAnnotations.length} ${
+                                  composerPdfAnnotations.length === 1
+                                    ? "annotation"
+                                    : "annotations"
+                                } attached`}
+                              />
+                            }
+                          >
+                            <MessageSquareIcon className="size-3.5 text-muted-foreground" />
+                            <span>
+                              {composerPdfAnnotations.length}{" "}
+                              {composerPdfAnnotations.length === 1
+                                ? "annotation"
+                                : "annotations"}
+                            </span>
+                          </PopoverTrigger>
+                          <button
+                            type="button"
+                            className="mr-1 inline-flex size-5 items-center justify-center rounded-full text-muted-foreground opacity-70 transition-colors hover:bg-background/80 hover:text-foreground"
+                            title="Remove annotations"
+                            aria-label="Remove PDF annotations"
+                            onClick={() => {
+                              if (activeThread) {
+                                for (const annotation of composerPdfAnnotations) {
+                                  if (annotation.imageId) {
+                                    removeComposerImageFromDraft(annotation.imageId);
+                                  }
+                                }
+                                clearComposerDraftPdfAnnotations(activeThread.id);
+                              }
+                              scheduleComposerFocus();
+                            }}
+                          >
+                            <XIcon className="size-3" />
+                          </button>
+                        </div>
+                        <PopoverPopup
+                          align="start"
+                          side="top"
+                          className="w-80 max-w-[calc(100vw-2rem)] rounded-xl border border-border/70 bg-popover p-1.5 text-popover-foreground shadow-xl/20"
+                        >
+                          <div className="max-h-72 overflow-auto">
+                            {composerPdfAnnotations.map((annotation, index) => (
+                              <div
+                                key={annotation.id}
+                                className="group/annotation flex items-start gap-2 rounded-lg px-2 py-2"
+                              >
+                                <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center overflow-hidden rounded border border-border/70 bg-background">
+                                  {annotation.capture.screenshotDataUrl ? (
+                                    <img
+                                      src={annotation.capture.screenshotDataUrl}
+                                      alt=""
+                                      className="h-full w-full object-cover"
+                                    />
+                                  ) : (
+                                    <MessageSquareIcon className="size-4 text-muted-foreground" />
+                                  )}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                                      {index + 1}
+                                    </span>
+                                    <span className="truncate text-xs font-medium">
+                                      {annotation.label}
+                                    </span>
+                                  </div>
+                                  <div className="mt-0.5 text-xs text-muted-foreground">
+                                    Selected region attached
+                                  </div>
+                                </div>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="icon-xs"
+                                  className="size-6 rounded-full opacity-60 transition-opacity group-hover/annotation:opacity-100"
+                                  onClick={() => {
+                                    if (activeThread) {
+                                      removeComposerDraftPdfAnnotation(activeThread.id, annotation.id);
+                                      if (annotation.imageId) {
+                                        removeComposerImageFromDraft(annotation.imageId);
+                                      }
+                                    }
+                                    scheduleComposerFocus();
+                                  }}
+                                  aria-label={`Remove annotation ${index + 1}`}
+                                >
+                                  <XIcon className="size-3" />
+                                </Button>
+                              </div>
+                            ))}
+                          </div>
+                        </PopoverPopup>
+                      </Popover>
+                    ) : null}
                     {selectedComposerShortcuts.map((shortcut) => (
                       <button
                         type="button"
@@ -6399,20 +6792,71 @@ export default function ChatView({
                 ) : null}
                 {!isComposerApprovalState &&
                   effectivePendingUserInputs.length === 0 &&
-                  composerImages.length > 0 && (
+                  visibleComposerImages.length > 0 && (
                     <div className="mb-2.5 flex flex-wrap gap-1.5">
-                      {composerImages.map((image) => (
-                        <div
-                          key={image.id}
-                          className="relative h-14 w-14 overflow-hidden rounded-md border border-border/50 bg-background"
-                        >
-                          {image.type === "image" && image.previewUrl ? (
+                      {visibleComposerImages.map((image) =>
+                        image.type === "pdf" ? (
+                          <div
+                            key={image.id}
+                            className="group relative flex h-14 w-56 max-w-full items-center gap-2 rounded-lg border border-border/70 bg-muted/25 px-2.5 pr-8 shadow-sm"
+                          >
+                            <div className="flex size-8 shrink-0 items-center justify-center rounded-md bg-red-500 text-white">
+                              <FileTextIcon className="size-4" />
+                            </div>
+                            <div className="min-w-0">
+                              <div className="truncate text-sm font-semibold text-foreground">
+                                {image.name}
+                              </div>
+                              <div className="mt-0.5 text-xs font-medium text-muted-foreground">
+                                PDF
+                              </div>
+                            </div>
+                            {nonPersistedComposerImageIdSet.has(image.id) && (
+                              <Tooltip>
+                                <TooltipTrigger
+                                  render={
+                                    <span
+                                      role="img"
+                                      aria-label="Draft attachment may not persist"
+                                      className="absolute left-1 top-1 inline-flex items-center justify-center rounded bg-background/85 p-0.5 text-amber-600"
+                                    >
+                                      <CircleAlertIcon className="size-3" />
+                                    </span>
+                                  }
+                                />
+                                <TooltipPopup
+                                  side="top"
+                                  className="max-w-64 whitespace-normal leading-tight"
+                                >
+                                  Draft attachment could not be saved locally and may be lost on
+                                  navigation.
+                                </TooltipPopup>
+                              </Tooltip>
+                            )}
+                            <Button
+                              variant="ghost"
+                              size="icon-xs"
+                              className="absolute right-1.5 top-1.5 size-5 rounded-full bg-background/80 opacity-90 hover:bg-background"
+                              onClick={() => removeComposerImage(image.id)}
+                              aria-label={`Remove ${image.name}`}
+                            >
+                              <XIcon className="size-3" />
+                            </Button>
+                          </div>
+                        ) : (
+                          <div
+                            key={image.id}
+                            className="relative h-14 w-14 overflow-hidden rounded-md border border-border/50 bg-background"
+                          >
                             <button
                               type="button"
                               className="h-full w-full cursor-zoom-in"
                               aria-label={`Preview ${image.name}`}
                               onClick={() => {
-                                const preview = buildExpandedImagePreview(composerImages, image.id);
+                                const preview = buildExpandedImagePreview(
+                                  visibleComposerImages,
+                                  image.id,
+                                );
                                 if (!preview) return;
                                 setExpandedImage(preview);
                               }}
@@ -6423,53 +6867,40 @@ export default function ChatView({
                                 className="h-full w-full object-cover"
                               />
                             </button>
-                          ) : (
-                            <div className="flex h-full w-full flex-col items-center justify-center gap-0.5 px-1 text-center text-[10px] text-muted-foreground/70">
-                              {image.type === "pdf" ? (
-                                <>
-                                  <span className="font-medium uppercase tracking-wide text-foreground/75">
-                                    PDF
-                                  </span>
-                                  <span className="line-clamp-2">{image.name}</span>
-                                </>
-                              ) : (
-                                image.name
-                              )}
-                            </div>
-                          )}
-                          {nonPersistedComposerImageIdSet.has(image.id) && (
-                            <Tooltip>
-                              <TooltipTrigger
-                                render={
-                                  <span
-                                    role="img"
-                                    aria-label="Draft attachment may not persist"
-                                    className="absolute left-1 top-1 inline-flex items-center justify-center rounded bg-background/85 p-0.5 text-amber-600"
-                                  >
-                                    <CircleAlertIcon className="size-3" />
-                                  </span>
-                                }
-                              />
-                              <TooltipPopup
-                                side="top"
-                                className="max-w-64 whitespace-normal leading-tight"
-                              >
-                                Draft attachment could not be saved locally and may be lost on
-                                navigation.
-                              </TooltipPopup>
-                            </Tooltip>
-                          )}
-                          <Button
-                            variant="ghost"
-                            size="icon-xs"
-                            className="absolute right-1 top-1 bg-background/80 hover:bg-background/90"
-                            onClick={() => removeComposerImage(image.id)}
-                            aria-label={`Remove ${image.name}`}
-                          >
-                            <XIcon />
-                          </Button>
-                        </div>
-                      ))}
+                            {nonPersistedComposerImageIdSet.has(image.id) && (
+                              <Tooltip>
+                                <TooltipTrigger
+                                  render={
+                                    <span
+                                      role="img"
+                                      aria-label="Draft attachment may not persist"
+                                      className="absolute left-1 top-1 inline-flex items-center justify-center rounded bg-background/85 p-0.5 text-amber-600"
+                                    >
+                                      <CircleAlertIcon className="size-3" />
+                                    </span>
+                                  }
+                                />
+                                <TooltipPopup
+                                  side="top"
+                                  className="max-w-64 whitespace-normal leading-tight"
+                                >
+                                  Draft attachment could not be saved locally and may be lost on
+                                  navigation.
+                                </TooltipPopup>
+                              </Tooltip>
+                            )}
+                            <Button
+                              variant="ghost"
+                              size="icon-xs"
+                              className="absolute right-1 top-1 bg-background/80 hover:bg-background/90"
+                              onClick={() => removeComposerImage(image.id)}
+                              aria-label={`Remove ${image.name}`}
+                            >
+                              <XIcon />
+                            </Button>
+                          </div>
+                        ),
+                      )}
                     </div>
                   )}
                 <ComposerPromptEditor
@@ -6897,6 +7328,10 @@ interface ThreadContextPanelProps {
     path: string,
     options?: { cwd?: string | undefined; displayName?: string | undefined },
   ) => void;
+  onOpenBrowserPreview: (
+    path: string,
+    options?: { cwd?: string | undefined; displayName?: string | undefined },
+  ) => void;
   onOpenChanges: () => void;
 }
 
@@ -6962,8 +7397,10 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
   homeDirectory,
   activeThreadId,
   onOpenFilePath,
+  onOpenBrowserPreview,
   onOpenChanges,
 }: ThreadContextPanelProps) {
+  const queryClient = useQueryClient();
   const [pinned, setPinned] = useState(() => {
     if (typeof window === "undefined") {
       return true;
@@ -6977,6 +7414,10 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
     readThreadContextPanelPreference(THREAD_CONTEXT_PANEL_SOURCES_COLLAPSED_KEY, false),
   );
   const { data: gitStatus = null } = useQuery(gitStatusQueryOptions(gitCwd));
+  const { data: branchList = null } = useQuery(gitBranchesQueryOptions(gitCwd));
+  const checkoutBranchMutation = useMutation(
+    gitCheckoutMutationOptions({ cwd: gitCwd, queryClient }),
+  );
   const progressItems = useMemo(() => collectThreadContextProgress(thread), [thread]);
   const artifacts = useMemo(
     () => collectThreadContextArtifacts({ thread, homeDirectory }),
@@ -6986,6 +7427,38 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
   const hasGitContext = gitCwd !== null;
   const hasChanges =
     (gitStatus?.workingTree.insertions ?? 0) > 0 || (gitStatus?.workingTree.deletions ?? 0) > 0;
+  const visibleBranches = useMemo(
+    () =>
+      (branchList?.branches ?? [])
+        .filter((branch) => !branch.isRemote)
+        .toSorted((left, right) =>
+          left.current === right.current
+            ? left.name.localeCompare(right.name)
+            : left.current
+              ? -1
+              : 1,
+        )
+        .slice(0, 6),
+    [branchList?.branches],
+  );
+  const checkoutBranch = useCallback(
+    (branch: string) => {
+      if (checkoutBranchMutation.isPending) {
+        return;
+      }
+      checkoutBranchMutation.mutate(branch, {
+        onError: (error) => {
+          toastManager.add({
+            type: "error",
+            title: "Branch checkout failed",
+            description:
+              error instanceof Error ? error.message : "Unable to switch to that branch.",
+          });
+        },
+      });
+    },
+    [checkoutBranchMutation],
+  );
 
   const togglePinned = useCallback(() => {
     setPinned((current) => {
@@ -7113,6 +7586,34 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
               </div>
             </div>
 
+            {visibleBranches.length > 0 ? (
+              <div className="space-y-1 px-1.5 py-1">
+                <p className="text-xs font-medium text-muted-foreground/80">Branches</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {visibleBranches.map((branch) => (
+                    <Toggle
+                      key={branch.name}
+                      size="sm"
+                      variant="outline"
+                      pressed={branch.current}
+                      disabled={branch.current || checkoutBranchMutation.isPending}
+                      onPressedChange={(pressed) => {
+                        if (pressed) {
+                          checkoutBranch(branch.name);
+                        }
+                      }}
+                      title={
+                        branch.current ? `${branch.name} is checked out` : `Checkout ${branch.name}`
+                      }
+                      className="h-7 max-w-full min-w-0 px-2 text-xs"
+                    >
+                      <span className="max-w-40 truncate">{branch.name}</span>
+                    </Toggle>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
             <Separator className="my-2 bg-border/60" />
           </>
         ) : null}
@@ -7131,10 +7632,15 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
               className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left transition-colors hover:bg-muted/45"
               title={artifact.path}
               onClick={() =>
-                onOpenFilePath(artifact.path, {
-                  cwd: artifact.cwd ?? workspaceCwd ?? undefined,
-                  displayName: artifact.label,
-                })
+                isBrowserPreviewArtifactPath(artifact.path)
+                  ? onOpenBrowserPreview(artifact.path, {
+                      cwd: artifact.cwd ?? workspaceCwd ?? undefined,
+                      displayName: artifact.label,
+                    })
+                  : onOpenFilePath(artifact.path, {
+                      cwd: artifact.cwd ?? workspaceCwd ?? undefined,
+                      displayName: artifact.label,
+                    })
               }
             >
               {extensionOf(artifact.path) === "png" ||
@@ -8799,7 +9305,7 @@ const OpenCodeTraitsPicker = memo(function OpenCodeTraitsPicker(props: {
         {props.variantOptions.length > 0 ? (
           <>
             <MenuGroup>
-              <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Variant</div>
+              <div className="px-2 py-1.5 font-medium text-muted-foreground text-xs">Reasoning</div>
               <MenuRadioGroup
                 value={
                   props.selectedVariant ??

@@ -235,9 +235,27 @@ function buildMacLauncher(electronBinaryPath) {
   return targetBinaryPath;
 }
 
+function resolveElectronBinaryPath(require) {
+  try {
+    return require("electron");
+  } catch (error) {
+    if (process.platform !== "win32") {
+      throw error;
+    }
+
+    const electronPackagePath = require.resolve("electron/package.json");
+    const electronBinaryPath = join(dirname(electronPackagePath), "dist", "electron.exe");
+    if (existsSync(electronBinaryPath)) {
+      return electronBinaryPath;
+    }
+
+    throw error;
+  }
+}
+
 export function resolveElectronPath() {
   const require = createRequire(import.meta.url);
-  const electronBinaryPath = require("electron");
+  const electronBinaryPath = resolveElectronBinaryPath(require);
 
   if (process.platform === "win32") {
     if (isDevelopment) {

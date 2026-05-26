@@ -59,6 +59,16 @@ interface CodexSessionContext {
   pendingUserInputs: Map<ApprovalRequestId, PendingUserInputRequest>;
 }
 
+interface CodexPrewarmedSessionContext {
+  readonly threadId: ThreadId;
+  readonly cwd: string;
+  readonly transport: CodexAppServerTransport;
+  account: CodexAccountSnapshot;
+  status: "warming" | "ready";
+  readyPromise: Promise<void>;
+  detachListeners: () => void;
+}
+
 type CodexPlanType =
   | "free"
   | "go"
@@ -95,6 +105,12 @@ export interface CodexAppServerStartSessionInput {
   readonly resumeCursor?: unknown;
   readonly providerOptions?: ProviderSessionStartInput["providerOptions"];
   readonly runtimeMode: RuntimeMode;
+}
+
+export interface CodexAppServerPrewarmSessionResult {
+  readonly threadId: ThreadId;
+  readonly provider: "codex";
+  readonly status: "warming" | "ready" | "active";
 }
 
 export interface CodexThreadTurnSnapshot {
@@ -536,11 +552,66 @@ export interface CodexAppServerManagerEvents {
 
 export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEvents> {
   private readonly sessions = new Map<ThreadId, CodexSessionContext>();
+  private readonly prewarmedSessions = new Map<ThreadId, CodexPrewarmedSessionContext>();
 
   private runPromise: (effect: Effect.Effect<unknown, never>) => Promise<unknown>;
   constructor(services?: ServiceMap.ServiceMap<never>) {
     super();
     this.runPromise = services ? Effect.runPromiseWith(services) : Effect.runPromise;
+  }
+
+  prewarmSession(input: CodexAppServerStartSessionInput): CodexAppServerPrewarmSessionResult {
+    const threadId = input.threadId;
+    if (this.sessions.has(threadId)) {
+      return {
+        threadId,
+        provider: "codex",
+        status: "active",
+      };
+    }
+
+    const existing = this.prewarmedSessions.get(threadId);
+    if (existing) {
+      return {
+        threadId,
+        provider: "codex",
+        status: existing.status,
+      };
+    }
+
+    const resolvedCwd = input.cwd ?? process.cwd();
+    const codexOptions = readCodexProviderOptions(input);
+    const transport = this.createTransport({
+      cwd: resolvedCwd,
+      codexOptions,
+    });
+    const entry: CodexPrewarmedSessionContext = {
+      threadId,
+      cwd: resolvedCwd,
+      transport,
+      account: {
+        type: "unknown",
+        planType: null,
+        sparkEnabled: true,
+      },
+      status: "warming",
+      readyPromise: Promise.resolve(),
+      detachListeners: () => undefined,
+    };
+    entry.detachListeners = this.attachPrewarmListeners(entry);
+    entry.readyPromise = this.initializePrewarmedSession(entry);
+    this.prewarmedSessions.set(threadId, entry);
+    void entry.readyPromise.catch(() => undefined);
+
+    return {
+      threadId,
+      provider: "codex",
+      status: "warming",
+    };
+  }
+
+  hasPrewarmedSession(threadId: ThreadId): boolean {
+    return this.prewarmedSessions.has(threadId);
   }
 
   async startSession(input: CodexAppServerStartSessionInput): Promise<ProviderSession> {
@@ -563,22 +634,42 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       };
 
       const codexOptions = readCodexProviderOptions(input);
-      const transport = new CodexAppServerTransport({
+      const prewarmed = this.consumePrewarmedSession(threadId);
+      let transport: CodexAppServerTransport | undefined;
+      let account: CodexAccountSnapshot = {
+        type: "unknown",
+        planType: null,
+        sparkEnabled: true,
+      };
+      let adoptedPrewarmedTransport = false;
+
+      if (prewarmed) {
+        try {
+          await prewarmed.readyPromise;
+          prewarmed.detachListeners();
+          transport = prewarmed.transport;
+          account = prewarmed.account;
+          adoptedPrewarmedTransport = true;
+        } catch (error) {
+          prewarmed.detachListeners();
+          prewarmed.transport.close();
+          await Effect.logWarning("codex app-server prewarm adoption failed", {
+            threadId,
+            requestedCwd: resolvedCwd,
+            prewarmedCwd: prewarmed.cwd,
+            cause: error instanceof Error ? error.message : String(error),
+          }).pipe(this.runPromise);
+        }
+      }
+
+      transport ??= this.createTransport({
         cwd: resolvedCwd,
-        ...(codexOptions.binaryPath ? { binaryPath: codexOptions.binaryPath } : {}),
-        ...(codexOptions.homePath ? { homePath: codexOptions.homePath } : {}),
-        env: {
-          T3CODE_BROWSER_USE_CLIENT_PATH: resolveBrowserUseClientPath(),
-        },
+        codexOptions,
       });
 
       context = {
         session,
-        account: {
-          type: "unknown",
-          planType: null,
-          sparkEnabled: true,
-        },
+        account,
         transport,
         pendingApprovals: new Map(),
         pendingUserInputs: new Map(),
@@ -587,28 +678,16 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
       this.sessions.set(threadId, context);
       this.attachProcessListeners(context);
 
-      this.emitLifecycleEvent(context, "session/connecting", "Starting codex app-server");
+      this.emitLifecycleEvent(
+        context,
+        "session/connecting",
+        adoptedPrewarmedTransport
+          ? "Using prewarmed codex app-server"
+          : "Starting codex app-server",
+      );
 
-      await this.sendRequest(context, "initialize", buildCodexInitializeParams());
-
-      context.transport.notify("initialized");
-      try {
-        const modelListResponse = await this.sendRequest(context, "model/list", {});
-        console.log("codex model/list response", readCodexModelList(modelListResponse));
-      } catch (error) {
-        console.log("codex model/list failed", error);
-      }
-      try {
-        const accountReadResponse = await this.sendRequest(context, "account/read", {});
-        console.log("codex account/read response", accountReadResponse);
-        context.account = readCodexAccountSnapshot(accountReadResponse);
-        console.log("codex subscription status", {
-          type: context.account.type,
-          planType: context.account.planType,
-          sparkEnabled: context.account.sparkEnabled,
-        });
-      } catch (error) {
-        console.log("codex account/read failed", error);
+      if (!adoptedPrewarmedTransport) {
+        context.account = await this.initializeTransport(context.transport);
       }
 
       const normalizedModel = resolveCodexModelForAccount(
@@ -1150,6 +1229,13 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
   }
 
   stopSession(threadId: ThreadId): void {
+    const prewarmed = this.prewarmedSessions.get(threadId);
+    if (prewarmed) {
+      this.prewarmedSessions.delete(threadId);
+      prewarmed.detachListeners();
+      prewarmed.transport.close();
+    }
+
     const context = this.sessions.get(threadId);
     if (!context) {
       return;
@@ -1181,6 +1267,11 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
     for (const threadId of this.sessions.keys()) {
       this.stopSession(threadId);
     }
+    for (const entry of this.prewarmedSessions.values()) {
+      entry.detachListeners();
+      entry.transport.close();
+    }
+    this.prewarmedSessions.clear();
   }
 
   private requireSession(threadId: ThreadId): CodexSessionContext {
@@ -1379,6 +1470,141 @@ export class CodexAppServerManager extends EventEmitter<CodexAppServerManagerEve
         message: `Unsupported server request: ${request.method}`,
       },
     });
+  }
+
+  private createTransport(input: {
+    readonly cwd: string;
+    readonly codexOptions: ReturnType<typeof readCodexProviderOptions>;
+  }): CodexAppServerTransport {
+    return new CodexAppServerTransport({
+      cwd: input.cwd,
+      ...(input.codexOptions.binaryPath ? { binaryPath: input.codexOptions.binaryPath } : {}),
+      ...(input.codexOptions.homePath ? { homePath: input.codexOptions.homePath } : {}),
+      env: {
+        T3CODE_BROWSER_USE_CLIENT_PATH: resolveBrowserUseClientPath(),
+      },
+    });
+  }
+
+  private async initializeTransport(transport: CodexAppServerTransport): Promise<CodexAccountSnapshot> {
+    await transport.request("initialize", buildCodexInitializeParams());
+    transport.notify("initialized");
+
+    try {
+      const modelListResponse = await transport.request("model/list", {});
+      console.log("codex model/list response", readCodexModelList(modelListResponse));
+    } catch (error) {
+      console.log("codex model/list failed", error);
+    }
+
+    try {
+      const accountReadResponse = await transport.request("account/read", {});
+      console.log("codex account/read response", accountReadResponse);
+      const account = readCodexAccountSnapshot(accountReadResponse);
+      console.log("codex subscription status", {
+        type: account.type,
+        planType: account.planType,
+        sparkEnabled: account.sparkEnabled,
+      });
+      return account;
+    } catch (error) {
+      console.log("codex account/read failed", error);
+      return {
+        type: "unknown",
+        planType: null,
+        sparkEnabled: true,
+      };
+    }
+  }
+
+  private attachPrewarmListeners(entry: CodexPrewarmedSessionContext): () => void {
+    const onError = (error: Error) => {
+      this.prewarmedSessions.delete(entry.threadId);
+      void Effect.logWarning("codex app-server prewarm error", {
+        threadId: entry.threadId,
+        cwd: entry.cwd,
+        cause: error.message,
+      }).pipe(this.runPromise);
+    };
+    const onExit = (details: {
+      code: number | null;
+      signal: NodeJS.Signals | null;
+      expected: boolean;
+    }) => {
+      this.prewarmedSessions.delete(entry.threadId);
+      if (details.expected) {
+        return;
+      }
+      void Effect.logWarning("codex app-server prewarm exited", {
+        threadId: entry.threadId,
+        cwd: entry.cwd,
+        code: details.code,
+        signal: details.signal,
+      }).pipe(this.runPromise);
+    };
+    const onRequest = (request: JsonRpcRequest) => {
+      entry.transport.respond(request.id, {
+        error: {
+          code: -32601,
+          message: `Unsupported server request during prewarm: ${request.method}`,
+        },
+      });
+    };
+    const onStderr = (line: string) => {
+      const classified = classifyCodexStderrLine(line);
+      if (!classified) {
+        return;
+      }
+      void Effect.logWarning("codex app-server prewarm stderr", {
+        threadId: entry.threadId,
+        cwd: entry.cwd,
+        message: classified.message,
+      }).pipe(this.runPromise);
+    };
+
+    entry.transport.on("error", onError);
+    entry.transport.on("exit", onExit);
+    entry.transport.on("notification", noopListener);
+    entry.transport.on("request", onRequest);
+    entry.transport.on("stderr", onStderr);
+
+    return () => {
+      entry.transport.off("error", onError);
+      entry.transport.off("exit", onExit);
+      entry.transport.off("notification", noopListener);
+      entry.transport.off("request", onRequest);
+      entry.transport.off("stderr", onStderr);
+    };
+  }
+
+  private async initializePrewarmedSession(entry: CodexPrewarmedSessionContext): Promise<void> {
+    try {
+      entry.account = await this.initializeTransport(entry.transport);
+      entry.status = "ready";
+      await Effect.logInfo("codex app-server prewarm ready", {
+        threadId: entry.threadId,
+        cwd: entry.cwd,
+      }).pipe(this.runPromise);
+    } catch (error) {
+      this.prewarmedSessions.delete(entry.threadId);
+      entry.detachListeners();
+      entry.transport.close();
+      await Effect.logWarning("codex app-server prewarm failed", {
+        threadId: entry.threadId,
+        cwd: entry.cwd,
+        cause: error instanceof Error ? error.message : String(error),
+      }).pipe(this.runPromise);
+      throw error;
+    }
+  }
+
+  private consumePrewarmedSession(threadId: ThreadId): CodexPrewarmedSessionContext | undefined {
+    const entry = this.prewarmedSessions.get(threadId);
+    if (!entry) {
+      return undefined;
+    }
+    this.prewarmedSessions.delete(threadId);
+    return entry;
   }
 
   private async sendRequest<TResponse>(

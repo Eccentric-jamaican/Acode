@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, utimesSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -134,5 +134,26 @@ describe("computer use icon cache", () => {
     expect(persisted).toBeNull();
     const paths = resolveComputerUseAppIconCachePaths({ cacheKey, stateDir });
     expect(paths.missPath.endsWith(".miss")).toBe(true);
+  });
+
+  it("expires stale negative cache entries so icons can be retried", async () => {
+    const stateDir = makeTempDir("t3-computer-icon-cache-");
+    const cacheKey = JSON.stringify({
+      launchId: "missing-app",
+      name: "missing-app",
+      pid: 0,
+    });
+
+    await writePersistedComputerUseAppIcon({
+      cacheKey,
+      bytes: null,
+      stateDir,
+    });
+
+    const paths = resolveComputerUseAppIconCachePaths({ cacheKey, stateDir });
+    const staleDate = new Date(Date.now() - 7 * 60 * 60 * 1_000);
+    utimesSync(paths.missPath, staleDate, staleDate);
+
+    await expect(readPersistedComputerUseAppIcon({ cacheKey, stateDir })).resolves.toBeUndefined();
   });
 });

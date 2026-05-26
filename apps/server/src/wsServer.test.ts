@@ -216,6 +216,7 @@ const unusedProviderEffect = <T>() =>
 
 const defaultProviderService: ProviderServiceShape = {
   startSession: () => unusedProviderEffect(),
+  prewarmSession: () => unusedProviderEffect(),
   sendTurn: () => unusedProviderEffect(),
   interruptTurn: () => unusedProviderEffect(),
   respondToRequest: () => unusedProviderEffect(),
@@ -1505,6 +1506,7 @@ describe("WebSocket Server", () => {
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
         }),
+      prewarmSession: () => unsupported(),
       sendTurn: ({ threadId }) =>
         Effect.succeed({
           threadId,

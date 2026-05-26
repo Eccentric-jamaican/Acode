@@ -43,6 +43,7 @@ export interface ChatImageAttachment {
   mimeType: string;
   sizeBytes: number;
   previewUrl?: string;
+  source?: "pdf-annotation" | undefined;
 }
 
 export interface ChatPdfAttachment {
