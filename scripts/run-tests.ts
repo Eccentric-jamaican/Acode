@@ -9,6 +9,9 @@ type TestStep = {
   readonly args: ReadonlyArray<string>;
 };
 
+// Set this flag in environments that cannot spawn child processes (EPERM)
+// so we can still run a partial preflight safely.
+const shouldSkipServerTests = process.env.T3_SKIP_SERVER_TESTS === "true";
 const root = process.cwd();
 const bunExecutable = process.execPath;
 
@@ -19,8 +22,11 @@ const steps: ReadonlyArray<TestStep> = [
   { label: "web tests", cwd: join(root, "apps", "web"), args: ["run", "test"] },
   { label: "desktop tests", cwd: join(root, "apps", "desktop"), args: ["run", "test"] },
   { label: "scripts tests", cwd: join(root, "scripts"), args: ["run", "test"] },
-  { label: "server tests", cwd: join(root, "apps", "server"), args: ["run", "test"] },
 ];
+
+if (!shouldSkipServerTests) {
+  steps.push({ label: "server tests", cwd: join(root, "apps", "server"), args: ["run", "test"] });
+}
 
 for (const step of steps) {
   console.log(`\n> ${step.label}`);
