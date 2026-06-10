@@ -40,6 +40,7 @@ import Migration0034 from "./Migrations/034_LegacyProjectionSchemaRepair.ts";
 import Migration0035 from "./Migrations/035_RemoteAccessAuth.ts";
 import Migration0036 from "./Migrations/036_RemoteAccessDpop.ts";
 import Migration0037 from "./Migrations/037_ProjectionTurnsLatestLookup.ts";
+import Migration0038 from "./Migrations/038_LegacyRuntimeModeRepair.ts";
 import { Effect } from "effect";
 
 /**
@@ -81,6 +82,7 @@ const loader = Migrator.fromRecord({
   "35_RemoteAccessAuth": Migration0035,
   "36_RemoteAccessDpop": Migration0036,
   "37_ProjectionTurnsLatestLookup": Migration0037,
+  "38_LegacyRuntimeModeRepair": Migration0038,
 });
 
 /**
