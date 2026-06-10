@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import type { ProviderKind } from "./orchestration";
 
 export const CODEX_REASONING_EFFORT_OPTIONS = ["xhigh", "high", "medium", "low"] as const;
@@ -250,8 +250,18 @@ export const MODEL_OPTIONS_BY_PROVIDER = {
   ],
   claudeAgent: [
     {
-      slug: "claude-opus-4-6",
-      name: "Claude Opus 4.6",
+      slug: "claude-fable-5",
+      name: "Claude Fable 5",
+      capabilities: {
+        reasoningEffortLevels: [],
+        supportsFastMode: false,
+        supportsThinkingToggle: false,
+        promptInjectedEffortLevels: [],
+      },
+    },
+    {
+      slug: "claude-opus-4-8",
+      name: "Claude Opus 4.8",
       capabilities: {
         reasoningEffortLevels: [
           { value: "low", label: "Low" },
@@ -324,13 +334,25 @@ export const MODEL_SLUG_ALIASES_BY_PROVIDER: Record<ProviderKind, Record<string,
   },
   claudeAgent: {
     default: "claude-sonnet-4-6",
-    opus: "claude-opus-4-6",
-    "opus-4.6": "claude-opus-4-6",
-    "claude-opus-4.6": "claude-opus-4-6",
-    "claude-opus-4-6-20251117": "claude-opus-4-6",
+    fable: "claude-fable-5",
+    "fable-5": "claude-fable-5",
+    "claude-fable-5-latest": "claude-fable-5",
+    opus: "claude-opus-4-8",
+    "opus-4.8": "claude-opus-4-8",
+    "claude-opus-4.8": "claude-opus-4-8",
+    "claude-opus-4-8-latest": "claude-opus-4-8",
+    "opus-4.7": "claude-opus-4-8",
+    "claude-opus-4.7": "claude-opus-4-8",
+    "claude-opus-4-7": "claude-opus-4-8",
+    "claude-opus-4-7-latest": "claude-opus-4-8",
+    "opus-4.6": "claude-opus-4-8",
+    "claude-opus-4.6": "claude-opus-4-8",
+    "claude-opus-4-6": "claude-opus-4-8",
+    "claude-opus-4-6-20251117": "claude-opus-4-8",
     sonnet: "claude-sonnet-4-6",
     "sonnet-4.6": "claude-sonnet-4-6",
     "claude-sonnet-4.6": "claude-sonnet-4-6",
+    "claude-sonnet-4-6-latest": "claude-sonnet-4-6",
     "claude-sonnet-4-6-20251117": "claude-sonnet-4-6",
     haiku: "claude-haiku-4-5",
     "haiku-4.5": "claude-haiku-4-5",

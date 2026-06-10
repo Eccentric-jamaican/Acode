@@ -96,6 +96,27 @@ function extractActivityRequestId(payload: unknown): ApprovalRequestId | null {
   return typeof requestId === "string" ? ApprovalRequestId.makeUnsafe(requestId) : null;
 }
 
+function extractActivityDetail(payload: unknown): string | null {
+  if (typeof payload !== "object" || payload === null) {
+    return null;
+  }
+  const detail = (payload as Record<string, unknown>).detail;
+  return typeof detail === "string" ? detail : null;
+}
+
+function isTerminalUserInputResponseFailure(input: {
+  readonly kind: string;
+  readonly detail: string | null;
+}): boolean {
+  return (
+    input.kind === "provider.user-input.respond.failed" &&
+    input.detail !== null &&
+    (input.detail.includes("Unknown pending") ||
+      input.detail.includes('Expected a string starting with "que"') ||
+      input.detail.includes('Expected a string starting with \\"que\\"'))
+  );
+}
+
 function retainProjectionMessagesAfterRevert(
   messages: ReadonlyArray<ProjectionThreadMessage>,
   turns: ReadonlyArray<ProjectionTurn>,
@@ -1187,10 +1208,19 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
           if (requestId === null) {
             return;
           }
+          const activityKind = event.payload.activity.kind;
+          const activityDetail = extractActivityDetail(event.payload.activity.payload);
           const existingRow = yield* projectionPendingApprovalRepository.getByRequestId({
             requestId,
           });
-          if (event.payload.activity.kind === "approval.resolved") {
+          if (
+            activityKind === "approval.resolved" ||
+            activityKind === "user-input.resolved" ||
+            isTerminalUserInputResponseFailure({
+              kind: activityKind,
+              detail: activityDetail,
+            })
+          ) {
             const resolvedDecisionRaw =
               typeof event.payload.activity.payload === "object" &&
               event.payload.activity.payload !== null &&
@@ -1222,6 +1252,9 @@ const makeOrchestrationProjectionPipeline = Effect.gen(function* () {
             return;
           }
           if (Option.isSome(existingRow) && existingRow.value.status === "resolved") {
+            return;
+          }
+          if (activityKind !== "approval.requested" && activityKind !== "user-input.requested") {
             return;
           }
           yield* projectionPendingApprovalRepository.upsert({

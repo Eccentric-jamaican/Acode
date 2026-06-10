@@ -189,11 +189,47 @@ describe("store pure functions", () => {
 });
 
 describe("store read model sync", () => {
+  it("preserves Claude models without an active session", () => {
+    const initialState = makeState(makeThread());
+    const readModel = makeReadModel(
+      makeReadModelThread({
+        model: "claude-fable-5",
+      }),
+    );
+
+    const next = syncServerReadModel(initialState, readModel);
+
+    expect(next.threads[0]?.model).toBe("claude-fable-5");
+  });
+
+  it("maps legacy Claude session providers to Claude instead of Codex", () => {
+    const initialState = makeState(makeThread());
+    const readModel = makeReadModel(
+      makeReadModelThread({
+        model: "claude-sonnet-4-6",
+        session: {
+          threadId: ThreadId.makeUnsafe("thread-1"),
+          providerName: "claudeAgent",
+          status: "ready",
+          runtimeMode: DEFAULT_RUNTIME_MODE,
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: "2026-02-27T00:00:00.000Z",
+        },
+      }),
+    );
+
+    const next = syncServerReadModel(initialState, readModel);
+
+    expect(next.threads[0]?.session?.provider).toBe("claudeAgent");
+    expect(next.threads[0]?.model).toBe("claude-sonnet-4-6");
+  });
+
   it("falls back to the codex default for unsupported provider models without an active session", () => {
     const initialState = makeState(makeThread());
     const readModel = makeReadModel(
       makeReadModelThread({
-        model: "claude-opus-4-6",
+        model: "unknown-model",
       }),
     );
 

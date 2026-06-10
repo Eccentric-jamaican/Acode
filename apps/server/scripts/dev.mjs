@@ -11,11 +11,13 @@ const command =
         file: "cmd.exe",
         args: watchDesktopServer
           ? ["/d", "/s", "/c", "bun x tsdown --watch --no-clean"]
-          : ["/d", "/s", "/c", "bun run src/index.ts"],
+          : ["/d", "/s", "/c", "node --import tsx src/index.ts"],
       }
     : {
-        file: "bun",
-        args: watchDesktopServer ? ["x", "tsdown", "--watch", "--no-clean"] : ["run", "src/index.ts"],
+        file: watchDesktopServer ? "bun" : "node",
+        args: watchDesktopServer
+          ? ["x", "tsdown", "--watch", "--no-clean"]
+          : ["--import", "tsx", "src/index.ts"],
       };
 
 const child = spawn(command.file, command.args, {

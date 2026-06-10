@@ -37,6 +37,9 @@ import Migration0031 from "./Migrations/031_ProjectionThreadsArchivedAt.ts";
 import Migration0032 from "./Migrations/032_CanonicalChatsProject.ts";
 import Migration0033 from "./Migrations/033_LegacyModelSelectionEvents.ts";
 import Migration0034 from "./Migrations/034_LegacyProjectionSchemaRepair.ts";
+import Migration0035 from "./Migrations/035_RemoteAccessAuth.ts";
+import Migration0036 from "./Migrations/036_RemoteAccessDpop.ts";
+import Migration0037 from "./Migrations/037_ProjectionTurnsLatestLookup.ts";
 import { Effect } from "effect";
 
 /**
@@ -75,6 +78,9 @@ const loader = Migrator.fromRecord({
   "32_CanonicalChatsProject": Migration0032,
   "33_LegacyModelSelectionEvents": Migration0033,
   "34_LegacyProjectionSchemaRepair": Migration0034,
+  "35_RemoteAccessAuth": Migration0035,
+  "36_RemoteAccessDpop": Migration0036,
+  "37_ProjectionTurnsLatestLookup": Migration0037,
 });
 
 /**

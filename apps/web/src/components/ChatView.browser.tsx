@@ -133,6 +133,8 @@ function createBaseServerConfig(): ServerConfig {
     ],
     providerAccounts: [],
     availableEditors: [],
+    serverPort: 0,
+    serverAuthEnabled: false,
   };
 }
 

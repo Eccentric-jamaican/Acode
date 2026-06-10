@@ -1,6 +1,6 @@
 {
   "name": "@t3tools/desktop",
-  "version": "0.2.60",
+  "version": "0.2.61",
   "private": true,
   "main": "dist-electron/bootstrap.js",
   "scripts": {
@@ -10,7 +10,7 @@
     "build": "tsdown",
     "start": "bun run scripts/start-electron.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests",
+    "test": "node ../../scripts/run-vitest.cjs run --passWithNoTests",
     "smoke-test": "node scripts/smoke-test.mjs"
   },
   "dependencies": {

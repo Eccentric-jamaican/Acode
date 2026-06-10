@@ -19,6 +19,13 @@ export interface PendingUserInputProgress {
   canAdvance: boolean;
 }
 
+export function filterLocallyDismissedPendingUserInputs<T extends { readonly requestId: string }>(
+  pendingUserInputs: ReadonlyArray<T>,
+  dismissedRequestIds: Readonly<Record<string, true>>,
+): T[] {
+  return pendingUserInputs.filter((userInput) => !dismissedRequestIds[String(userInput.requestId)]);
+}
+
 function normalizeDraftAnswer(value: string | undefined): string | null {
   if (typeof value !== "string") {
     return null;

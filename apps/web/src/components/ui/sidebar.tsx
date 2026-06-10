@@ -23,7 +23,7 @@ import { useTheme } from "~/hooks/useTheme";
 const SIDEBAR_COOKIE_NAME = "sidebar_state";
 const SIDEBAR_COOKIE_MAX_AGE = 60 * 60 * 24 * 7;
 const SIDEBAR_WIDTH = "16rem";
-const SIDEBAR_WIDTH_MOBILE = "calc(100vw - var(--spacing(3)))";
+const SIDEBAR_WIDTH_MOBILE = "min(20rem, calc(100vw - 3.5rem))";
 const SIDEBAR_WIDTH_ICON = "3rem";
 const SIDEBAR_RESIZE_DEFAULT_MIN_WIDTH = 16 * 16;
 const DESKTOP_LEADING_SLOT_WIDTH = "52px";
@@ -250,7 +250,7 @@ function Sidebar({
         <Sheet onOpenChange={setOpenMobile} open={openMobile} {...props}>
           <SheetPopup
             className={cn(
-              "w-(--sidebar-width) max-w-none bg-sidebar p-0 text-sidebar-foreground",
+              "w-(--sidebar-width) max-w-[calc(100vw-3.5rem)] bg-sidebar p-0 text-sidebar-foreground",
               className,
             )}
             data-mobile="true"

@@ -71,6 +71,7 @@ import type {
   ServerGetSettingsResult,
   ServerLogoutProviderInput,
   ServerLogoutProviderResult,
+  ServerProviderUpdateStatusPayload,
   ServerSuggestNewThreadTasksInput,
   ServerSuggestNewThreadTasksResult,
   ServerPromoteErrorInboxEntryToTaskInput,
@@ -81,6 +82,8 @@ import type {
   ServerSetErrorInboxEntryResolutionResult,
   ServerStartProviderLoginInput,
   ServerStartProviderLoginResult,
+  ServerUpdateProviderInput,
+  ServerUpdateProviderResult,
   ServerUpdateSettingsInput,
   ServerUpdateSettingsResult,
 } from "./server";
@@ -123,6 +126,15 @@ import type {
   ProviderReadPluginResult,
 } from "./providerDiscovery";
 import type { ProviderPrewarmSessionInput, ProviderPrewarmSessionResult } from "./provider";
+import type {
+  RemoteAccessCreatePairingLinkInput,
+  RemoteAccessCreatePairingLinkResult,
+  RemoteAccessRevokeClientInput,
+  RemoteAccessRevokePairingLinkInput,
+  RemoteAccessSetNetworkAccessInput,
+  RemoteAccessSetTailscaleHttpsInput,
+  RemoteAccessSnapshot,
+} from "./remoteAccess";
 
 export interface ContextMenuItem<T extends string = string> {
   id: T;
@@ -361,10 +373,14 @@ export interface NativeApi {
       input: ServerCancelProviderLoginInput,
     ) => Promise<ServerCancelProviderLoginResult>;
     logoutProvider: (input: ServerLogoutProviderInput) => Promise<ServerLogoutProviderResult>;
+    updateProvider: (input: ServerUpdateProviderInput) => Promise<ServerUpdateProviderResult>;
     suggestNewThreadTasks: (
       input: ServerSuggestNewThreadTasksInput,
     ) => Promise<ServerSuggestNewThreadTasksResult>;
     updateSettings: (input: ServerUpdateSettingsInput) => Promise<ServerUpdateSettingsResult>;
+    onProviderUpdateStatus: (
+      callback: (payload: ServerProviderUpdateStatusPayload) => void,
+    ) => () => void;
     onErrorInboxUpdated: (
       callback: (payload: ServerErrorInboxUpdatedPayload) => void,
     ) => () => void;
@@ -373,6 +389,19 @@ export interface NativeApi {
     listApps: () => Promise<ComputerUseListAppsResult>;
     getSettings: () => Promise<ComputerUseSettings>;
     updateSettings: (input: ComputerUseSettingsPatch) => Promise<ComputerUseSettings>;
+  };
+  remoteAccess: {
+    getSnapshot: () => Promise<RemoteAccessSnapshot>;
+    createPairingLink: (
+      input: RemoteAccessCreatePairingLinkInput,
+    ) => Promise<RemoteAccessCreatePairingLinkResult>;
+    revokePairingLink: (input: RemoteAccessRevokePairingLinkInput) => Promise<RemoteAccessSnapshot>;
+    revokeClient: (input: RemoteAccessRevokeClientInput) => Promise<RemoteAccessSnapshot>;
+    revokeOtherClients: () => Promise<RemoteAccessSnapshot>;
+    setNetworkAccess: (input: RemoteAccessSetNetworkAccessInput) => Promise<RemoteAccessSnapshot>;
+    setTailscaleHttps: (
+      input: RemoteAccessSetTailscaleHttpsInput,
+    ) => Promise<RemoteAccessSnapshot>;
   };
   provider: {
     getComposerCapabilities: (

@@ -198,8 +198,7 @@ function deriveSubagentThreadTitleFromAssistantText(text: string | undefined): s
   }
   const truncated = candidate.slice(0, 69).trimEnd();
   const wordBoundary = truncated.lastIndexOf(" ");
-  const collapsed =
-    wordBoundary >= 40 ? truncated.slice(0, wordBoundary).trimEnd() : truncated;
+  const collapsed = wordBoundary >= 40 ? truncated.slice(0, wordBoundary).trimEnd() : truncated;
   return `${collapsed}...`;
 }
 
@@ -240,7 +239,10 @@ function extractSubagentIdentity(
     }
     for (const hint of hints) {
       if (hint.providerThreadId === providerThreadId) {
-        merged.set(providerThreadId, mergeSubagentIdentityHints(merged.get(providerThreadId), hint));
+        merged.set(
+          providerThreadId,
+          mergeSubagentIdentityHints(merged.get(providerThreadId), hint),
+        );
       }
     }
   }
@@ -366,9 +368,9 @@ function runtimeEventToActivities(
               ? "Command approval requested"
               : requestKind === "file-read"
                 ? "File-read approval requested"
-              : requestKind === "file-change"
-                ? "File-change approval requested"
-                : "Approval requested",
+                : requestKind === "file-change"
+                  ? "File-change approval requested"
+                  : "Approval requested",
           payload: {
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),
@@ -444,6 +446,27 @@ function runtimeEventToActivities(
       ];
     }
 
+    case "thread.state.changed": {
+      if (event.payload.state !== "compacted") {
+        return [];
+      }
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: "info",
+          kind: "context.compacted",
+          summary: "Context compacted",
+          payload: {
+            state: event.payload.state,
+            ...(event.payload.detail !== undefined ? { detail: event.payload.detail } : {}),
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
     case "turn.plan.updated": {
       return [
         {
@@ -454,7 +477,9 @@ function runtimeEventToActivities(
           summary: "Plan updated",
           payload: {
             plan: event.payload.plan,
-            ...(event.payload.explanation !== undefined ? { explanation: event.payload.explanation } : {}),
+            ...(event.payload.explanation !== undefined
+              ? { explanation: event.payload.explanation }
+              : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -514,7 +539,9 @@ function runtimeEventToActivities(
           payload: {
             taskId: event.payload.taskId,
             ...(event.payload.taskType ? { taskType: event.payload.taskType } : {}),
-            ...(event.payload.description ? { detail: truncateDetail(event.payload.description) } : {}),
+            ...(event.payload.description
+              ? { detail: truncateDetail(event.payload.description) }
+              : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
           ...maybeSequence,
@@ -679,11 +706,7 @@ const make = Effect.gen(function* () {
     lookup: () => Effect.succeed(""),
   });
 
-  const rememberAssistantMessageId = (
-    threadId: ThreadId,
-    turnId: TurnId,
-    messageId: MessageId,
-  ) =>
+  const rememberAssistantMessageId = (threadId: ThreadId, turnId: TurnId, messageId: MessageId) =>
     Cache.getOption(turnMessageIdsByTurnKey, providerTurnKey(threadId, turnId)).pipe(
       Effect.flatMap((existingIds) =>
         Cache.set(
@@ -701,11 +724,7 @@ const make = Effect.gen(function* () {
       ),
     );
 
-  const forgetAssistantMessageId = (
-    threadId: ThreadId,
-    turnId: TurnId,
-    messageId: MessageId,
-  ) =>
+  const forgetAssistantMessageId = (threadId: ThreadId, turnId: TurnId, messageId: MessageId) =>
     Cache.getOption(turnMessageIdsByTurnKey, providerTurnKey(threadId, turnId)).pipe(
       Effect.flatMap((existingIds) =>
         Option.match(existingIds, {
@@ -770,7 +789,8 @@ const make = Effect.gen(function* () {
         const existing = Option.getOrUndefined(existingEntry);
         return Cache.set(bufferedProposedPlanById, planId, {
           text: `${existing?.text ?? ""}${delta}`,
-          createdAt: existing?.createdAt && existing.createdAt.length > 0 ? existing.createdAt : createdAt,
+          createdAt:
+            existing?.createdAt && existing.createdAt.length > 0 ? existing.createdAt : createdAt,
         });
       }),
     );
@@ -787,7 +807,8 @@ const make = Effect.gen(function* () {
   const clearBufferedProposedPlan = (planId: string) =>
     Cache.invalidate(bufferedProposedPlanById, planId);
 
-  const clearAssistantMessageState = (messageId: MessageId) => clearBufferedAssistantText(messageId);
+  const clearAssistantMessageState = (messageId: MessageId) =>
+    clearBufferedAssistantText(messageId);
 
   const finalizeAssistantMessage = (input: {
     event: ProviderRuntimeEvent;
@@ -964,7 +985,7 @@ const make = Effect.gen(function* () {
           const resolvedModel =
             identity.model && identity.modelIsRequestedHint !== true
               ? identity.model
-              : existingThread?.model ?? parentThread.model;
+              : (existingThread?.model ?? parentThread.model);
           const title = subagentThreadTitle(identity);
 
           if (!existingThread) {
@@ -1038,11 +1059,16 @@ const make = Effect.gen(function* () {
                 deletedAt: null,
               };
         });
-      const collabPayload = event.type === "item.started" || event.type === "item.updated" || event.type === "item.completed"
-        ? event.payload.itemType === "collab_agent_tool_call"
-          ? asObject(runtimePayloadRecord(event)?.data)?.item ?? asObject(runtimePayloadRecord(event)?.data) ?? runtimePayloadRecord(event)
-          : undefined
-        : undefined;
+      const collabPayload =
+        event.type === "item.started" ||
+        event.type === "item.updated" ||
+        event.type === "item.completed"
+          ? event.payload.itemType === "collab_agent_tool_call"
+            ? (asObject(runtimePayloadRecord(event)?.data)?.item ??
+              asObject(runtimePayloadRecord(event)?.data) ??
+              runtimePayloadRecord(event))
+            : undefined
+          : undefined;
       if (collabPayload) {
         const collabPayloadRecord = collabPayload as Record<string, unknown>;
         const receiverThreadIds = collectSubagentProviderThreadIds(collabPayloadRecord);
@@ -1088,7 +1114,7 @@ const make = Effect.gen(function* () {
           event.type === "item.completed") &&
         event.payload.itemType === "collab_agent_tool_call"
           ? parentThread
-          : routedSubagentThread ?? parentThread;
+          : (routedSubagentThread ?? parentThread);
 
       const eventTurnId = toTurnId(event.turnId);
       const activeTurnId = routedThread.session?.activeTurnId ?? null;
@@ -1160,9 +1186,9 @@ const make = Effect.gen(function* () {
             ? (event.payload.reason ?? routedThread.session?.lastError ?? "Provider session error")
             : event.type === "turn.completed" && runtimeTurnState(event) === "failed"
               ? (runtimeTurnErrorMessage(event) ?? routedThread.session?.lastError ?? "Turn failed")
-            : status === "ready"
-              ? null
-              : (routedThread.session?.lastError ?? null);
+              : status === "ready"
+                ? null
+                : (routedThread.session?.lastError ?? null);
 
         if (shouldApplyThreadLifecycle) {
           yield* orchestrationEngine.dispatch({
@@ -1277,7 +1303,9 @@ const make = Effect.gen(function* () {
       const assistantCompletion =
         event.type === "item.completed" && event.payload.itemType === "assistant_message"
           ? {
-              messageId: MessageId.makeUnsafe(`assistant:${event.itemId ?? event.turnId ?? event.eventId}`),
+              messageId: MessageId.makeUnsafe(
+                `assistant:${event.itemId ?? event.turnId ?? event.eventId}`,
+              ),
               fallbackText: event.payload.detail,
             }
           : undefined;
@@ -1390,9 +1418,7 @@ const make = Effect.gen(function* () {
 
         const shouldApplyRuntimeError = !STRICT_PROVIDER_LIFECYCLE_GUARD
           ? true
-          : activeTurnId === null ||
-            eventTurnId === undefined ||
-            sameId(activeTurnId, eventTurnId);
+          : activeTurnId === null || eventTurnId === undefined || sameId(activeTurnId, eventTurnId);
 
         if (shouldApplyRuntimeError) {
           yield* orchestrationEngine.dispatch({
@@ -1412,87 +1438,95 @@ const make = Effect.gen(function* () {
           });
         }
 
-        yield* errorInbox.capture({
-          source: "provider-runtime",
-          category: "provider",
-          severity: "error",
-          summary: "Provider runtime error",
-          detail: runtimeErrorMessage,
-          projectId: routedThread.projectId,
-          threadId: routedThread.id,
-          turnId: eventTurnId ?? null,
-          provider: event.provider,
-          context: {
-            method: event.raw?.method ?? null,
-            errorClass:
-              event.payload && typeof event.payload === "object" && "class" in event.payload
-                ? (event.payload as { class?: unknown }).class
-                : null,
-            payload: event.payload,
-          },
-          occurredAt: now,
-        }).pipe(Effect.catch(() => Effect.void));
+        yield* errorInbox
+          .capture({
+            source: "provider-runtime",
+            category: "provider",
+            severity: "error",
+            summary: "Provider runtime error",
+            detail: runtimeErrorMessage,
+            projectId: routedThread.projectId,
+            threadId: routedThread.id,
+            turnId: eventTurnId ?? null,
+            provider: event.provider,
+            context: {
+              method: event.raw?.method ?? null,
+              errorClass:
+                event.payload && typeof event.payload === "object" && "class" in event.payload
+                  ? (event.payload as { class?: unknown }).class
+                  : null,
+              payload: event.payload,
+            },
+            occurredAt: now,
+          })
+          .pipe(Effect.catch(() => Effect.void));
       }
 
       if (event.type === "config.warning") {
         const summary = nonEmptyTrimmed(event.payload.summary) ?? "Provider config warning";
-        yield* errorInbox.capture({
-          source: "provider-config",
-          category: "config",
-          severity: "warning",
-          summary,
-          detail: event.payload.details ?? null,
-          projectId: routedThread.projectId,
-          threadId: routedThread.id,
-          turnId: eventTurnId ?? null,
-          provider: event.provider,
-          context: {
-            method: event.raw?.method ?? null,
-            path: event.payload.path ?? null,
-            range: event.payload.range ?? null,
-          },
-          occurredAt: now,
-        }).pipe(Effect.catch(() => Effect.void));
+        yield* errorInbox
+          .capture({
+            source: "provider-config",
+            category: "config",
+            severity: "warning",
+            summary,
+            detail: event.payload.details ?? null,
+            projectId: routedThread.projectId,
+            threadId: routedThread.id,
+            turnId: eventTurnId ?? null,
+            provider: event.provider,
+            context: {
+              method: event.raw?.method ?? null,
+              path: event.payload.path ?? null,
+              range: event.payload.range ?? null,
+            },
+            occurredAt: now,
+          })
+          .pipe(Effect.catch(() => Effect.void));
       }
 
       if (event.type === "mcp.oauth.completed" && event.payload.success === false) {
-        yield* errorInbox.capture({
-          source: "provider-mcp",
-          category: "mcp",
-          severity: "warning",
-          summary: `MCP OAuth failed${event.payload.name ? `: ${event.payload.name}` : ""}`,
-          detail: event.payload.error ?? null,
-          projectId: routedThread.projectId,
-          threadId: routedThread.id,
-          turnId: eventTurnId ?? null,
-          provider: event.provider,
-          context: {
-            method: event.raw?.method ?? null,
-            name: event.payload.name ?? null,
-            error: event.payload.error ?? null,
-          },
-          occurredAt: now,
-        }).pipe(Effect.catch(() => Effect.void));
+        yield* errorInbox
+          .capture({
+            source: "provider-mcp",
+            category: "mcp",
+            severity: "warning",
+            summary: `MCP OAuth failed${event.payload.name ? `: ${event.payload.name}` : ""}`,
+            detail: event.payload.error ?? null,
+            projectId: routedThread.projectId,
+            threadId: routedThread.id,
+            turnId: eventTurnId ?? null,
+            provider: event.provider,
+            context: {
+              method: event.raw?.method ?? null,
+              name: event.payload.name ?? null,
+              error: event.payload.error ?? null,
+            },
+            occurredAt: now,
+          })
+          .pipe(Effect.catch(() => Effect.void));
       }
 
       if (event.type === "session.exited") {
-        yield* errorInbox.capture({
-          source: "provider-runtime",
-          category: "provider",
-          severity: "error",
-          summary: "Provider session exited unexpectedly",
-          detail: event.payload.reason ?? null,
-          projectId: routedThread.projectId,
-          threadId: routedThread.id,
-          turnId: eventTurnId ?? null,
-          provider: event.provider,
-          context: {
-            method: event.raw?.method ?? null,
-            exitKind: event.payload.exitKind ?? null,
-            reason: event.payload.reason ?? null,
-          },
-          occurredAt: now,
-        }).pipe(Effect.catch(() => Effect.void));
+        yield* errorInbox
+          .capture({
+            source: "provider-runtime",
+            category: "provider",
+            severity: "error",
+            summary: "Provider session exited unexpectedly",
+            detail: event.payload.reason ?? null,
+            projectId: routedThread.projectId,
+            threadId: routedThread.id,
+            turnId: eventTurnId ?? null,
+            provider: event.provider,
+            context: {
+              method: event.raw?.method ?? null,
+              exitKind: event.payload.exitKind ?? null,
+              reason: event.payload.reason ?? null,
+            },
+            occurredAt: now,
+          })
+          .pipe(Effect.catch(() => Effect.void));
       }
 
       if (event.type === "thread.metadata.updated" && event.payload.name) {

@@ -607,11 +607,7 @@ describe("OpencodeAdapter native commands", () => {
     const originalFetch = globalThis.fetch;
     const fetchMock = vi.fn(async (input: string | URL | Request, _init?: RequestInit) => {
       const url = new URL(
-        typeof input === "string"
-          ? input
-          : input instanceof URL
-            ? input.toString()
-            : input.url,
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url,
       );
       if (url.pathname === "/session/session-1/message") {
         return new Response(
@@ -715,7 +711,7 @@ describe("OpencodeAdapter native commands", () => {
     });
   });
 
-  it("surfaces OpenCode Question tool parts as answerable user input", async () => {
+  it("keeps OpenCode Question tool call ids as normal tool progress", async () => {
     const fixture = createOpenCodeFixture({
       events: [
         {
@@ -728,7 +724,7 @@ describe("OpencodeAdapter native commands", () => {
               role: "assistant",
               type: "tool",
               tool: "Question",
-              callID: "question-request-1",
+              callID: "call_function_question_1",
               state: {
                 status: "running",
                 input: {
@@ -777,8 +773,70 @@ describe("OpencodeAdapter native commands", () => {
       }),
     );
 
+    expect(events.some((event) => event.type === "user-input.requested")).toBe(false);
+    expect(
+      events.some(
+        (event) =>
+          (event.type === "item.started" || event.type === "item.updated") &&
+          String(event.itemId) === "call_function_question_1",
+      ),
+    ).toBe(true);
+  });
+
+  it("surfaces OpenCode question events as answerable user input", async () => {
+    const fixture = createOpenCodeFixture({
+      events: [
+        {
+          type: "question.asked",
+          properties: {
+            sessionID: "session-1",
+            question: {
+              id: "que_question_1",
+              questions: [
+                {
+                  header: "Scope",
+                  question: "Which documents should be included?",
+                  options: [
+                    "All documents",
+                    { label: "Core documents", description: "Only the primary policies" },
+                  ],
+                },
+              ],
+            },
+          },
+        },
+      ],
+    });
+    const events: ProviderRuntimeEvent[] = [];
+
+    await runWithFixture(
+      fixture,
+      Effect.gen(function* () {
+        const adapter = yield* OpencodeAdapter;
+        const collector = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            events.push(event);
+          }),
+        ).pipe(Effect.forkChild);
+
+        try {
+          yield* adapter.startSession({
+            threadId: asThreadId("thread-question-event"),
+            provider: "opencode",
+            cwd: process.cwd(),
+            model: "openai/gpt-4.1",
+            runtimeMode: "full-access",
+          });
+          yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 25)));
+          yield* adapter.stopAll();
+        } finally {
+          yield* Fiber.interrupt(collector);
+        }
+      }),
+    );
+
     const userInput = events.find((event) => event.type === "user-input.requested");
-    expect(userInput?.requestId).toBe("question-request-1");
+    expect(userInput?.requestId).toBe("que_question_1");
     expect(userInput?.payload).toEqual({
       questions: [
         {
@@ -792,13 +850,54 @@ describe("OpencodeAdapter native commands", () => {
         },
       ],
     });
-    expect(
-      events.some(
-        (event) =>
-          (event.type === "item.started" || event.type === "item.updated") &&
-          event.requestId === "question-request-1",
-      ),
-    ).toBe(false);
+  });
+
+  it("surfaces OpenCode session compaction as a thread lifecycle event", async () => {
+    const fixture = createOpenCodeFixture({
+      events: [
+        {
+          type: "session.compacted",
+          properties: {
+            sessionID: "session-1",
+          },
+        },
+      ],
+    });
+    const events: ProviderRuntimeEvent[] = [];
+
+    await runWithFixture(
+      fixture,
+      Effect.gen(function* () {
+        const adapter = yield* OpencodeAdapter;
+        const collector = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+          Effect.sync(() => {
+            events.push(event);
+          }),
+        ).pipe(Effect.forkChild);
+
+        try {
+          yield* adapter.startSession({
+            threadId: asThreadId("thread-compacted"),
+            provider: "opencode",
+            cwd: process.cwd(),
+            model: "openai/gpt-4.1",
+            runtimeMode: "full-access",
+          });
+          yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 25)));
+          yield* adapter.stopAll();
+        } finally {
+          yield* Fiber.interrupt(collector);
+        }
+      }),
+    );
+
+    const compacted = events.find((event) => event.type === "thread.state.changed");
+    expect(compacted?.payload).toMatchObject({
+      state: "compacted",
+      detail: {
+        sessionId: "session-1",
+      },
+    });
   });
 
   it("relocates bridged computer-use captures from shared OpenCode storage to the T3 thread", async () => {

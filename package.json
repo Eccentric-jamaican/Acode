@@ -17,15 +17,16 @@
       "@types/node": "^24.10.13",
       "effect": "https://pkg.pr.new/Effect-TS/effect-smol/effect@8881a9b",
       "tsdown": "^0.20.3",
+      "tsx": "^4.21.0",
       "typescript": "^5.7.3",
       "vitest": "^4.0.0"
     }
   },
   "scripts": {
-    "dev": "bun run scripts/dev-runner.ts dev",
-    "dev:server": "bun run scripts/dev-runner.ts dev:server",
-    "dev:web": "bun run scripts/dev-runner.ts dev:web",
-    "dev:desktop": "bun run --filter @t3tools/desktop build && bun run scripts/dev-runner.ts dev:desktop",
+    "dev": "node scripts/dev-runner.ts dev",
+    "dev:server": "node scripts/dev-runner.ts dev:server",
+    "dev:web": "node scripts/dev-runner.ts dev:web",
+    "dev:desktop": "bun run --filter @t3tools/desktop build && node scripts/dev-runner.ts dev:desktop",
     "lint": "oxlint --report-unused-disable-directives",
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",

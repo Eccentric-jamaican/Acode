@@ -3,10 +3,12 @@ import {
   ArchiveIcon,
   ArrowLeftIcon,
   BrushIcon,
+  GlobeIcon,
   KeyboardIcon,
   LockIcon,
   MessageSquareTextIcon,
   MousePointer2Icon,
+  PlugIcon,
   Settings2Icon,
   SlidersHorizontalIcon,
 } from "lucide-react";
@@ -33,10 +35,10 @@ function settingsSectionIcon(sectionId: SettingsSectionId) {
   switch (sectionId) {
     case SETTINGS_SECTION_IDS.appearance:
       return BrushIcon;
-    case SETTINGS_SECTION_IDS.codexAppServer:
-      return Settings2Icon;
     case SETTINGS_SECTION_IDS.models:
       return SlidersHorizontalIcon;
+    case SETTINGS_SECTION_IDS.remoteAccess:
+      return GlobeIcon;
     case SETTINGS_SECTION_IDS.responses:
       return MessageSquareTextIcon;
     case SETTINGS_SECTION_IDS.computerUse:
@@ -45,6 +47,8 @@ function settingsSectionIcon(sectionId: SettingsSectionId) {
       return KeyboardIcon;
     case SETTINGS_SECTION_IDS.safety:
       return LockIcon;
+    case SETTINGS_SECTION_IDS.providers:
+      return PlugIcon;
     case SETTINGS_SECTION_IDS.archived:
       return ArchiveIcon;
     default:

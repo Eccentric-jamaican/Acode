@@ -183,9 +183,7 @@ export function getAvailableComposerSlashCommands(input: {
         ]
       : [];
 
-  return availableCommands.filter(
-    (command) => !collidingNativeCommandNames.has(command),
-  );
+  return availableCommands.filter((command) => !collidingNativeCommandNames.has(command));
 }
 
 export function isBuiltInComposerSlashCommand(value: string): value is ComposerSlashCommand {
@@ -238,7 +236,10 @@ export function parseComposerSlashInvocationForCommands(
 }
 
 export function parseFastSlashCommandAction(text: string): FastSlashCommandAction | null {
-  const invocation = parseComposerSlashInvocationForCommands(text, BUILT_IN_COMPOSER_SLASH_COMMANDS);
+  const invocation = parseComposerSlashInvocationForCommands(
+    text,
+    BUILT_IN_COMPOSER_SLASH_COMMANDS,
+  );
   if (!invocation || invocation.command !== "fast") {
     return null;
   }
@@ -280,9 +281,10 @@ export function buildBrowserUseComposerPrompt(
       : "If a projectId is required, ask T3 for the active project id instead of guessing.";
 
   return [
-    "Use T3 Browser Use for this request. Do not use OpenAI Browser Use, Chrome MCP, `t3_browser` MCP, Playwright, or an external browser unless T3 Browser Use is unavailable and I explicitly approve a fallback.",
-    "Load the client with `const { pathToFileURL } = await import(\"node:url\"); const clientUrl = pathToFileURL(process.env.T3CODE_BROWSER_USE_CLIENT_PATH).href; const { setupT3BrowserUse } = await import(clientUrl); const browser = setupT3BrowserUse({ globals: globalThis, projectId: \"PROJECT_ID\" });`, replacing `PROJECT_ID` with the T3 project id below.",
-    "Use the `browser` object to open tabs, click, type, scroll, inspect snapshots, capture screenshots, and evaluate page state. Prefer `browser.open(url)`, `browser.snapshot()`, `browser.click(selector)`, `browser.fill(selector, value)`, `browser.pressKey(key)`, and `browser.scrollBy(y)`.",
+    "Use T3 Browser Use for this request. If a `t3_browser` MCP server is exposed, use its `browser_*` tools directly.",
+    'If `t3_browser` tools are not exposed, load the injected client with `const { pathToFileURL } = await import("node:url"); const clientUrl = pathToFileURL(process.env.T3CODE_BROWSER_USE_CLIENT_PATH).href; const { setupT3BrowserUse } = await import(clientUrl); const browser = setupT3BrowserUse({ globals: globalThis, projectId: "PROJECT_ID" });`, replacing `PROJECT_ID` with the T3 project id below.',
+    "Use T3 Browser Use to open tabs, click, type, scroll, inspect snapshots, capture screenshots, and evaluate page state. With the injected client, prefer `browser.open(url)`, `browser.snapshot()`, `browser.click(selector)`, `browser.fill(selector, value)`, `browser.pressKey(key)`, and `browser.scrollBy(y)`.",
+    "Do not use OpenAI Browser Use, Chrome MCP, Playwright, or an external browser unless T3 Browser Use is unavailable and I explicitly approve a fallback.",
     "Respect T3 browser settings for approvals, history access, allowed domains, blocked domains, and persisted browsing data.",
     projectHint,
     browserTask,

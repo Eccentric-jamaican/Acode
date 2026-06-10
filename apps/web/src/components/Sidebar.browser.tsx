@@ -172,6 +172,8 @@ function createFixture(): TestFixture {
         },
       ],
       availableEditors: [],
+      serverPort: 0,
+      serverAuthEnabled: false,
     },
     welcome: {
       cwd: "C:\\Users\\Addis\\source\\repos\\t3code-main",

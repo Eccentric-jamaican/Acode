@@ -108,6 +108,8 @@ Checklist:
    - release job uploads expected files
 6. Smoke test downloaded artifacts.
 
+When triggering `.github/workflows/release.yml` manually, you can set `skip_preflight_tests` to `true` if a known flaky test issue blocks release for the moment. Keep in mind this is for recovery only; regular `main` pushes and tag runs still execute the full preflight.
+
 ## 4) Troubleshooting
 
 - Windows build unsigned when expected signed:

@@ -1,4 +1,7 @@
-import { Option, Schema, SchemaIssue, Struct } from "effect";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
+import * as SchemaIssue from "effect/SchemaIssue";
+import * as Struct from "effect/Struct";
 import { ProviderModelOptions } from "./model";
 import {
   ApprovalRequestId,

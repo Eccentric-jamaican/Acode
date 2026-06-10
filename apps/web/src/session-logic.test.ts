@@ -261,6 +261,151 @@ describe("derivePendingUserInputs", () => {
 
     expect(derivePendingUserInputs(activities)).toEqual([]);
   });
+
+  it("removes OpenCode prompts that used non-question request ids", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "user-input-open",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "user-input.requested",
+        summary: "User input requested",
+        tone: "info",
+        payload: {
+          requestId: "call_function_question_1",
+          questions: [
+            {
+              id: "log_search",
+              header: "Logs",
+              question: "How do you search logs?",
+              options: [
+                {
+                  label: "Cloud UI",
+                  description: "Search in the cloud provider UI",
+                },
+              ],
+            },
+          ],
+        },
+      }),
+      makeActivity({
+        id: "user-input-invalid",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "provider.user-input.respond.failed",
+        summary: "User input response failed",
+        tone: "error",
+        payload: {
+          requestId: "call_function_question_1",
+          detail:
+            'Provider adapter request failed for question.reply: Expected a string starting with \\"que\\"',
+        },
+      }),
+    ];
+
+    expect(derivePendingUserInputs(activities)).toEqual([]);
+  });
+
+  it("deduplicates OpenCode tool-call mirrors of real question prompts", () => {
+    const sharedQuestions = [
+      {
+        id: "question-0-log-search-tool",
+        header: "Log search tool",
+        question: "How do you search your logs day-to-day?",
+        options: [
+          {
+            label: "Cloud vendor UI",
+            description: "Built-in search UI from the platform",
+          },
+        ],
+      },
+    ];
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "user-input-real",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "user-input.requested",
+        summary: "User input requested",
+        tone: "info",
+        payload: {
+          requestId: "que_real_question_1",
+          questions: sharedQuestions,
+        },
+      }),
+      makeActivity({
+        id: "user-input-mirror",
+        createdAt: "2026-02-23T00:00:01.010Z",
+        kind: "user-input.requested",
+        summary: "User input requested",
+        tone: "info",
+        payload: {
+          requestId: "call_function_question_1",
+          questions: sharedQuestions,
+        },
+      }),
+    ];
+
+    expect(derivePendingUserInputs(activities)).toEqual([
+      {
+        requestId: "que_real_question_1",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        questions: sharedQuestions,
+      },
+    ]);
+  });
+
+  it("removes OpenCode tool-call mirrors when the real question resolves", () => {
+    const sharedQuestions = [
+      {
+        id: "question-0-log-search-tool",
+        header: "Log search tool",
+        question: "How do you search your logs day-to-day?",
+        options: [
+          {
+            label: "Cloud vendor UI",
+            description: "Built-in search UI from the platform",
+          },
+        ],
+      },
+    ];
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "user-input-real",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "user-input.requested",
+        summary: "User input requested",
+        tone: "info",
+        payload: {
+          requestId: "que_real_question_1",
+          questions: sharedQuestions,
+        },
+      }),
+      makeActivity({
+        id: "user-input-mirror",
+        createdAt: "2026-02-23T00:00:01.010Z",
+        kind: "user-input.requested",
+        summary: "User input requested",
+        tone: "info",
+        payload: {
+          requestId: "call_function_question_1",
+          questions: sharedQuestions,
+        },
+      }),
+      makeActivity({
+        id: "user-input-real-resolved",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "user-input.resolved",
+        summary: "User input submitted",
+        tone: "info",
+        payload: {
+          requestId: "que_real_question_1",
+          answers: {
+            "question-0-log-search-tool": "Cloud vendor UI",
+          },
+        },
+      }),
+    ];
+
+    expect(derivePendingUserInputs(activities)).toEqual([]);
+  });
 });
 
 describe("deriveActivePlanState", () => {

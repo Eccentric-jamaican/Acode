@@ -403,23 +403,35 @@ function toLegacySessionStatus(
 }
 
 function toLegacyProvider(providerName: string | null): ProviderKind {
-  if (providerName === "codex" || providerName === "opencode") {
+  if (providerName === "codex" || providerName === "opencode" || providerName === "claudeAgent") {
     return providerName;
   }
   return "codex";
 }
 
-const CODEX_MODEL_SLUGS = new Set<string>(getModelOptions("codex").map((option) => option.slug));
+const BUILT_IN_MODEL_SLUGS_BY_PROVIDER: Record<ProviderKind, ReadonlySet<string>> = {
+  claudeAgent: new Set(getModelOptions("claudeAgent").map((option) => option.slug)),
+  codex: new Set(getModelOptions("codex").map((option) => option.slug)),
+  opencode: new Set(getModelOptions("opencode").map((option) => option.slug)),
+};
 
 function inferProviderForThreadModel(input: {
   readonly model: string;
   readonly sessionProviderName: string | null;
 }): ProviderKind {
-  if (input.sessionProviderName === "codex" || input.sessionProviderName === "opencode") {
+  if (
+    input.sessionProviderName === "codex" ||
+    input.sessionProviderName === "opencode" ||
+    input.sessionProviderName === "claudeAgent"
+  ) {
     return input.sessionProviderName;
   }
+  const normalizedClaude = normalizeModelSlug(input.model, "claudeAgent");
+  if (normalizedClaude && BUILT_IN_MODEL_SLUGS_BY_PROVIDER.claudeAgent.has(normalizedClaude)) {
+    return "claudeAgent";
+  }
   const normalizedCodex = normalizeModelSlug(input.model, "codex");
-  if (normalizedCodex && CODEX_MODEL_SLUGS.has(normalizedCodex)) {
+  if (normalizedCodex && BUILT_IN_MODEL_SLUGS_BY_PROVIDER.codex.has(normalizedCodex)) {
     return "codex";
   }
   if (isValidOpencodeModelSlug(input.model)) {

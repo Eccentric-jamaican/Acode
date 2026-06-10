@@ -27,6 +27,7 @@ import type {
   CodexStoredSkillSummary,
   CodexStoredThreadSummary,
 } from "./provider/Services/CodexAdapter.ts";
+import { resolveClaudeCodeSdkExecutablePath } from "./provider/claudeExecutable.ts";
 
 const STALE_TASK_AGE_MS = 1000 * 60 * 60 * 24 * 2;
 const REVIEW_POLL_INTERVAL_MS = 750;
@@ -883,7 +884,7 @@ async function suggestWithClaude(
   const options: ClaudeQueryOptions = {
     ...(input.cwd ? { cwd: input.cwd } : {}),
     ...(input.selectedModel ? { model: input.selectedModel } : {}),
-    pathToClaudeCodeExecutable: "claude",
+    pathToClaudeCodeExecutable: resolveClaudeCodeSdkExecutablePath(undefined),
     permissionMode: "plan",
     includePartialMessages: true,
     canUseTool: denyClaudeSuggestionToolUse,

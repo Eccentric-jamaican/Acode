@@ -8,14 +8,14 @@ import { OpenLive } from "./open";
 import { Command } from "effect/unstable/cli";
 import { version } from "../package.json" with { type: "json" };
 import { NetService } from "@t3tools/shared/Net";
-import { FetchHttpClient } from "effect/unstable/http";
+import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 
 const RuntimeLayer = Layer.empty.pipe(
   Layer.provideMerge(CliConfig.layer),
   Layer.provideMerge(OpenLive),
   Layer.provideMerge(NetService.layer),
   Layer.provideMerge(NodeServices.layer),
-  Layer.provideMerge(FetchHttpClient.layer),
+  Layer.provideMerge(NodeHttpClient.layerFetch),
 );
 
 Command.run(t3Cli, { version }).pipe(Effect.provide(RuntimeLayer), NodeRuntime.runMain);

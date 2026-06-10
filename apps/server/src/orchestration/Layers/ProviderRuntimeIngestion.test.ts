@@ -386,7 +386,9 @@ describe("ProviderRuntimeIngestion", () => {
 
     await Effect.runPromise(Effect.sleep("40 millis"));
     const midReadModel = await Effect.runPromise(harness.engine.getReadModel());
-    const midThread = midReadModel.threads.find((entry) => entry.id === ThreadId.makeUnsafe("thread-1"));
+    const midThread = midReadModel.threads.find(
+      (entry) => entry.id === ThreadId.makeUnsafe("thread-1"),
+    );
     expect(midThread?.session?.status).toBe("running");
     expect(midThread?.session?.activeTurnId).toBe("turn-midturn-lifecycle");
 
@@ -622,9 +624,7 @@ describe("ProviderRuntimeIngestion", () => {
 
     await Effect.runPromise(Effect.sleep("40 millis"));
     const readModel = await Effect.runPromise(harness.engine.getReadModel());
-    const thread = readModel.threads.find(
-      (entry) => entry.id === ThreadId.makeUnsafe("thread-1"),
-    );
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.makeUnsafe("thread-1"));
     expect(
       thread?.messages.some(
         (message: ProviderRuntimeTestMessage) => message.id === "assistant:item-empty",
@@ -657,7 +657,9 @@ describe("ProviderRuntimeIngestion", () => {
     const proposedPlan = thread.proposedPlans.find(
       (entry: ProviderRuntimeTestProposedPlan) => entry.id === "plan:thread-1:turn:turn-plan-final",
     );
-    expect(proposedPlan?.planMarkdown).toBe("## Ship plan\n\n- wire projection\n- render follow-up");
+    expect(proposedPlan?.planMarkdown).toBe(
+      "## Ship plan\n\n- wire projection\n- render follow-up",
+    );
   });
 
   it("finalizes buffered proposed-plan deltas into a first-class proposed plan on turn completion", async () => {
@@ -720,7 +722,8 @@ describe("ProviderRuntimeIngestion", () => {
       ),
     );
     const proposedPlan = thread.proposedPlans.find(
-      (entry: ProviderRuntimeTestProposedPlan) => entry.id === "plan:thread-1:turn:turn-plan-buffer",
+      (entry: ProviderRuntimeTestProposedPlan) =>
+        entry.id === "plan:thread-1:turn:turn-plan-buffer",
     );
     expect(proposedPlan?.planMarkdown).toBe("## Buffered plan\n\n- first\n- second");
   });
@@ -1677,8 +1680,7 @@ describe("ProviderRuntimeIngestion", () => {
           ) &&
           thread.activities.some(
             (activity: ProviderRuntimeTestActivity) =>
-              activity.id === "evt-subagent-task-progress" &&
-              activity.kind === "task.progress",
+              activity.id === "evt-subagent-task-progress" && activity.kind === "task.progress",
           ),
       ),
     );
@@ -1725,10 +1727,14 @@ describe("ProviderRuntimeIngestion", () => {
       },
     });
 
-    const readModel = await waitForReadModel(harness.engine, (model) =>
-      model.threads.find((thread) => thread.id === ThreadId.makeUnsafe("thread-1"))?.activities.some(
-        (activity: ProviderRuntimeTestActivity) => activity.id === "evt-subagent-fallback",
-      ) === true,
+    const readModel = await waitForReadModel(
+      harness.engine,
+      (model) =>
+        model.threads
+          .find((thread) => thread.id === ThreadId.makeUnsafe("thread-1"))
+          ?.activities.some(
+            (activity: ProviderRuntimeTestActivity) => activity.id === "evt-subagent-fallback",
+          ) === true,
     );
 
     expect(
@@ -1829,14 +1835,17 @@ describe("ProviderRuntimeIngestion", () => {
     const readModel = await waitForReadModel(harness.engine, (model) =>
       model.threads.some(
         (thread) =>
-          thread.id === ThreadId.makeUnsafe("subagent:thread-1:child-provider-codex-1") && thread.title === "Current Shape",
+          thread.id === ThreadId.makeUnsafe("subagent:thread-1:child-provider-codex-1") &&
+          thread.title === "Current Shape",
       ),
     );
 
     const childThread = readModel.threads.find(
       (thread) => thread.id === ThreadId.makeUnsafe("subagent:thread-1:child-provider-codex-1"),
     );
-    expect(childThread?.messages.some((message) => message.text.includes("Current Shape"))).toBe(true);
+    expect(childThread?.messages.some((message) => message.text.includes("Current Shape"))).toBe(
+      true,
+    );
     expect(childThread?.title).toBe("Current Shape");
   });
 
@@ -1903,7 +1912,9 @@ describe("ProviderRuntimeIngestion", () => {
     });
 
     expect(
-      readModel.threads.some((thread) => String(thread.id).startsWith("subagent:thread-1:parent-provider-1")),
+      readModel.threads.some((thread) =>
+        String(thread.id).startsWith("subagent:thread-1:parent-provider-1"),
+      ),
     ).toBe(false);
   });
 
@@ -1978,6 +1989,43 @@ describe("ProviderRuntimeIngestion", () => {
     expect(resolvedPayload?.answers).toEqual({
       sandbox_mode: "workspace-write",
     });
+  });
+
+  it("projects provider compaction as thread activity", async () => {
+    const harness = await createHarness();
+    const now = new Date().toISOString();
+
+    harness.emit({
+      type: "thread.state.changed",
+      eventId: asEventId("evt-context-compacted"),
+      provider: "codex",
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-compacted"),
+      payload: {
+        state: "compacted",
+        detail: {
+          sessionId: "provider-session-1",
+        },
+      },
+    });
+
+    const thread = await waitForThread(harness.engine, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.kind === "context.compacted",
+      ),
+    );
+
+    const compacted = thread.activities.find(
+      (activity: ProviderRuntimeTestActivity) => activity.id === "evt-context-compacted",
+    );
+    const payload =
+      compacted?.payload && typeof compacted.payload === "object"
+        ? (compacted.payload as Record<string, unknown>)
+        : undefined;
+
+    expect(compacted?.summary).toBe("Context compacted");
+    expect(payload?.state).toBe("compacted");
   });
 
   it("continues processing runtime events after a single event handler failure", async () => {

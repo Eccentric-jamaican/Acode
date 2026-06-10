@@ -7,6 +7,7 @@ import type {
 } from "@pierre/trees";
 import type { ProjectEntry, ThreadId } from "@t3tools/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { XIcon } from "lucide-react";
 
 import { getFilePanelThreadState, useFilePanelStore } from "../filePanelStore";
 import { gitQueryKeys, gitStatusQueryOptions } from "../lib/gitReactQuery";
@@ -14,11 +15,13 @@ import { projectListTreeQueryOptions, projectQueryKeys } from "../lib/projectRea
 import { cn } from "../lib/utils";
 import { ensureNativeApi } from "../nativeApi";
 import { preferredTerminalEditor } from "../terminal-links";
+import { Button } from "./ui/button";
 
 interface WorkspaceFilesRailProps {
   threadId: ThreadId;
   cwd: string | null;
   className?: string;
+  onClose?: (() => void) | undefined;
   onRevealFile?: ((path: string) => void) | undefined;
 }
 
@@ -154,11 +157,26 @@ export function WorkspaceFilesRail(props: WorkspaceFilesRailProps) {
     >
       <div className="flex h-[var(--app-desktop-content-header-height)] shrink-0 items-center justify-between gap-3 border-b border-border/50 px-4">
         <span className="text-sm font-medium text-foreground/82">All files</span>
-        {treeQuery.data?.truncated ? (
-          <span className="rounded bg-muted/60 px-1.5 py-0.5 text-[10px] text-muted-foreground">
-            Truncated
-          </span>
-        ) : null}
+        <div className="flex shrink-0 items-center gap-1.5">
+          {treeQuery.data?.truncated ? (
+            <span className="rounded bg-muted/60 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+              Truncated
+            </span>
+          ) : null}
+          {props.onClose ? (
+            <Button
+              type="button"
+              size="icon-xs"
+              variant="ghost"
+              className="sm:hidden"
+              aria-label="Close all files"
+              title="Close all files"
+              onClick={props.onClose}
+            >
+              <XIcon className="size-4" />
+            </Button>
+          ) : null}
+        </div>
       </div>
       <div className="min-h-0 flex-1 px-2 py-2">
         {treeQuery.isLoading ? (

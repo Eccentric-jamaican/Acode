@@ -83,6 +83,12 @@ describe("resolveModelSlug", () => {
     expect(resolveModelSlug("opencode-go/kimi-k2.5", "opencode")).toBe("opencode-go/kimi-k2.5");
   });
 
+  it("resolves current Claude shortcuts and old Opus slugs", () => {
+    expect(resolveModelSlug("fable", "claudeAgent")).toBe("claude-fable-5");
+    expect(resolveModelSlug("opus", "claudeAgent")).toBe("claude-opus-4-8");
+    expect(resolveModelSlug("claude-opus-4-6", "claudeAgent")).toBe("claude-opus-4-8");
+  });
+
   it("falls back to OpenCode default for malformed OpenCode slugs", () => {
     expect(resolveModelSlug("gpt-4.1", "opencode")).toBe(DEFAULT_MODEL_BY_PROVIDER.opencode);
   });

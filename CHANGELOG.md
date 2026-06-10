@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.61] - 2026-06-10
+
+### Added
+- Working-tree release prep updates for this release.
+
+### Changed
+- Versioned app package manifests for release `0.2.61`.
+
+### Fixed
+- Release prep now aligns package versions used by release finalization and update metadata.
+
 ## [0.2.60] - 2026-05-26
 
 ### Added

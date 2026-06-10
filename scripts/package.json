@@ -5,7 +5,7 @@
   "scripts": {
     "prepare": "node ./effect-language-service-prepare.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "node ./run-vitest.cjs run"
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",

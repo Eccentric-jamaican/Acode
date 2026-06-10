@@ -176,6 +176,10 @@ function isQuestionToolName(toolName: string): boolean {
   return normalized === "question" || normalized === "askuserquestion";
 }
 
+function isOpenCodeQuestionRequestId(value: string): boolean {
+  return value.trim().startsWith("que");
+}
+
 function isT3ComputerToolId(value: unknown): boolean {
   if (typeof value !== "string") {
     return false;
@@ -305,10 +309,7 @@ async function normalizeOpenCodeComputerCaptureStorage(input: {
         "captures",
         `${sanitizeAttachmentSegment(captureId)}.png`,
       );
-      const destinationPath = NodePath.join(
-        attachmentsRoot,
-        ...destinationRelativePath.split("/"),
-      );
+      const destinationPath = NodePath.join(attachmentsRoot, ...destinationRelativePath.split("/"));
       const sourcePath = resolveAttachmentPathFromCapture({
         stateDir: input.stateDir,
         capture,
@@ -486,7 +487,9 @@ function opencodeMessageParts(value: unknown): ReadonlyArray<unknown> {
   return asArray(asObject(value)?.parts) ?? asArray(opencodeMessageRecord(value)?.parts) ?? [];
 }
 
-function opencodeErrorRecord(properties: Record<string, unknown>): Record<string, unknown> | undefined {
+function opencodeErrorRecord(
+  properties: Record<string, unknown>,
+): Record<string, unknown> | undefined {
   return asObject(properties.error);
 }
 
@@ -496,7 +499,9 @@ function opencodeErrorDataRecord(
   return asObject(opencodeErrorRecord(properties)?.data);
 }
 
-function opencodeRuntimeErrorDetailMessage(properties: Record<string, unknown>): string | undefined {
+function opencodeRuntimeErrorDetailMessage(
+  properties: Record<string, unknown>,
+): string | undefined {
   const directMessage =
     asString(opencodeErrorRecord(properties)?.message) ?? asString(properties.message);
   if (directMessage?.trim()) {
@@ -1194,6 +1199,9 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
       readonly method: string;
       readonly rawPayload: unknown;
     }) => {
+      if (!isOpenCodeQuestionRequestId(input.requestId)) {
+        return;
+      }
       questionIdsByRequest.set(
         input.requestId,
         input.questions.map((question) => question.id),
@@ -1318,6 +1326,26 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
         return;
       }
       const turnId = session.activeTurnId ?? undefined;
+
+      if (event.type === "session.compacted") {
+        session.updatedAt = nowIso();
+        await emitAsync(
+          eventBase({
+            threadId,
+            type: "thread.state.changed",
+            payload: {
+              state: "compacted",
+              detail: {
+                sessionId,
+              },
+            },
+            method: event.type,
+            rawPayload: event,
+            turnId,
+          }),
+        );
+        return;
+      }
 
       if (event.type === "session.status") {
         const statusRecord = asObject(properties.status) ?? properties;
@@ -1469,7 +1497,11 @@ const makeOpencodeAdapter = (options?: OpencodeAdapterLiveOptions) =>
               : undefined;
           if (isQuestionToolName(toolName)) {
             const questions = toQuestionPayload(input);
-            if (questions && (status === "pending" || status === "running")) {
+            if (
+              questions &&
+              (status === "pending" || status === "running") &&
+              isOpenCodeQuestionRequestId(itemId)
+            ) {
               await emitQuestionRequested({
                 threadId,
                 method: event.type,

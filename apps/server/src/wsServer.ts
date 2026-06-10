@@ -7,11 +7,14 @@
  * @module Server
  */
 import http from "node:http";
+import { createHash, randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
 import * as OS from "node:os";
 import type { Duplex } from "node:stream";
 
 import Mime from "@effect/platform-node/Mime";
 import {
+  PROVIDER_UPDATE_CONFIG,
   type ChatAttachment as PersistedChatAttachment,
   CommandId,
   DEFAULT_PROVIDER_INTERACTION_MODE,
@@ -22,21 +25,28 @@ import {
   ORCHESTRATION_WS_CHANNELS,
   ORCHESTRATION_WS_METHODS,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+  type ProviderKind,
   ProjectId,
   type ServerErrorInboxUpdatedPayload,
   ThreadId,
   TerminalEvent,
   type UploadChatAttachment,
   type ComputerUseSettingsPatch,
+  type RemoteAccessClient,
+  type RemoteAccessPairingLink,
+  RemoteAccessPermission,
+  type RemoteAccessPermission as RemoteAccessPermissionType,
   WS_CHANNELS,
   WS_METHODS,
   WebSocketRequest,
   type ServerProviderAccountSummary,
   type ServerProviderStatus,
+  type ServerUpdateProviderInput,
   WsPush,
   WsResponse,
 } from "@t3tools/contracts";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 import {
   Cause,
   Effect,
@@ -53,6 +63,7 @@ import {
   Struct,
 } from "effect";
 import { WebSocketServer, type WebSocket } from "ws";
+import { verifyDpopProof } from "@t3tools/shared/dpop";
 
 import { createLogger } from "./logger";
 import { GitManager } from "./git/Services/GitManager.ts";
@@ -75,8 +86,42 @@ import { ProviderDiscoveryService } from "./provider/Services/ProviderDiscoveryS
 import { ProviderRegistry } from "./provider/Services/ProviderRegistry";
 import { ProviderService } from "./provider/Services/ProviderService";
 import { ProviderHealth } from "./provider/Services/ProviderHealth";
+import { ProviderUpdate } from "./provider/Services/ProviderUpdate";
 import { CodexAccountService } from "./provider/Services/CodexAccountService";
 import { CheckpointDiffQuery } from "./checkpointing/Services/CheckpointDiffQuery";
+
+function compareSemver(a: string, b: string): number {
+  const pa = a.replace(/^v/, "").split(".").map((s) => Number.parseInt(s, 10) || 0);
+  const pb = b.replace(/^v/, "").split(".").map((s) => Number.parseInt(s, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const da = pa[i] ?? 0;
+    const db = pb[i] ?? 0;
+    if (da !== db) return da - db;
+  }
+  return 0;
+}
+
+function resolveUpdateAvailable(
+  latestVersion: string | null | undefined,
+  currentVersion: string | null | undefined,
+  trusted: boolean,
+): boolean {
+  return trusted && latestVersion !== null && latestVersion !== undefined && currentVersion !== null && currentVersion !== undefined
+    ? compareSemver(latestVersion, currentVersion) > 0
+    : false;
+}
+
+function resolveProviderUpdateCommand(input: ServerUpdateProviderInput): string {
+  const command = PROVIDER_UPDATE_CONFIG[input.provider].commands.find(
+    (candidate) => candidate.id === input.commandId,
+  );
+  if (!command) {
+    throw new RouteRequestError({
+      message: `Unknown update command for provider ${input.provider}: ${input.commandId}`,
+    });
+  }
+  return command.command;
+}
 import { clamp } from "effect/Number";
 import { Open, resolveAvailableEditors } from "./open";
 import { ServerConfig } from "./config";
@@ -106,6 +151,235 @@ import {
   resolveComputerUseAppIcon,
 } from "./computerUseService";
 
+const STANDARD_REMOTE_ACCESS_SCOPES: RemoteAccessPermission[] = [
+  "orchestration:read",
+  "orchestration:operate",
+  "terminal:operate",
+  "review:write",
+  "relay:read",
+];
+
+const ALL_REMOTE_ACCESS_SCOPES: RemoteAccessPermission[] = [
+  "orchestration:read",
+  "orchestration:operate",
+  "terminal:operate",
+  "review:write",
+  "access:read",
+  "access:write",
+  "relay:read",
+  "relay:write",
+];
+
+const TAILSCALE_COMMAND = process.platform === "win32" ? "tailscale.exe" : "tailscale";
+const TAILSCALE_SERVE_PORT = 443;
+
+function runTailscaleCommand(args: readonly string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      TAILSCALE_COMMAND,
+      [...args],
+      { timeout: 15_000, windowsHide: true },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(
+            new Error(
+              stderr.trim() ||
+                (error instanceof Error ? error.message : `tailscale ${args.join(" ")} failed`),
+            ),
+          );
+          return;
+        }
+        resolve(stdout);
+      },
+    );
+  });
+}
+
+async function readTailscaleMagicDnsName(): Promise<string | null> {
+  const stdout = await runTailscaleCommand(["status", "--json"]);
+  const parsed = JSON.parse(stdout) as {
+    Self?: {
+      DNSName?: string;
+    };
+  };
+  const dnsName = parsed.Self?.DNSName?.replace(/\.$/, "");
+  return dnsName && dnsName.length > 0 ? dnsName : null;
+}
+
+async function enableTailscaleServe(input: {
+  localPort: number;
+  localHost?: string;
+  servePort?: number;
+}): Promise<string | null> {
+  const localHost = input.localHost ?? "127.0.0.1";
+  const servePort = input.servePort ?? TAILSCALE_SERVE_PORT;
+  await runTailscaleCommand([
+    "serve",
+    "--bg",
+    `--https=${servePort}`,
+    `http://${localHost}:${input.localPort}`,
+  ]);
+  const magicDnsName = await readTailscaleMagicDnsName();
+  if (!magicDnsName) {
+    return null;
+  }
+  return servePort === 443 ? `https://${magicDnsName}/` : `https://${magicDnsName}:${servePort}/`;
+}
+
+async function disableTailscaleServe(servePort = TAILSCALE_SERVE_PORT): Promise<void> {
+  await runTailscaleCommand(["serve", `--https=${servePort}`, "off"]);
+}
+
+function buildPairingUrl(baseUrl: string, credential: string): string {
+  const url = new URL(baseUrl);
+  url.pathname = "/pair";
+  url.hash = new URLSearchParams([["token", credential]]).toString();
+  return url.toString();
+}
+
+function readJsonRequest(req: http.IncomingMessage): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => {
+      chunks.push(chunk);
+    });
+    req.on("error", reject);
+    req.on("end", () => {
+      try {
+        const raw = Buffer.concat(chunks).toString("utf8");
+        resolve(raw.trim().length > 0 ? JSON.parse(raw) : {});
+      } catch (error) {
+        reject(error);
+      }
+    });
+  });
+}
+
+function readRequestBodyText(req: http.IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => {
+      chunks.push(chunk);
+    });
+    req.on("error", reject);
+    req.on("end", () => {
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+  });
+}
+
+function readRequestBodyBytes(req: http.IncomingMessage): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const chunks: Uint8Array[] = [];
+    req.on("data", (chunk: Uint8Array) => {
+      chunks.push(chunk);
+    });
+    req.on("error", reject);
+    req.on("end", () => {
+      resolve(Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))));
+    });
+  });
+}
+
+function parseAuthorizationHeader(value: string | undefined): {
+  method: "bearer-access-token" | "dpop-access-token";
+  token: string;
+} | null {
+  if (!value) {
+    return null;
+  }
+  const [scheme, ...rest] = value.trim().split(/\s+/);
+  const token = rest.join(" ").trim();
+  if (!scheme || token.length === 0) {
+    return null;
+  }
+  const normalizedScheme = scheme.toLowerCase();
+  if (normalizedScheme === "bearer") {
+    return { method: "bearer-access-token", token };
+  }
+  if (normalizedScheme === "dpop") {
+    return { method: "dpop-access-token", token };
+  }
+  return null;
+}
+
+function remoteAuthFailure(statusCode: 401 | 403, code: string, message: string) {
+  return {
+    ok: false,
+    failure: {
+      statusCode,
+      code,
+      message,
+    },
+  } as const;
+}
+
+function isLoopbackAddress(value: string | undefined): boolean {
+  return (
+    value === undefined ||
+    value === "127.0.0.1" ||
+    value === "::1" ||
+    value === "::ffff:127.0.0.1"
+  );
+}
+
+function isLoopbackHost(value: string | undefined): boolean {
+  if (!value) {
+    return true;
+  }
+  const host = value.split(":")[0]?.toLowerCase();
+  return host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
+}
+
+function firstHeaderValue(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) {
+    return value[0];
+  }
+  const first = value?.split(",")[0]?.trim();
+  return first && first.length > 0 ? first : undefined;
+}
+
+function requestAbsoluteUrl(
+  req: http.IncomingMessage,
+  fallbackPort: number,
+  options?: {
+    readonly forceHttpsHosts?: ReadonlyArray<string>;
+  },
+): string {
+  try {
+    const absolute = new URL(req.url ?? "/");
+    return absolute.href;
+  } catch {
+    const host = firstHeaderValue(req.headers.host) ?? `127.0.0.1:${fallbackPort}`;
+    const normalizedHost = host.toLowerCase();
+    const forwardedProto = firstHeaderValue(req.headers["x-forwarded-proto"]);
+    const forceHttps =
+      options?.forceHttpsHosts?.some(
+        (candidate) => candidate.trim().toLowerCase() === normalizedHost,
+      ) ?? false;
+    const proto =
+      forwardedProto === "https" || forwardedProto === "http"
+        ? forwardedProto
+        : forceHttps
+          ? "https"
+          : "http";
+    return new URL(req.url ?? "/", `${proto}://${host}`).href;
+  }
+}
+
+function readDpopProof(req: http.IncomingMessage, fallbackPort: number): string | null {
+  if (typeof req.headers.dpop === "string" && req.headers.dpop.trim().length > 0) {
+    return req.headers.dpop.trim();
+  }
+  try {
+    const url = new URL(req.url ?? "/", `http://127.0.0.1:${fallbackPort}`);
+    const proof = url.searchParams.get("dpop");
+    return proof && proof.trim().length > 0 ? proof.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * ServerShape - Service API for server lifecycle control.
  */
@@ -116,7 +390,12 @@ export interface ServerShape {
   readonly start: Effect.Effect<
     http.Server,
     ServerLifecycleError,
-    Scope.Scope | ServerRuntimeServices | ServerConfig | FileSystem.FileSystem | Path.Path
+    | Scope.Scope
+    | ServerRuntimeServices
+    | ServerConfig
+    | FileSystem.FileSystem
+    | Path.Path
+    | SqlClient.SqlClient
   >;
 
   /**
@@ -296,6 +575,7 @@ export type ServerCoreRuntimeServices =
   | ProviderService
   | ProviderDiscoveryService
   | ProviderHealth
+  | ProviderUpdate
   | ErrorInboxService
   | ServerRuntimeStartup;
 
@@ -309,6 +589,14 @@ export type ServerRuntimeServices =
   | Keybindings
   | Open
   | AnalyticsService;
+
+type ServerRuntimeContext =
+  | Scope.Scope
+  | ServerRuntimeServices
+  | ServerConfig
+  | FileSystem.FileSystem
+  | Path.Path
+  | SqlClient.SqlClient;
 
 export class ServerLifecycleError extends Schema.TaggedErrorClass<ServerLifecycleError>()(
   "ServerLifecycleError",
@@ -325,7 +613,7 @@ class RouteRequestError extends Schema.TaggedErrorClass<RouteRequestError>()("Ro
 export const createServer = Effect.fn(function* (): Effect.fn.Return<
   http.Server,
   ServerLifecycleError,
-  Scope.Scope | ServerRuntimeServices | ServerConfig | FileSystem.FileSystem | Path.Path
+  ServerRuntimeContext
 > {
   const serverConfig = yield* ServerConfig;
   const {
@@ -346,6 +634,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const terminalManager = yield* TerminalManager;
   const keybindingsManager = yield* Keybindings;
   const providerHealth = yield* ProviderHealth;
+  const providerUpdate = yield* ProviderUpdate;
   const providerService = yield* ProviderService;
   const providerDiscovery = yield* ProviderDiscoveryService;
   const providerRegistry = Option.getOrUndefined(yield* Effect.serviceOption(ProviderRegistry)) ?? {
@@ -365,6 +654,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const git = yield* GitCore;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const sql = yield* SqlClient.SqlClient;
   const chatWorkspaceRoot = path.join(homeDirectory, "Documents", "A Code", "Chats");
 
   yield* keybindingsManager.syncDefaultKeybindingsOnStartup.pipe(
@@ -379,6 +669,682 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
 
   const clients = yield* Ref.make(new Set<WebSocket>());
   const logger = createLogger("ws");
+  let remoteNetworkAccessEnabled = Boolean(host && host !== "127.0.0.1" && host !== "localhost");
+  let tailscaleHttpsEnabled = false;
+  let tailscaleHttpsUrl: string | null = null;
+  const remoteWebSocketTickets = new Map<string, RemoteWebSocketTicket>();
+  const REMOTE_WEBSOCKET_TICKET_TTL_MS = 60_000;
+  const REMOTE_WEBSOCKET_TICKET_QUERY_PARAM = "wsTicket";
+
+  type AuthPairingLinkRow = {
+    readonly id: string;
+    readonly credential: string;
+    readonly scopes: string;
+    readonly label: string | null;
+    readonly createdAt: string;
+    readonly expiresAt: string;
+  };
+  type AuthSessionRow = {
+    readonly sessionId: string;
+    readonly scopes: string;
+    readonly method: string;
+    readonly proofKeyThumbprint: string | null;
+    readonly clientLabel: string | null;
+    readonly clientIpAddress: string | null;
+    readonly clientDeviceType: string;
+    readonly clientOs: string | null;
+    readonly clientBrowser: string | null;
+    readonly lastConnectedAt: string | null;
+  };
+  type AuthSessionTicketRow = {
+    readonly sessionId: string;
+    readonly scopes: string;
+  };
+  type RemoteAccessAuthContext =
+    | { readonly kind: "local"; readonly scopes: ReadonlyArray<RemoteAccessPermissionType> }
+    | {
+        readonly kind: "remote";
+        readonly sessionId: string;
+        readonly scopes: ReadonlyArray<RemoteAccessPermissionType>;
+      };
+  type RemoteAccessAuthFailure = {
+    readonly statusCode: 401 | 403;
+    readonly code: string;
+    readonly message: string;
+  };
+  type RemoteAccessAuthResult =
+    | { readonly ok: true; readonly context: RemoteAccessAuthContext }
+    | { readonly ok: false; readonly failure: RemoteAccessAuthFailure };
+  type RemoteWebSocketTicket = {
+    readonly sessionId: string;
+    readonly expiresAtMs: number;
+  };
+
+  const parseRemoteAccessScopes = (raw: string): RemoteAccessPermissionType[] => {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) {
+        return [];
+      }
+      return parsed.filter((value): value is RemoteAccessPermissionType =>
+        Schema.is(RemoteAccessPermission)(value),
+      );
+    } catch {
+      return [];
+    }
+  };
+
+  const normalizeRemoteAccessScopes = (
+    scopes: ReadonlyArray<RemoteAccessPermissionType>,
+  ): RemoteAccessPermissionType[] => {
+    const uniqueScopes = Array.from(
+      new Set(scopes.filter((scope) => ALL_REMOTE_ACCESS_SCOPES.includes(scope))),
+    );
+    return uniqueScopes.length > 0 ? uniqueScopes : [...STANDARD_REMOTE_ACCESS_SCOPES];
+  };
+
+  const remoteSettingValue = Effect.fnUntraced(function* (key: string) {
+    const rows = yield* sql<{ readonly value: string }>`
+      SELECT value
+      FROM remote_access_settings
+      WHERE key = ${key}
+      LIMIT 1
+    `;
+    return rows[0]?.value ?? null;
+  });
+
+  const writeRemoteSetting = Effect.fnUntraced(function* (key: string, value: string) {
+    yield* sql`
+      INSERT INTO remote_access_settings (key, value, updated_at)
+      VALUES (${key}, ${value}, ${new Date().toISOString()})
+      ON CONFLICT (key)
+      DO UPDATE SET
+        value = excluded.value,
+        updated_at = excluded.updated_at
+    `;
+  });
+
+  const loadRemoteAccessSettings = Effect.gen(function* () {
+    const [networkAccess, tailscaleEnabled, tailscaleUrl] = yield* Effect.all([
+      remoteSettingValue("networkAccessEnabled"),
+      remoteSettingValue("tailscaleHttpsEnabled"),
+      remoteSettingValue("tailscaleHttpsUrl"),
+    ]);
+    remoteNetworkAccessEnabled =
+      networkAccess === null ? remoteNetworkAccessEnabled : networkAccess === "true";
+    tailscaleHttpsEnabled = tailscaleEnabled === "true";
+    tailscaleHttpsUrl = tailscaleUrl && tailscaleUrl.length > 0 ? tailscaleUrl : null;
+  }).pipe(
+    Effect.catch((cause) =>
+      Effect.logWarning("failed to load remote access settings", {
+        cause: String(cause),
+      }),
+    ),
+  );
+
+  yield* loadRemoteAccessSettings;
+
+  const remoteBaseUrl = () => {
+    const displayHost =
+      host && host !== "0.0.0.0" && host !== "::" && host !== "[::]" ? host : "localhost";
+    const formattedHost =
+      displayHost.includes(":") && !displayHost.startsWith("[") ? `[${displayHost}]` : displayHost;
+    return `http://${formattedHost}:${port}`;
+  };
+
+  const isRemoteRequest = (req: http.IncomingMessage) =>
+    !isLoopbackAddress(req.socket.remoteAddress) || !isLoopbackHost(req.headers.host);
+
+  const isTailscaleHostRequest = (req: http.IncomingMessage) => {
+    if (!tailscaleHttpsEnabled || !tailscaleHttpsUrl) {
+      return false;
+    }
+    const requestHost = firstHeaderValue(req.headers.host)?.toLowerCase();
+    if (!requestHost) {
+      return false;
+    }
+    try {
+      return new URL(tailscaleHttpsUrl).host.toLowerCase() === requestHost;
+    } catch {
+      return false;
+    }
+  };
+
+  const isRemoteAccessAllowedForRequest = (req: http.IncomingMessage) =>
+    !isRemoteRequest(req) || remoteNetworkAccessEnabled || isTailscaleHostRequest(req);
+
+  const remoteAccessSnapshot = () =>
+    Effect.gen(function* () {
+      const now = new Date().toISOString();
+      const [pairingRows, sessionRows] = yield* Effect.all([
+        sql<AuthPairingLinkRow>`
+        SELECT
+          id,
+          credential,
+          scopes,
+          label,
+          created_at AS "createdAt",
+          expires_at AS "expiresAt"
+        FROM auth_pairing_links
+        WHERE revoked_at IS NULL
+          AND consumed_at IS NULL
+          AND expires_at > ${now}
+        ORDER BY created_at DESC, id DESC
+      `,
+        sql<AuthSessionRow>`
+        SELECT
+          session_id AS "sessionId",
+          scopes,
+          method,
+          proof_key_thumbprint AS "proofKeyThumbprint",
+          client_label AS "clientLabel",
+          client_ip_address AS "clientIpAddress",
+          client_device_type AS "clientDeviceType",
+          client_os AS "clientOs",
+          client_browser AS "clientBrowser",
+          last_connected_at AS "lastConnectedAt"
+        FROM auth_sessions
+        WHERE revoked_at IS NULL
+          AND expires_at > ${now}
+        ORDER BY issued_at DESC, session_id DESC
+        `,
+      ]);
+      const baseUrl = tailscaleHttpsUrl ?? remoteBaseUrl();
+      const connectedCutoff = Date.now() - 120_000;
+      return {
+        networkAccessEnabled: remoteNetworkAccessEnabled,
+        tailscaleHttpsEnabled,
+        tailscaleHttpsUrl,
+        pairingLinks: pairingRows.map((row) => ({
+          id: row.id,
+          label: row.label,
+          credential: row.credential,
+          scopes: parseRemoteAccessScopes(row.scopes),
+          url: buildPairingUrl(baseUrl, row.credential),
+          createdAt: row.createdAt,
+          expiresAt: row.expiresAt,
+        })),
+        clients: sessionRows.map((row) => ({
+          id: row.sessionId,
+          label: row.clientLabel ?? "Paired client",
+          deviceType: row.clientDeviceType,
+          os: row.clientOs ?? "Unknown",
+          client: row.clientBrowser ?? "Unknown",
+          host: row.clientIpAddress ?? "remote",
+          scopes: parseRemoteAccessScopes(row.scopes),
+          isCurrent: false,
+          connected: row.lastConnectedAt
+            ? Date.parse(row.lastConnectedAt) >= connectedCutoff
+            : false,
+        })),
+        remoteEnvironments: [],
+      };
+    });
+
+  const createRemotePairingLink = Effect.fnUntraced(function* (input: {
+    label?: string | undefined;
+    scopes: ReadonlyArray<RemoteAccessPermissionType>;
+    proofKeyThumbprint?: string | null | undefined;
+  }) {
+    const credential = randomUUID().replaceAll("-", "");
+    const now = new Date();
+    const createdAt = now.toISOString();
+    const expiresAt = new Date(now.getTime() + 5 * 60_000).toISOString();
+    const scopes = normalizeRemoteAccessScopes(input.scopes);
+    const pairingLink: RemoteAccessPairingLink = {
+      id: randomUUID(),
+      label: input.label?.trim() || null,
+      credential,
+      scopes,
+      url: buildPairingUrl(tailscaleHttpsUrl ?? remoteBaseUrl(), credential),
+      createdAt,
+      expiresAt,
+    };
+    yield* sql`
+      INSERT INTO auth_pairing_links (
+        id,
+        credential,
+        method,
+        scopes,
+        subject,
+        label,
+        proof_key_thumbprint,
+        created_at,
+        expires_at,
+        consumed_at,
+        revoked_at
+      )
+      VALUES (
+        ${pairingLink.id},
+        ${credential},
+        ${"one-time-token"},
+        ${JSON.stringify(scopes)},
+        ${"remote-client"},
+        ${pairingLink.label},
+        ${input.proofKeyThumbprint ?? null},
+        ${createdAt},
+        ${expiresAt},
+        NULL,
+        NULL
+      )
+    `;
+    return {
+      pairingLink,
+      snapshot: yield* remoteAccessSnapshot(),
+    };
+  });
+
+  const exchangeRemotePairingCode = Effect.fnUntraced(function* (input: {
+    credential: string;
+    label?: string | undefined;
+    deviceType?: string | undefined;
+    os?: string | undefined;
+    client?: string | undefined;
+    host?: string | undefined;
+    userAgent?: string | undefined;
+    proofKeyThumbprint?: string | null | undefined;
+  }) {
+    const credential = input.credential.trim();
+    const now = new Date();
+    const consumedAt = now.toISOString();
+    const pairingRows = yield* sql<
+      AuthPairingLinkRow & { readonly proofKeyThumbprint: string | null }
+    >`
+      UPDATE auth_pairing_links
+      SET consumed_at = ${consumedAt}
+      WHERE credential = ${credential}
+        AND revoked_at IS NULL
+        AND consumed_at IS NULL
+        AND expires_at > ${consumedAt}
+        AND (
+          proof_key_thumbprint IS NULL
+          OR proof_key_thumbprint = ${input.proofKeyThumbprint ?? null}
+        )
+      RETURNING
+        id,
+        credential,
+        scopes,
+        label,
+        proof_key_thumbprint AS "proofKeyThumbprint",
+        created_at AS "createdAt",
+        expires_at AS "expiresAt"
+    `;
+    const pairingLink = pairingRows[0];
+    if (!pairingLink) {
+      return null;
+    }
+    const sessionToken = randomUUID().replaceAll("-", "");
+    const expiresAt = new Date(now.getTime() + 365 * 24 * 60 * 60_000).toISOString();
+    const scopes = parseRemoteAccessScopes(pairingLink.scopes);
+    const method = input.proofKeyThumbprint ? "dpop-access-token" : "bearer-access-token";
+    yield* sql`
+      INSERT INTO auth_sessions (
+        session_id,
+        subject,
+        scopes,
+        method,
+        client_label,
+        client_ip_address,
+        client_user_agent,
+        client_device_type,
+        client_os,
+        client_browser,
+        proof_key_thumbprint,
+        issued_at,
+        expires_at,
+        last_connected_at,
+        revoked_at
+      )
+      VALUES (
+        ${sessionToken},
+        ${"remote-client"},
+        ${JSON.stringify(scopes)},
+        ${method},
+        ${input.label?.trim() || pairingLink.label || "Paired client"},
+        ${input.host?.trim() || "remote"},
+        ${input.userAgent?.trim() || null},
+        ${input.deviceType?.trim() || "unknown"},
+        ${input.os?.trim() || null},
+        ${input.client?.trim() || null},
+        ${input.proofKeyThumbprint ?? null},
+        ${consumedAt},
+        ${expiresAt},
+        ${consumedAt},
+        NULL
+      )
+    `;
+    const client: RemoteAccessClient = {
+      id: sessionToken,
+      sessionToken,
+      label: input.label?.trim() || pairingLink.label || "Paired client",
+      deviceType: input.deviceType?.trim() || "unknown",
+      os: input.os?.trim() || "Unknown",
+      client: input.client?.trim() || "Unknown",
+      host: input.host?.trim() || "remote",
+      scopes,
+      isCurrent: false,
+      connected: true,
+    };
+    return {
+      sessionToken,
+      client,
+      snapshot: yield* remoteAccessSnapshot(),
+    };
+  });
+
+  const pruneRemoteWebSocketTickets = (nowMs: number) => {
+    for (const [ticket, issued] of remoteWebSocketTickets) {
+      if (issued.expiresAtMs <= nowMs) {
+        remoteWebSocketTickets.delete(ticket);
+      }
+    }
+  };
+
+  const issueRemoteWebSocketTicket = (authContext: RemoteAccessAuthContext) => {
+    if (authContext.kind !== "remote") {
+      return null;
+    }
+    const nowMs = Date.now();
+    pruneRemoteWebSocketTickets(nowMs);
+    const ticket = `${randomUUID().replaceAll("-", "")}${randomUUID().replaceAll("-", "")}`;
+    const expiresAtMs = nowMs + REMOTE_WEBSOCKET_TICKET_TTL_MS;
+    remoteWebSocketTickets.set(ticket, {
+      sessionId: authContext.sessionId,
+      expiresAtMs,
+    });
+    return {
+      ticket,
+      expiresAt: new Date(expiresAtMs).toISOString(),
+    };
+  };
+
+  const consumeRemoteWebSocketTicket = Effect.fnUntraced(function* (ticket: string) {
+    const nowMs = Date.now();
+    pruneRemoteWebSocketTickets(nowMs);
+    const issued = remoteWebSocketTickets.get(ticket);
+    if (!issued) {
+      return null;
+    }
+    remoteWebSocketTickets.delete(ticket);
+
+    const now = new Date(nowMs).toISOString();
+    const rows = yield* sql<AuthSessionTicketRow>`
+      SELECT
+        session_id AS "sessionId",
+        scopes
+      FROM auth_sessions
+      WHERE session_id = ${issued.sessionId}
+        AND revoked_at IS NULL
+        AND expires_at > ${now}
+      LIMIT 1
+    `;
+    const session = rows[0];
+    if (!session) {
+      return null;
+    }
+    yield* sql`
+      UPDATE auth_sessions
+      SET last_connected_at = ${now}
+      WHERE session_id = ${session.sessionId}
+        AND revoked_at IS NULL
+    `;
+    return {
+      kind: "remote",
+      sessionId: session.sessionId,
+      scopes: parseRemoteAccessScopes(session.scopes),
+    } satisfies RemoteAccessAuthContext;
+  });
+
+  const verifyRequestDpop = Effect.fnUntraced(function* (input: {
+    req: http.IncomingMessage;
+    accessToken?: string;
+    expectedThumbprint?: string | null;
+  }) {
+    const proof = readDpopProof(input.req, port);
+    if (!proof) {
+      return yield* new RouteRequestError({
+        message: "Missing DPoP proof.",
+      });
+    }
+    const nowEpochSeconds = Math.floor(Date.now() / 1000);
+    const forceHttpsHosts =
+      tailscaleHttpsUrl !== null
+        ? (() => {
+            try {
+              return [new URL(tailscaleHttpsUrl).host];
+            } catch {
+              return [] as string[];
+            }
+          })()
+        : [];
+    const verification = yield* Effect.tryPromise({
+      try: () =>
+        verifyDpopProof({
+          proof,
+          method: input.req.method ?? "GET",
+          url: requestAbsoluteUrl(input.req, port, { forceHttpsHosts }),
+          nowEpochSeconds,
+          ...(input.expectedThumbprint ? { expectedThumbprint: input.expectedThumbprint } : {}),
+          ...(input.accessToken ? { expectedAccessToken: input.accessToken } : {}),
+        }),
+      catch: () => new RouteRequestError({ message: "Failed to verify DPoP proof." }),
+    });
+    if (!verification.ok) {
+      return yield* new RouteRequestError({
+        message: verification.reason,
+      });
+    }
+    const replayKey = createHash("sha256")
+      .update(`${verification.thumbprint}:${verification.jti}`)
+      .digest("base64url");
+    const expiresAt = new Date((verification.iat + 300) * 1000).toISOString();
+    const consumedAt = new Date().toISOString();
+    const inserted = yield* sql<{ readonly replayKey: string }>`
+      INSERT INTO auth_dpop_proofs (
+        replay_key,
+        thumbprint,
+        jti,
+        consumed_at,
+        expires_at
+      )
+      VALUES (
+        ${replayKey},
+        ${verification.thumbprint},
+        ${verification.jti},
+        ${consumedAt},
+        ${expiresAt}
+      )
+      ON CONFLICT (replay_key) DO NOTHING
+      RETURNING replay_key AS "replayKey"
+    `;
+    if (inserted.length === 0) {
+      return yield* new RouteRequestError({
+        message: "DPoP proof replayed.",
+      });
+    }
+    return verification.thumbprint;
+  });
+
+  const dpopFailureMessage = (cause: Cause.Cause<unknown>): string => {
+    const error = Cause.squash(cause);
+    return error instanceof Error && error.message.trim().length > 0
+      ? error.message
+      : "Invalid DPoP proof.";
+  };
+
+  const resolveRemoteAccessAuth = (req: http.IncomingMessage) =>
+    Effect.gen(function* () {
+      const url = new URL(req.url ?? "/", `http://localhost:${port}`);
+      const requestIsLocal =
+        isLoopbackAddress(req.socket.remoteAddress) && isLoopbackHost(req.headers.host);
+      if (!isRemoteAccessAllowedForRequest(req)) {
+        return remoteAuthFailure(
+          403,
+          "remote_access_disabled",
+          "Remote access is disabled for this backend.",
+        );
+      }
+      const webSocketTicket = url.searchParams.get(REMOTE_WEBSOCKET_TICKET_QUERY_PARAM);
+      if (webSocketTicket && webSocketTicket.trim().length > 0) {
+        const context = yield* consumeRemoteWebSocketTicket(webSocketTicket.trim());
+        return context
+          ? ({ ok: true, context } satisfies RemoteAccessAuthResult)
+          : remoteAuthFailure(
+              401,
+              "invalid_websocket_ticket",
+              "The WebSocket ticket is invalid or expired.",
+            );
+      }
+      const authorization = parseAuthorizationHeader(req.headers.authorization);
+      const queryToken = url.searchParams.get("access_token");
+      const token = authorization?.token ?? queryToken;
+      if (!token) {
+        return requestIsLocal
+          ? ({
+              ok: true,
+              context: {
+                kind: "local",
+                scopes: ALL_REMOTE_ACCESS_SCOPES,
+              },
+            } satisfies RemoteAccessAuthResult)
+          : remoteAuthFailure(
+              401,
+              "missing_credential",
+              "Missing remote access credential.",
+            );
+      }
+      const now = new Date().toISOString();
+      const rows = yield* sql<AuthSessionRow>`
+      SELECT
+        session_id AS "sessionId",
+        scopes,
+        method,
+        proof_key_thumbprint AS "proofKeyThumbprint",
+        client_label AS "clientLabel",
+        client_ip_address AS "clientIpAddress",
+        client_device_type AS "clientDeviceType",
+        client_os AS "clientOs",
+        client_browser AS "clientBrowser",
+        last_connected_at AS "lastConnectedAt"
+      FROM auth_sessions
+      WHERE session_id = ${token}
+        AND revoked_at IS NULL
+        AND expires_at > ${now}
+      LIMIT 1
+      `;
+      const session = rows[0];
+      if (!session) {
+        return remoteAuthFailure(
+          401,
+          "invalid_credential",
+          "The remote access token is unknown, revoked, or expired.",
+        );
+      }
+      if (authorization && session.method !== authorization.method) {
+        return remoteAuthFailure(
+          401,
+          "invalid_credential",
+          `The token requires ${session.method} authentication.`,
+        );
+      }
+      if (session.method === "dpop-access-token") {
+        const hasQueryDpopProof = queryToken === token && readDpopProof(req, port) !== null;
+        if (authorization?.method !== "dpop-access-token" && !hasQueryDpopProof) {
+          return remoteAuthFailure(
+            401,
+            "invalid_dpop",
+            "DPoP-bound access token requires DPoP authorization and proof.",
+          );
+        }
+        if (!session.proofKeyThumbprint) {
+          return remoteAuthFailure(
+            401,
+            "invalid_dpop",
+            "DPoP-bound access token is missing a stored proof key.",
+          );
+        }
+        const verification = yield* Effect.exit(verifyRequestDpop({
+          req,
+          accessToken: token,
+          expectedThumbprint: session.proofKeyThumbprint,
+        }));
+        if (Exit.isFailure(verification)) {
+          return remoteAuthFailure(401, "invalid_dpop", dpopFailureMessage(verification.cause));
+        }
+      }
+      yield* sql`
+      UPDATE auth_sessions
+      SET last_connected_at = ${now}
+      WHERE session_id = ${session.sessionId}
+        AND revoked_at IS NULL
+      `;
+      return {
+        ok: true,
+        context: {
+          kind: "remote",
+          sessionId: session.sessionId,
+          scopes: parseRemoteAccessScopes(session.scopes),
+        },
+      } satisfies RemoteAccessAuthResult;
+    });
+
+  const requiredRemoteAccessScope = (
+    method: WebSocketRequest["body"]["_tag"],
+  ): RemoteAccessPermissionType | null => {
+    if (
+      method === WS_METHODS.remoteAccessCreatePairingLink ||
+      method === WS_METHODS.remoteAccessRevokePairingLink ||
+      method === WS_METHODS.remoteAccessRevokeClient ||
+      method === WS_METHODS.remoteAccessRevokeOtherClients ||
+      method === WS_METHODS.remoteAccessSetNetworkAccess
+    ) {
+      return "access:write";
+    }
+    if (method === WS_METHODS.remoteAccessSetTailscaleHttps) {
+      return "relay:write";
+    }
+    if (method === WS_METHODS.remoteAccessGetSnapshot) {
+      return "access:read";
+    }
+    if (method === ORCHESTRATION_WS_METHODS.dispatchCommand) {
+      return "orchestration:operate";
+    }
+    if (
+      method === WS_METHODS.terminalOpen ||
+      method === WS_METHODS.terminalWrite ||
+      method === WS_METHODS.terminalResize ||
+      method === WS_METHODS.terminalClose
+    ) {
+      return "terminal:operate";
+    }
+    if (
+      method === WS_METHODS.projectsWriteFile ||
+      method === WS_METHODS.projectsCreateDirectory ||
+      method === WS_METHODS.projectsDeleteEntry ||
+      method === WS_METHODS.projectsRenameEntry
+    ) {
+      return "orchestration:operate";
+    }
+    return "orchestration:read";
+  };
+
+  const authorizeRemoteAccessRequest = (
+    authContext: RemoteAccessAuthContext,
+    method: WebSocketRequest["body"]["_tag"],
+  ): Effect.Effect<void, RouteRequestError> => {
+    if (authContext.kind === "local") {
+      return Effect.void;
+    }
+    const requiredScope = requiredRemoteAccessScope(method);
+    if (!requiredScope || authContext.scopes.includes(requiredScope)) {
+      return Effect.void;
+    }
+    return Effect.fail(
+      new RouteRequestError({
+        message: `Remote client is missing required permission: ${requiredScope}`,
+      }),
+    );
+  };
 
   function logOutgoingPush(push: WsPush, recipients: number) {
     if (!logWebSocketEvents) return;
@@ -409,8 +1375,29 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       providerStatuses,
       providerAccounts,
     });
+    const updateInfo = yield* providerUpdate.getUpdates;
+    const withUpdates = providers.map((providerStatus) => {
+      const info = updateInfo.get(providerStatus.provider);
+      if (!info) {
+        return providerStatus;
+      }
+      const currentVersion = providerStatus.version ?? info.currentVersion ?? null;
+      const updateAvailable = resolveUpdateAvailable(
+        info.latestVersion,
+        currentVersion,
+        info.verification.trusted,
+      );
+      const mergedInfo = currentVersion !== info.currentVersion
+        || updateAvailable !== info.updateAvailable
+        ? { ...info, currentVersion, updateAvailable }
+        : info;
+      return {
+        ...providerStatus,
+        updateInfo: mergedInfo,
+      };
+    });
     return {
-      providers,
+      providers: withUpdates,
       providerAccounts,
     };
   });
@@ -593,11 +1580,174 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       res.writeHead(statusCode, headers);
       res.end(body);
     };
+    const respondJson = (statusCode: number, body: unknown) => {
+      respond(
+        statusCode,
+        {
+          "Content-Type": "application/json",
+          "Cache-Control": "no-store",
+        },
+        JSON.stringify(body),
+      );
+    };
 
-    void Effect.runPromise(
+    void runPromise(
       Effect.gen(function* () {
         const url = new URL(req.url ?? "/", `http://localhost:${port}`);
         if (tryHandleProjectFaviconRequest(url, res)) {
+          return;
+        }
+
+        if (url.pathname === "/api/auth/pairing-token/exchange") {
+          if (!isRemoteAccessAllowedForRequest(req)) {
+            respondJson(403, {
+              error: "remote_access_disabled",
+              message: "Remote access is disabled for this backend.",
+            });
+            return;
+          }
+          if (req.method !== "POST") {
+            respondJson(405, { error: "method_not_allowed" });
+            return;
+          }
+          const payload = (yield* Effect.tryPromise({
+            try: () => readJsonRequest(req),
+            catch: () => new RouteRequestError({ message: "Invalid JSON request body." }),
+          })) as Partial<{
+            credential: string;
+            label: string;
+            deviceType: string;
+            os: string;
+            client: string;
+          }>;
+          if (typeof payload.credential !== "string" || payload.credential.trim().length === 0) {
+            respondJson(400, { error: "missing_credential" });
+            return;
+          }
+          const proofKeyThumbprint = yield* verifyRequestDpop({ req }).pipe(
+            Effect.catchTag("RouteRequestError", (error) => {
+              respondJson(401, { error: "invalid_dpop", message: error.message });
+              return Effect.fail(error);
+            }),
+          );
+          const result = yield* exchangeRemotePairingCode({
+            credential: payload.credential,
+            ...(typeof payload.label === "string" ? { label: payload.label } : {}),
+            ...(typeof payload.deviceType === "string" ? { deviceType: payload.deviceType } : {}),
+            ...(typeof payload.os === "string" ? { os: payload.os } : {}),
+            ...(typeof payload.client === "string" ? { client: payload.client } : {}),
+            host: req.socket.remoteAddress ?? "remote",
+            userAgent:
+              typeof req.headers["user-agent"] === "string" ? req.headers["user-agent"] : undefined,
+            proofKeyThumbprint,
+          });
+          if (!result) {
+            respondJson(401, { error: "invalid_credential" });
+            return;
+          }
+          respondJson(200, result);
+          return;
+        }
+
+        if (url.pathname === "/api/auth/websocket-ticket") {
+          if (!isRemoteAccessAllowedForRequest(req)) {
+            respondJson(403, {
+              error: "remote_access_disabled",
+              message: "Remote access is disabled for this backend.",
+            });
+            return;
+          }
+          if (req.method !== "POST") {
+            respondJson(405, { error: "method_not_allowed" });
+            return;
+          }
+          const authResult = yield* resolveRemoteAccessAuth(req);
+          if (!authResult.ok) {
+            respondJson(authResult.failure.statusCode, {
+              error: authResult.failure.code,
+              message: authResult.failure.message,
+            });
+            return;
+          }
+          if (authResult.context.kind !== "remote") {
+            respondJson(401, {
+              error: "invalid_credential",
+              message: "WebSocket tickets require a paired remote browser session.",
+            });
+            return;
+          }
+          const issued = issueRemoteWebSocketTicket(authResult.context);
+          if (!issued) {
+            respondJson(401, {
+              error: "invalid_credential",
+              message: "Could not authenticate this remote browser session.",
+            });
+            return;
+          }
+          respondJson(200, issued);
+          return;
+        }
+
+        if (url.pathname === "/api/auth/token") {
+          if (!isRemoteAccessAllowedForRequest(req)) {
+            respondJson(403, {
+              error: "remote_access_disabled",
+              message: "Remote access is disabled for this backend.",
+            });
+            return;
+          }
+          if (req.method !== "POST") {
+            respondJson(405, { error: "method_not_allowed" });
+            return;
+          }
+          const rawBody = yield* Effect.tryPromise({
+            try: () => readRequestBodyText(req),
+            catch: () => new RouteRequestError({ message: "Invalid token exchange body." }),
+          });
+          const form = new URLSearchParams(rawBody);
+          const grantType = form.get("grant_type");
+          const subjectToken = form.get("subject_token");
+          const subjectTokenType = form.get("subject_token_type");
+          const requestedTokenType = form.get("requested_token_type");
+          if (
+            grantType !== "urn:ietf:params:oauth:grant-type:token-exchange" ||
+            subjectTokenType !== "urn:t3:params:oauth:token-type:environment-bootstrap" ||
+            requestedTokenType !== "urn:ietf:params:oauth:token-type:access_token" ||
+            !subjectToken
+          ) {
+            respondJson(400, { error: "invalid_request" });
+            return;
+          }
+          const proofKeyThumbprint = yield* verifyRequestDpop({ req }).pipe(
+            Effect.catchTag("RouteRequestError", (error) => {
+              respondJson(401, { error: "invalid_dpop", message: error.message });
+              return Effect.fail(error);
+            }),
+          );
+          const result = yield* exchangeRemotePairingCode({
+            credential: subjectToken,
+            ...(form.get("client_label") ? { label: form.get("client_label") ?? undefined } : {}),
+            ...(form.get("client_device_type")
+              ? { deviceType: form.get("client_device_type") ?? undefined }
+              : {}),
+            ...(form.get("client_os") ? { os: form.get("client_os") ?? undefined } : {}),
+            client: "Unknown",
+            host: req.socket.remoteAddress ?? "remote",
+            userAgent:
+              typeof req.headers["user-agent"] === "string" ? req.headers["user-agent"] : undefined,
+            proofKeyThumbprint,
+          });
+          if (!result) {
+            respondJson(401, { error: "invalid_grant" });
+            return;
+          }
+          respondJson(200, {
+            access_token: result.sessionToken,
+            issued_token_type: "urn:ietf:params:oauth:token-type:access_token",
+            token_type: "DPoP",
+            expires_in: 365 * 24 * 60 * 60,
+            scope: result.client.scopes.join(" "),
+          });
           return;
         }
 
@@ -695,7 +1845,51 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
 
         // In dev mode, redirect to Vite dev server
         if (devUrl) {
-          respond(302, { Location: devUrl.href });
+          const proxiedUrl = new URL(url.pathname, devUrl);
+          proxiedUrl.search = url.search;
+          const proxiedResponse = yield* Effect.tryPromise({
+            try: async () =>
+              fetch(proxiedUrl, {
+                method: req.method ?? "GET",
+                headers: {
+                  accept: req.headers.accept ?? "*/*",
+                  "content-type":
+                    typeof req.headers["content-type"] === "string"
+                      ? req.headers["content-type"]
+                      : "",
+                },
+                ...(req.method && req.method !== "GET" && req.method !== "HEAD"
+                  ? { body: await readRequestBodyBytes(req) }
+                  : {}),
+              }),
+            catch: () =>
+              new RouteRequestError({
+                message: `Failed to proxy development request to ${proxiedUrl.toString()}.`,
+              }),
+          });
+          const headers: Record<string, string> = {};
+          for (const [key, value] of proxiedResponse.headers.entries()) {
+            if (
+              key.toLowerCase() === "content-type" ||
+              key.toLowerCase() === "cache-control" ||
+              key.toLowerCase() === "etag" ||
+              key.toLowerCase() === "last-modified"
+            ) {
+              headers[key] = value;
+            }
+          }
+          if (req.method === "HEAD") {
+            respond(proxiedResponse.status, headers);
+            return;
+          }
+          const proxiedBody = yield* Effect.tryPromise({
+            try: () => proxiedResponse.arrayBuffer(),
+            catch: () =>
+              new RouteRequestError({
+                message: `Failed to read proxied development response from ${proxiedUrl.toString()}.`,
+              }),
+          });
+          respond(proxiedResponse.status, headers, new Uint8Array(proxiedBody));
           return;
         }
 
@@ -809,10 +2003,33 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
   const commandReceiptRepository = yield* OrchestrationCommandReceiptRepository;
   const errorInbox = yield* ErrorInboxService;
   const startup = yield* ServerRuntimeStartup;
-  const { openInEditor } = yield* Open;
+  const { launchCommand, openInEditor } = yield* Open;
 
   const subscriptionsScope = yield* Scope.make("sequential");
   yield* Effect.addFinalizer(() => Scope.close(subscriptionsScope, Exit.void));
+
+  const broadcastProviderUpdateStatus = (
+    provider: ProviderKind,
+    status: "started" | "finished" | "failed",
+    command: string,
+    message?: string,
+  ) =>
+    broadcastPush({
+      type: "push",
+      channel: WS_CHANNELS.serverProviderUpdateStatus,
+      data: {
+        provider,
+        status,
+        command,
+        ...(message ? { message } : {}),
+      },
+    });
+
+  const refreshProviderUpdateState = (provider: ProviderKind) =>
+    Effect.all([
+      providerUpdate.refresh(provider),
+      providerRegistry.refresh(provider),
+    ]);
 
   const cleanupThreadsAfterBulkAction = Effect.fnUntraced(function* (
     threads: ReadonlyArray<OrchestrationThread>,
@@ -970,7 +2187,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
 
   if (autoBootstrapProjectFromCwd) {
     yield* Effect.gen(function* () {
-      const snapshot = yield* projectionReadModelQuery.getSnapshot();
+      const snapshot = yield* projectionReadModelQuery.getSnapshot({ mode: "bootstrap" });
       const existingProject = snapshot.projects.find(
         (project) => project.workspaceRoot === cwd && project.deletedAt === null,
       );
@@ -1028,10 +2245,13 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     );
   }
 
-  const runPromise = yield* Effect.map(Effect.services<never>(), Effect.runPromiseWith);
+  const runPromise = yield* Effect.map(
+    Effect.services<ServerRuntimeContext>(),
+    Effect.runPromiseWith,
+  );
 
   const unsubscribeTerminalEvents = yield* terminalManager.subscribe(
-    (event) => void Effect.runPromise(onTerminalEvent(event)),
+    (event) => void runPromise(onTerminalEvent(event)),
   );
   yield* Effect.addFinalizer(() => Effect.sync(() => unsubscribeTerminalEvents()));
 
@@ -1050,7 +2270,12 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     ]),
   );
 
-  const routeRequest = Effect.fnUntraced(function* (request: WebSocketRequest) {
+  const routeRequest = Effect.fnUntraced(function* (
+    request: WebSocketRequest,
+    authContext: RemoteAccessAuthContext,
+  ) {
+    yield* authorizeRemoteAccessRequest(authContext, request.body._tag);
+
     switch (request.body._tag) {
       case ORCHESTRATION_WS_METHODS.getSnapshot:
         return yield* projectionReadModelQuery.getSnapshot(stripRequestTag(request.body));
@@ -1064,7 +2289,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
           normalizedCommand.type === "project.archive" ||
           (normalizedCommand.type === "project.delete" && normalizedCommand.deleteThreads === true)
         ) {
-          const snapshot = yield* projectionReadModelQuery.getSnapshot();
+          const snapshot = yield* projectionReadModelQuery.getSnapshot({ mode: "bootstrap" });
           const affectedThreads =
             normalizedCommand.type === "project.archive"
               ? snapshot.threads.filter(
@@ -1253,6 +2478,27 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       case WS_METHODS.shellOpenInEditor: {
         const body = stripRequestTag(request.body);
         return yield* openInEditor(body);
+      }
+
+      case WS_METHODS.serverUpdateProvider: {
+        const body = stripRequestTag(request.body);
+        const command = resolveProviderUpdateCommand(body);
+        yield* broadcastProviderUpdateStatus(body.provider, "started", command);
+        yield* Effect.gen(function* () {
+          const exit = yield* launchCommand(command).pipe(Effect.exit);
+          yield* refreshProviderUpdateState(body.provider);
+          if (Exit.isSuccess(exit)) {
+            yield* broadcastProviderUpdateStatus(body.provider, "finished", command);
+            return;
+          }
+          yield* broadcastProviderUpdateStatus(
+            body.provider,
+            "failed",
+            command,
+            Cause.pretty(exit.cause),
+          );
+        }).pipe(Effect.forkIn(subscriptionsScope));
+        return { command };
       }
 
       case WS_METHODS.gitStatus: {
@@ -1528,6 +2774,92 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         return settings.computerUse;
       }
 
+      case WS_METHODS.remoteAccessGetSnapshot:
+        return yield* remoteAccessSnapshot();
+
+      case WS_METHODS.remoteAccessCreatePairingLink: {
+        const body = stripRequestTag(request.body);
+        return yield* createRemotePairingLink(body);
+      }
+
+      case WS_METHODS.remoteAccessRevokePairingLink: {
+        const body = stripRequestTag(request.body);
+        yield* sql`
+          UPDATE auth_pairing_links
+          SET revoked_at = ${new Date().toISOString()}
+          WHERE id = ${body.id}
+            AND revoked_at IS NULL
+            AND consumed_at IS NULL
+        `;
+        return yield* remoteAccessSnapshot();
+      }
+
+      case WS_METHODS.remoteAccessRevokeClient: {
+        const body = stripRequestTag(request.body);
+        yield* sql`
+          UPDATE auth_sessions
+          SET revoked_at = ${new Date().toISOString()}
+          WHERE session_id = ${body.id}
+            AND revoked_at IS NULL
+        `;
+        return yield* remoteAccessSnapshot();
+      }
+
+      case WS_METHODS.remoteAccessRevokeOtherClients: {
+        const sessionIdToKeep = authContext.kind === "remote" ? authContext.sessionId : null;
+        if (sessionIdToKeep) {
+          yield* sql`
+            UPDATE auth_sessions
+            SET revoked_at = ${new Date().toISOString()}
+            WHERE revoked_at IS NULL
+              AND session_id <> ${sessionIdToKeep}
+          `;
+        } else {
+          yield* sql`
+            UPDATE auth_sessions
+            SET revoked_at = ${new Date().toISOString()}
+            WHERE revoked_at IS NULL
+          `;
+        }
+        return yield* remoteAccessSnapshot();
+      }
+
+      case WS_METHODS.remoteAccessSetNetworkAccess: {
+        const body = stripRequestTag(request.body);
+        remoteNetworkAccessEnabled = body.enabled;
+        yield* writeRemoteSetting("networkAccessEnabled", body.enabled ? "true" : "false");
+        return yield* remoteAccessSnapshot();
+      }
+
+      case WS_METHODS.remoteAccessSetTailscaleHttps: {
+        const body = stripRequestTag(request.body);
+        if (body.enabled) {
+          tailscaleHttpsUrl = yield* Effect.tryPromise({
+            try: () => enableTailscaleServe({ localPort: port }),
+            catch: (cause) =>
+              new RouteRequestError({
+                message: `Failed to enable Tailscale HTTPS: ${String(cause)}`,
+              }),
+          });
+          tailscaleHttpsEnabled = true;
+        } else {
+          yield* Effect.tryPromise({
+            try: () => disableTailscaleServe(),
+            catch: (cause) =>
+              new RouteRequestError({
+                message: `Failed to disable Tailscale HTTPS: ${String(cause)}`,
+              }),
+          });
+          tailscaleHttpsEnabled = false;
+          tailscaleHttpsUrl = null;
+        }
+        yield* Effect.all([
+          writeRemoteSetting("tailscaleHttpsEnabled", tailscaleHttpsEnabled ? "true" : "false"),
+          writeRemoteSetting("tailscaleHttpsUrl", tailscaleHttpsUrl ?? ""),
+        ]);
+        return yield* remoteAccessSnapshot();
+      }
+
       case WS_METHODS.providerGetComposerCapabilities: {
         const body = stripRequestTag(request.body);
         return yield* providerDiscovery.getComposerCapabilities(body);
@@ -1572,7 +2904,11 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     }
   });
 
-  const handleMessage = Effect.fnUntraced(function* (ws: WebSocket, raw: unknown) {
+  const handleMessage = Effect.fnUntraced(function* (
+    ws: WebSocket,
+    raw: unknown,
+    authContext: RemoteAccessAuthContext,
+  ) {
     const encodeResponse = Schema.encodeEffect(Schema.fromJsonString(WsResponse));
 
     const messageText = websocketRawToString(raw);
@@ -1595,7 +2931,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       return;
     }
 
-    const result = yield* Effect.exit(routeRequest(request.value));
+    const result = yield* Effect.exit(routeRequest(request.value, authContext));
     if (result._tag === "Failure") {
       const errorResponse = yield* encodeResponse({
         id: request.value.id,
@@ -1626,7 +2962,14 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         return;
       }
 
-      if (providedToken !== authToken) {
+      if (providedToken !== null && providedToken === authToken) {
+        wss.handleUpgrade(request, socket, head, (ws) => {
+          wss.emit("connection", ws, request);
+        });
+        return;
+      }
+
+      if (providedToken !== null && providedToken !== authToken) {
         rejectUpgrade(socket, 401, "Unauthorized WebSocket connection");
         return;
       }
@@ -1637,67 +2980,78 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     });
   });
 
-  wss.on("connection", (ws) => {
-    void runPromise(Ref.update(clients, (clients) => clients.add(ws)));
+  wss.on("connection", (ws, request) => {
+    void runPromise(
+      Effect.gen(function* () {
+        const authResult = yield* resolveRemoteAccessAuth(request);
+        if (!authResult.ok) {
+          ws.close(1008, authResult.failure.message);
+          return;
+        }
+        const authContext = authResult.context;
 
-    const segments = cwd.split(/[/\\]/).filter(Boolean);
-    const projectName = segments[segments.length - 1] ?? "project";
+        yield* Ref.update(clients, (connectedClients) => connectedClients.add(ws));
 
-    const welcome: WsPush = {
-      type: "push",
-      channel: WS_CHANNELS.serverWelcome,
-      data: {
-        cwd,
-        homeDirectory,
-        projectName,
-        ...(welcomeBootstrapProjectId ? { bootstrapProjectId: welcomeBootstrapProjectId } : {}),
-        ...(welcomeBootstrapThreadId ? { bootstrapThreadId: welcomeBootstrapThreadId } : {}),
-      },
-    };
-    logOutgoingPush(welcome, 1);
-    ws.send(JSON.stringify(welcome));
+        const segments = cwd.split(/[/\\]/).filter(Boolean);
+        const projectName = segments[segments.length - 1] ?? "project";
 
-    ws.on("message", (raw) => {
-      void runPromise(
-        handleMessage(ws, raw).pipe(
-          Effect.catch((error) =>
-            Effect.gen(function* () {
-              yield* errorInbox
-                .capture({
-                  source: "server-internal",
-                  category: "websocket",
-                  severity: "error",
-                  summary: "WebSocket message handler failed",
-                  detail: error instanceof Error ? error.message : String(error),
-                  context: {
-                    error,
-                  },
-                })
-                .pipe(Effect.catch(() => Effect.void));
-              yield* Effect.logError("Error handling message", error);
+        const welcome: WsPush = {
+          type: "push",
+          channel: WS_CHANNELS.serverWelcome,
+          data: {
+            cwd,
+            homeDirectory,
+            projectName,
+            ...(welcomeBootstrapProjectId ? { bootstrapProjectId: welcomeBootstrapProjectId } : {}),
+            ...(welcomeBootstrapThreadId ? { bootstrapThreadId: welcomeBootstrapThreadId } : {}),
+          },
+        };
+        logOutgoingPush(welcome, 1);
+        ws.send(JSON.stringify(welcome));
+
+        ws.on("message", (raw) => {
+          void runPromise(
+            handleMessage(ws, raw, authContext).pipe(
+              Effect.catch((error) =>
+                Effect.gen(function* () {
+                  yield* errorInbox
+                    .capture({
+                      source: "server-internal",
+                      category: "websocket",
+                      severity: "error",
+                      summary: "WebSocket message handler failed",
+                      detail: error instanceof Error ? error.message : String(error),
+                      context: {
+                        error,
+                      },
+                    })
+                    .pipe(Effect.catch(() => Effect.void));
+                  yield* Effect.logError("Error handling message", error);
+                }),
+              ),
+            ),
+          );
+        });
+
+        ws.on("close", () => {
+          void runPromise(
+            Ref.update(clients, (connectedClients) => {
+              connectedClients.delete(ws);
+              return connectedClients;
             }),
-          ),
-        ),
-      );
-    });
+          );
+        });
 
-    ws.on("close", () => {
-      void runPromise(
-        Ref.update(clients, (clients) => {
-          clients.delete(ws);
-          return clients;
-        }),
-      );
-    });
-
-    ws.on("error", () => {
-      void runPromise(
-        Ref.update(clients, (clients) => {
-          clients.delete(ws);
-          return clients;
-        }),
-      );
-    });
+        ws.on("error", () => {
+          void runPromise(
+            Ref.update(clients, (connectedClients) => {
+              connectedClients.delete(ws);
+              return connectedClients;
+            }),
+          );
+        });
+      }),
+    );
   });
 
   return httpServer;

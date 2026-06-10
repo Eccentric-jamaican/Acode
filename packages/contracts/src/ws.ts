@@ -1,4 +1,5 @@
-import { Schema, Struct } from "effect";
+import * as Schema from "effect/Schema";
+import * as Struct from "effect/Struct";
 import { ProjectId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas";
 
 import {
@@ -67,9 +68,17 @@ import {
   ServerGetSettingsInput,
   ServerStartProviderLoginInput,
   ServerSuggestNewThreadTasksInput,
+  ServerUpdateProviderInput,
   ServerUpdateSettingsInput,
 } from "./server";
 import { ComputerUseListAppsInput, ComputerUseSettingsPatch } from "./computerUse";
+import {
+  RemoteAccessCreatePairingLinkInput,
+  RemoteAccessRevokeClientInput,
+  RemoteAccessRevokePairingLinkInput,
+  RemoteAccessSetNetworkAccessInput,
+  RemoteAccessSetTailscaleHttpsInput,
+} from "./remoteAccess";
 
 // ── WebSocket RPC Method Names ───────────────────────────────────────
 
@@ -125,6 +134,7 @@ export const WS_METHODS = {
   serverStartProviderLogin: "server.startProviderLogin",
   serverCancelProviderLogin: "server.cancelProviderLogin",
   serverLogoutProvider: "server.logoutProvider",
+  serverUpdateProvider: "server.updateProvider",
   serverSuggestNewThreadTasks: "server.suggestNewThreadTasks",
   serverUpdateSettings: "server.updateSettings",
 
@@ -132,6 +142,15 @@ export const WS_METHODS = {
   computerUseListApps: "computerUse.listApps",
   computerUseGetSettings: "computerUse.getSettings",
   computerUseUpdateSettings: "computerUse.updateSettings",
+
+  // Remote access
+  remoteAccessGetSnapshot: "remoteAccess.getSnapshot",
+  remoteAccessCreatePairingLink: "remoteAccess.createPairingLink",
+  remoteAccessRevokePairingLink: "remoteAccess.revokePairingLink",
+  remoteAccessRevokeClient: "remoteAccess.revokeClient",
+  remoteAccessRevokeOtherClients: "remoteAccess.revokeOtherClients",
+  remoteAccessSetNetworkAccess: "remoteAccess.setNetworkAccess",
+  remoteAccessSetTailscaleHttps: "remoteAccess.setTailscaleHttps",
 
   // Provider discovery
   providerGetComposerCapabilities: "provider.getComposerCapabilities",
@@ -150,6 +169,7 @@ export const WS_CHANNELS = {
   serverWelcome: "server.welcome",
   serverConfigUpdated: "server.configUpdated",
   serverProviderStateUpdated: "server.providerStateUpdated",
+  serverProviderUpdateStatus: "server.providerUpdateStatus",
   serverErrorInboxUpdated: "server.errorInboxUpdated",
 } as const;
 
@@ -165,89 +185,105 @@ const tagRequestBody = <const Tag extends string, const Fields extends Schema.St
     { unsafePreserveChecks: true },
   );
 
-const WebSocketRequestBody = Schema.Union([
-  // Orchestration methods
-  tagRequestBody(
-    ORCHESTRATION_WS_METHODS.dispatchCommand,
-    Schema.Struct({ command: ClientOrchestrationCommand }),
-  ),
-  tagRequestBody(ORCHESTRATION_WS_METHODS.getCommandReceipt, OrchestrationGetCommandReceiptInput),
-  tagRequestBody(ORCHESTRATION_WS_METHODS.getSnapshot, OrchestrationGetSnapshotInput),
-  tagRequestBody(ORCHESTRATION_WS_METHODS.getTurnDiff, OrchestrationGetTurnDiffInput),
-  tagRequestBody(ORCHESTRATION_WS_METHODS.getFullThreadDiff, OrchestrationGetFullThreadDiffInput),
-  tagRequestBody(ORCHESTRATION_WS_METHODS.replayEvents, OrchestrationReplayEventsInput),
+const makeWebSocketRequestBody = () =>
+  Schema.Union([
+    // Orchestration methods
+    tagRequestBody(
+      ORCHESTRATION_WS_METHODS.dispatchCommand,
+      Schema.Struct({ command: ClientOrchestrationCommand }),
+    ),
+    tagRequestBody(ORCHESTRATION_WS_METHODS.getCommandReceipt, OrchestrationGetCommandReceiptInput),
+    tagRequestBody(ORCHESTRATION_WS_METHODS.getSnapshot, OrchestrationGetSnapshotInput),
+    tagRequestBody(ORCHESTRATION_WS_METHODS.getTurnDiff, OrchestrationGetTurnDiffInput),
+    tagRequestBody(
+      ORCHESTRATION_WS_METHODS.getFullThreadDiff,
+      OrchestrationGetFullThreadDiffInput,
+    ),
+    tagRequestBody(ORCHESTRATION_WS_METHODS.replayEvents, OrchestrationReplayEventsInput),
 
-  // Project Search
-  tagRequestBody(WS_METHODS.projectsSearchEntries, ProjectSearchEntriesInput),
-  tagRequestBody(WS_METHODS.projectsListDirectory, ProjectListDirectoryInput),
-  tagRequestBody(WS_METHODS.projectsListTree, ProjectListTreeInput),
-  tagRequestBody(WS_METHODS.projectsFileMetadata, ProjectFileMetadataInput),
-  tagRequestBody(WS_METHODS.projectsReadFile, ProjectReadFileInput),
-  tagRequestBody(WS_METHODS.projectsWriteFile, ProjectWriteFileInput),
-  tagRequestBody(WS_METHODS.projectsCreateDirectory, ProjectCreateDirectoryInput),
-  tagRequestBody(WS_METHODS.projectsRenameEntry, ProjectRenameEntryInput),
-  tagRequestBody(WS_METHODS.projectsDeleteEntry, ProjectDeleteEntryInput),
+    // Project Search
+    tagRequestBody(WS_METHODS.projectsSearchEntries, ProjectSearchEntriesInput),
+    tagRequestBody(WS_METHODS.projectsListDirectory, ProjectListDirectoryInput),
+    tagRequestBody(WS_METHODS.projectsListTree, ProjectListTreeInput),
+    tagRequestBody(WS_METHODS.projectsFileMetadata, ProjectFileMetadataInput),
+    tagRequestBody(WS_METHODS.projectsReadFile, ProjectReadFileInput),
+    tagRequestBody(WS_METHODS.projectsWriteFile, ProjectWriteFileInput),
+    tagRequestBody(WS_METHODS.projectsCreateDirectory, ProjectCreateDirectoryInput),
+    tagRequestBody(WS_METHODS.projectsRenameEntry, ProjectRenameEntryInput),
+    tagRequestBody(WS_METHODS.projectsDeleteEntry, ProjectDeleteEntryInput),
 
-  // Shell methods
-  tagRequestBody(WS_METHODS.shellOpenInEditor, OpenInEditorInput),
+    // Shell methods
+    tagRequestBody(WS_METHODS.shellOpenInEditor, OpenInEditorInput),
 
-  // Git methods
-  tagRequestBody(WS_METHODS.gitPull, GitPullInput),
-  tagRequestBody(WS_METHODS.gitStatus, GitStatusInput),
-  tagRequestBody(WS_METHODS.gitDiff, GitDiffInput),
-  tagRequestBody(WS_METHODS.gitFilePreview, GitFilePreviewInput),
-  tagRequestBody(WS_METHODS.gitReviewAction, GitReviewActionInput),
-  tagRequestBody(WS_METHODS.gitRunStackedAction, GitRunStackedActionInput),
-  tagRequestBody(WS_METHODS.gitClone, GitCloneInput),
-  tagRequestBody(WS_METHODS.gitListBranches, GitListBranchesInput),
-  tagRequestBody(WS_METHODS.gitCreateWorktree, GitCreateWorktreeInput),
-  tagRequestBody(WS_METHODS.gitRemoveWorktree, GitRemoveWorktreeInput),
-  tagRequestBody(WS_METHODS.gitCreateBranch, GitCreateBranchInput),
-  tagRequestBody(WS_METHODS.gitCheckout, GitCheckoutInput),
-  tagRequestBody(WS_METHODS.gitInit, GitInitInput),
+    // Git methods
+    tagRequestBody(WS_METHODS.gitPull, GitPullInput),
+    tagRequestBody(WS_METHODS.gitStatus, GitStatusInput),
+    tagRequestBody(WS_METHODS.gitDiff, GitDiffInput),
+    tagRequestBody(WS_METHODS.gitFilePreview, GitFilePreviewInput),
+    tagRequestBody(WS_METHODS.gitReviewAction, GitReviewActionInput),
+    tagRequestBody(WS_METHODS.gitRunStackedAction, GitRunStackedActionInput),
+    tagRequestBody(WS_METHODS.gitClone, GitCloneInput),
+    tagRequestBody(WS_METHODS.gitListBranches, GitListBranchesInput),
+    tagRequestBody(WS_METHODS.gitCreateWorktree, GitCreateWorktreeInput),
+    tagRequestBody(WS_METHODS.gitRemoveWorktree, GitRemoveWorktreeInput),
+    tagRequestBody(WS_METHODS.gitCreateBranch, GitCreateBranchInput),
+    tagRequestBody(WS_METHODS.gitCheckout, GitCheckoutInput),
+    tagRequestBody(WS_METHODS.gitInit, GitInitInput),
 
-  // Terminal methods
-  tagRequestBody(WS_METHODS.terminalOpen, TerminalOpenInput),
-  tagRequestBody(WS_METHODS.terminalWrite, TerminalWriteInput),
-  tagRequestBody(WS_METHODS.terminalResize, TerminalResizeInput),
-  tagRequestBody(WS_METHODS.terminalClear, TerminalClearInput),
-  tagRequestBody(WS_METHODS.terminalRestart, TerminalRestartInput),
-  tagRequestBody(WS_METHODS.terminalClose, TerminalCloseInput),
+    // Terminal methods
+    tagRequestBody(WS_METHODS.terminalOpen, TerminalOpenInput),
+    tagRequestBody(WS_METHODS.terminalWrite, TerminalWriteInput),
+    tagRequestBody(WS_METHODS.terminalResize, TerminalResizeInput),
+    tagRequestBody(WS_METHODS.terminalClear, TerminalClearInput),
+    tagRequestBody(WS_METHODS.terminalRestart, TerminalRestartInput),
+    tagRequestBody(WS_METHODS.terminalClose, TerminalCloseInput),
 
-  // Server meta
-  tagRequestBody(WS_METHODS.serverGetConfig, Schema.Struct({})),
-  tagRequestBody(WS_METHODS.serverGetSettings, ServerGetSettingsInput),
-  tagRequestBody(WS_METHODS.serverGetErrorInbox, ServerGetErrorInboxInput),
-  tagRequestBody(WS_METHODS.serverReportClientDiagnostic, ServerReportClientDiagnosticInput),
-  tagRequestBody(
-    WS_METHODS.serverSetErrorInboxEntryResolution,
-    ServerSetErrorInboxEntryResolutionInput,
-  ),
-  tagRequestBody(
-    WS_METHODS.serverPromoteErrorInboxEntryToTask,
-    ServerPromoteErrorInboxEntryToTaskInput,
-  ),
-  tagRequestBody(WS_METHODS.serverUpsertKeybinding, KeybindingRule),
-  tagRequestBody(WS_METHODS.serverStartProviderLogin, ServerStartProviderLoginInput),
-  tagRequestBody(WS_METHODS.serverCancelProviderLogin, ServerCancelProviderLoginInput),
-  tagRequestBody(WS_METHODS.serverLogoutProvider, ServerLogoutProviderInput),
-  tagRequestBody(WS_METHODS.serverSuggestNewThreadTasks, ServerSuggestNewThreadTasksInput),
-  tagRequestBody(WS_METHODS.serverUpdateSettings, ServerUpdateSettingsInput),
+    // Server meta
+    tagRequestBody(WS_METHODS.serverGetConfig, Schema.Struct({})),
+    tagRequestBody(WS_METHODS.serverGetSettings, ServerGetSettingsInput),
+    tagRequestBody(WS_METHODS.serverGetErrorInbox, ServerGetErrorInboxInput),
+    tagRequestBody(WS_METHODS.serverReportClientDiagnostic, ServerReportClientDiagnosticInput),
+    tagRequestBody(
+      WS_METHODS.serverSetErrorInboxEntryResolution,
+      ServerSetErrorInboxEntryResolutionInput,
+    ),
+    tagRequestBody(
+      WS_METHODS.serverPromoteErrorInboxEntryToTask,
+      ServerPromoteErrorInboxEntryToTaskInput,
+    ),
+    tagRequestBody(WS_METHODS.serverUpsertKeybinding, KeybindingRule),
+    tagRequestBody(WS_METHODS.serverStartProviderLogin, ServerStartProviderLoginInput),
+    tagRequestBody(WS_METHODS.serverCancelProviderLogin, ServerCancelProviderLoginInput),
+    tagRequestBody(WS_METHODS.serverLogoutProvider, ServerLogoutProviderInput),
+    tagRequestBody(WS_METHODS.serverUpdateProvider, ServerUpdateProviderInput),
+    tagRequestBody(WS_METHODS.serverSuggestNewThreadTasks, ServerSuggestNewThreadTasksInput),
+    tagRequestBody(WS_METHODS.serverUpdateSettings, ServerUpdateSettingsInput),
 
-  // Computer Use
-  tagRequestBody(WS_METHODS.computerUseListApps, ComputerUseListAppsInput),
-  tagRequestBody(WS_METHODS.computerUseGetSettings, Schema.Struct({})),
-  tagRequestBody(WS_METHODS.computerUseUpdateSettings, ComputerUseSettingsPatch),
+    // Computer Use
+    tagRequestBody(WS_METHODS.computerUseListApps, ComputerUseListAppsInput),
+    tagRequestBody(WS_METHODS.computerUseGetSettings, Schema.Struct({})),
+    tagRequestBody(WS_METHODS.computerUseUpdateSettings, ComputerUseSettingsPatch),
 
-  // Provider discovery
-  tagRequestBody(WS_METHODS.providerGetComposerCapabilities, ProviderGetComposerCapabilitiesInput),
-  tagRequestBody(WS_METHODS.providerListCommands, ProviderListCommandsInput),
-  tagRequestBody(WS_METHODS.providerListSkills, ProviderListSkillsInput),
-  tagRequestBody(WS_METHODS.providerListPlugins, ProviderListPluginsInput),
-  tagRequestBody(WS_METHODS.providerReadPlugin, ProviderReadPluginInput),
-  tagRequestBody(WS_METHODS.providerListModels, ProviderListModelsInput),
-  tagRequestBody(WS_METHODS.providerPrewarmSession, ProviderPrewarmSessionInput),
-]);
+    // Remote access
+    tagRequestBody(WS_METHODS.remoteAccessGetSnapshot, Schema.Struct({})),
+    tagRequestBody(WS_METHODS.remoteAccessCreatePairingLink, RemoteAccessCreatePairingLinkInput),
+    tagRequestBody(WS_METHODS.remoteAccessRevokePairingLink, RemoteAccessRevokePairingLinkInput),
+    tagRequestBody(WS_METHODS.remoteAccessRevokeClient, RemoteAccessRevokeClientInput),
+    tagRequestBody(WS_METHODS.remoteAccessRevokeOtherClients, Schema.Struct({})),
+    tagRequestBody(WS_METHODS.remoteAccessSetNetworkAccess, RemoteAccessSetNetworkAccessInput),
+    tagRequestBody(WS_METHODS.remoteAccessSetTailscaleHttps, RemoteAccessSetTailscaleHttpsInput),
+
+    // Provider discovery
+    tagRequestBody(WS_METHODS.providerGetComposerCapabilities, ProviderGetComposerCapabilitiesInput),
+    tagRequestBody(WS_METHODS.providerListCommands, ProviderListCommandsInput),
+    tagRequestBody(WS_METHODS.providerListSkills, ProviderListSkillsInput),
+    tagRequestBody(WS_METHODS.providerListPlugins, ProviderListPluginsInput),
+    tagRequestBody(WS_METHODS.providerReadPlugin, ProviderReadPluginInput),
+    tagRequestBody(WS_METHODS.providerListModels, ProviderListModelsInput),
+    tagRequestBody(WS_METHODS.providerPrewarmSession, ProviderPrewarmSessionInput),
+  ]);
+
+const WebSocketRequestBody = Schema.suspend(makeWebSocketRequestBody);
 
 export const WebSocketRequest = Schema.Struct({
   id: TrimmedNonEmptyString,

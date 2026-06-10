@@ -146,13 +146,13 @@ function deriveTaskRuntimeStatus(input: {
   if (!thread) {
     return task.state === "running" ? "queued" : "idle";
   }
-  const latestApprovalActivity = [...thread.activities]
-    .reverse()
+  const latestApprovalActivity = thread.activities
+    .toReversed()
     .find((activity) => activity.kind.includes("approval") || activity.kind.includes("user-input"));
-  if (latestApprovalActivity?.kind.includes("user-input")) {
+  if (latestApprovalActivity?.kind === "user-input.requested") {
     return "awaiting_input";
   }
-  if (latestApprovalActivity?.kind.includes("approval")) {
+  if (latestApprovalActivity?.kind === "approval.requested") {
     return "awaiting_approval";
   }
   if (thread.session?.status === "starting") {
@@ -505,18 +505,58 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     Result: ProjectionLatestTurnDbRowSchema,
     execute: () =>
       sql`
-        SELECT
-          thread_id AS "threadId",
-          turn_id AS "turnId",
-          state,
-          interaction_mode AS "interactionMode",
-          requested_at AS "requestedAt",
-          started_at AS "startedAt",
-          completed_at AS "completedAt",
-          assistant_message_id AS "assistantMessageId"
-        FROM projection_turns
-        WHERE turn_id IS NOT NULL
-        ORDER BY thread_id ASC, requested_at DESC, turn_id DESC
+        WITH latest_by_pointer AS (
+          SELECT
+            turns.thread_id AS "threadId",
+            turns.turn_id AS "turnId",
+            turns.state,
+            turns.interaction_mode AS "interactionMode",
+            turns.requested_at AS "requestedAt",
+            turns.started_at AS "startedAt",
+            turns.completed_at AS "completedAt",
+            turns.assistant_message_id AS "assistantMessageId"
+          FROM projection_threads AS threads
+          JOIN projection_turns AS turns
+            ON turns.thread_id = threads.thread_id
+           AND turns.turn_id = threads.latest_turn_id
+          WHERE threads.latest_turn_id IS NOT NULL
+        ),
+        latest_by_scan AS (
+          SELECT
+            "threadId",
+            "turnId",
+            state,
+            "interactionMode",
+            "requestedAt",
+            "startedAt",
+            "completedAt",
+            "assistantMessageId"
+          FROM (
+            SELECT
+              turns.thread_id AS "threadId",
+              turns.turn_id AS "turnId",
+              turns.state,
+              turns.interaction_mode AS "interactionMode",
+              turns.requested_at AS "requestedAt",
+              turns.started_at AS "startedAt",
+              turns.completed_at AS "completedAt",
+              turns.assistant_message_id AS "assistantMessageId",
+              ROW_NUMBER() OVER (
+                PARTITION BY turns.thread_id
+                ORDER BY turns.requested_at DESC, turns.turn_id DESC
+              ) AS rowNumber
+            FROM projection_threads AS threads
+            JOIN projection_turns AS turns
+              ON turns.thread_id = threads.thread_id
+            WHERE threads.latest_turn_id IS NULL
+              AND turns.turn_id IS NOT NULL
+          )
+          WHERE rowNumber = 1
+        )
+        SELECT * FROM latest_by_pointer
+        UNION ALL
+        SELECT * FROM latest_by_scan
+        ORDER BY "threadId" ASC
       `,
   });
 
@@ -567,15 +607,11 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             });
           const listThreadScopedRows = <A extends ReadonlyArray<unknown>, E, R>(
             threadIds: ReadonlyArray<string>,
-            listRowsForThread: (input: {
-              readonly threadId: string;
-            }) => Effect.Effect<A, E, R>,
+            listRowsForThread: (input: { readonly threadId: string }) => Effect.Effect<A, E, R>,
           ): Effect.Effect<Array<A[number]>, E, R> =>
-            Effect.forEach(
-              threadIds,
-              (threadId) => listRowsForThread({ threadId }),
-              { concurrency: 1 },
-            ).pipe(Effect.map((rowsByThread) => rowsByThread.flat()));
+            Effect.forEach(threadIds, (threadId) => listRowsForThread({ threadId }), {
+              concurrency: 1,
+            }).pipe(Effect.map((rowsByThread) => rowsByThread.flat()));
 
           const projectRows = yield* measureRows(
             "projects",
@@ -627,7 +663,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ? listThreadMessageRows(undefined)
               : heavyRowsThreadIds && heavyRowsThreadIds.length > 0
                 ? listThreadScopedRows(heavyRowsThreadIds, listThreadMessageRowsForThread)
-                : Effect.succeed([])).pipe(
+                : Effect.succeed([])
+            ).pipe(
               Effect.mapError(
                 toPersistenceSqlOrDecodeError(
                   "ProjectionSnapshotQuery.getSnapshot:listThreadMessages:query",
@@ -642,7 +679,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ? listThreadProposedPlanRows(undefined)
               : heavyRowsThreadIds && heavyRowsThreadIds.length > 0
                 ? listThreadScopedRows(heavyRowsThreadIds, listThreadProposedPlanRowsForThread)
-                : Effect.succeed([])).pipe(
+                : Effect.succeed([])
+            ).pipe(
               Effect.mapError(
                 toPersistenceSqlOrDecodeError(
                   "ProjectionSnapshotQuery.getSnapshot:listThreadProposedPlans:query",
@@ -657,7 +695,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ? listThreadActivityRows(undefined)
               : heavyRowsThreadIds && heavyRowsThreadIds.length > 0
                 ? listThreadScopedRows(heavyRowsThreadIds, listThreadActivityRowsForThread)
-                : Effect.succeed([])).pipe(
+                : Effect.succeed([])
+            ).pipe(
               Effect.mapError(
                 toPersistenceSqlOrDecodeError(
                   "ProjectionSnapshotQuery.getSnapshot:listThreadActivities:query",
@@ -683,7 +722,8 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
               ? listCheckpointRows(undefined)
               : heavyRowsThreadIds && heavyRowsThreadIds.length > 0
                 ? listThreadScopedRows(heavyRowsThreadIds, listCheckpointRowsForThread)
-                : Effect.succeed([])).pipe(
+                : Effect.succeed([])
+            ).pipe(
               Effect.mapError(
                 toPersistenceSqlOrDecodeError(
                   "ProjectionSnapshotQuery.getSnapshot:listCheckpoints:query",
@@ -915,7 +955,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           });
 
           const taskRuntimes: Array<OrchestrationTaskRuntime> = tasks.map((task) => {
-            const thread = task.threadId ? threads.find((entry) => entry.id === task.threadId) ?? null : null;
+            const thread = task.threadId
+              ? (threads.find((entry) => entry.id === task.threadId) ?? null)
+              : null;
             const lastActivityAt = [
               task.updatedAt,
               thread?.updatedAt ?? null,
@@ -957,7 +999,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           const totalDurationMs = Date.now() - requestStartedAt;
           if (totalDurationMs >= SNAPSHOT_INFO_LOG_THRESHOLD_MS) {
             const logEffect =
-              totalDurationMs >= SNAPSHOT_WARN_LOG_THRESHOLD_MS ? Effect.logWarning : Effect.logInfo;
+              totalDurationMs >= SNAPSHOT_WARN_LOG_THRESHOLD_MS
+                ? Effect.logWarning
+                : Effect.logInfo;
             yield* logEffect("projection snapshot query completed", {
               mode: snapshotMode,
               threadIds: heavyRowsThreadIds,

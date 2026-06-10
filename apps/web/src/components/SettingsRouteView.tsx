@@ -1,4 +1,4 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouterState } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -13,6 +13,7 @@ import {
   type ComputerUseSettings,
   type ComputerUseSettingsPatch,
   type ProviderKind,
+  type RemoteAccessPermission,
 } from "@t3tools/contracts";
 import { isComputerUseAppAllowed } from "@t3tools/shared/computerUsePermissions";
 import { getModelOptions, normalizeModelSlug } from "@t3tools/shared/model";
@@ -22,8 +23,14 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   CheckIcon,
+  CircleAlertIcon,
+  CircleCheckIcon,
+  CircleEllipsisIcon,
+  CircleXIcon,
+  CopyIcon,
   MonitorIcon,
   PlusIcon,
+  QrCodeIcon,
   ShieldIcon,
   Trash2Icon,
   XIcon,
@@ -38,10 +45,13 @@ import {
   useAppSettings,
 } from "../appSettings";
 import AppPageShell from "../components/AppPageShell";
+import { ProviderLogo } from "../components/ProviderLogo";
+import { ProviderUpdateButton } from "../components/ProviderUpdateButton";
 import { isElectronRuntime } from "../env";
 import { useTheme } from "../hooks/useTheme";
+import { copyTextToClipboard } from "../lib/clipboard";
 import { cn, newCommandId } from "../lib/utils";
-import { serverConfigQueryOptions } from "../lib/serverReactQuery";
+import { serverConfigQueryOptions, serverQueryKeys } from "../lib/serverReactQuery";
 import { ensureNativeApi } from "../nativeApi";
 import {
   normalizeSettingsSectionId,
@@ -50,6 +60,16 @@ import {
 } from "../settingsSections";
 import { preferredTerminalEditor } from "../terminal-links";
 import { Button } from "../components/ui/button";
+import { Checkbox } from "../components/ui/checkbox";
+import {
+  Dialog,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogPanel,
+  DialogPopup,
+  DialogTitle,
+} from "../components/ui/dialog";
 import { Input } from "../components/ui/input";
 import {
   Select,
@@ -59,6 +79,8 @@ import {
   SelectValue,
 } from "../components/ui/select";
 import { Switch } from "../components/ui/switch";
+import { toastManager } from "../components/ui/toast";
+import { QRCodeSvg } from "../components/ui/qr-code";
 import { SidebarInsetTrigger } from "~/components/ui/sidebar";
 import { useStore } from "../store";
 
@@ -97,6 +119,7 @@ const DEFAULT_COMPUTER_USE_SETTINGS: ComputerUseSettings = {
 };
 
 const COMPUTER_USE_APP_PAGE_SIZE = 12;
+const REMOTE_ACCESS_QUERY_KEY = ["remote-access", "snapshot"] as const;
 
 const COMPUTER_USE_APP_CATEGORY_LABELS: Record<
   ComputerUseAppCategory,
@@ -144,10 +167,152 @@ const BROWSING_DATA_OPTIONS: ReadonlyArray<{
 ];
 
 const SETTINGS_SECTION_CLASS =
-  "rounded-xl border border-border bg-card/80 p-5 shadow-[0_1px_0_rgba(255,255,255,0.02)]";
+  "rounded-xl bg-card/80 p-5 shadow-[0_1px_0_rgba(255,255,255,0.02)]";
 const EMPTY_COMPUTER_USE_APPS: ComputerUseAppSummary[] = [];
 const COMPUTER_USE_PERMISSION_SWITCH_CLASS =
   "justify-self-end [&_[data-slot=switch-thumb]]:transition-none [&_[data-slot=switch-thumb]]:will-change-auto";
+
+const PAIRING_PERMISSION_OPTIONS = [
+  {
+    id: "viewEnvironment",
+    scope: "orchestration:read",
+    label: "View environment",
+    description: "Read threads, status, diffs, and configuration.",
+  },
+  {
+    id: "operateTasks",
+    scope: "orchestration:operate",
+    label: "Operate tasks",
+    description: "Start tasks and perform changes in the environment.",
+  },
+  {
+    id: "useTerminals",
+    scope: "terminal:operate",
+    label: "Use terminals",
+    description: "Create terminals and send input to running shells.",
+  },
+  {
+    id: "writeReviews",
+    scope: "review:write",
+    label: "Write reviews",
+    description: "Create comments while reviewing changes.",
+  },
+  {
+    id: "viewAccess",
+    scope: "access:read",
+    label: "View access",
+    description: "Inspect pairing links and authorized clients.",
+  },
+  {
+    id: "manageAccess",
+    scope: "access:write",
+    label: "Manage access",
+    description: "Issue and revoke credentials for other clients.",
+  },
+  {
+    id: "viewRelay",
+    scope: "relay:read",
+    label: "View relay",
+    description: "Inspect managed relay connectivity.",
+  },
+  {
+    id: "manageRelay",
+    scope: "relay:write",
+    label: "Manage relay",
+    description: "Change managed tunnel connectivity.",
+  },
+] as const;
+
+type PairingPermissionId = (typeof PAIRING_PERMISSION_OPTIONS)[number]["id"];
+
+const PAIRING_PERMISSION_PRESETS: Record<"readOnly" | "standard", ReadonlySet<PairingPermissionId>> = {
+  readOnly: new Set(["viewEnvironment", "viewAccess", "viewRelay"]),
+  standard: new Set([
+    "viewEnvironment",
+    "operateTasks",
+    "useTerminals",
+    "writeReviews",
+    "viewRelay",
+  ]),
+};
+
+function arePairingPermissionSetsEqual(
+  left: ReadonlySet<PairingPermissionId>,
+  right: ReadonlySet<PairingPermissionId>,
+) {
+  return left.size === right.size && [...left].every((permissionId) => right.has(permissionId));
+}
+
+function pairingPermissionIdsToScopes(
+  permissionIds: ReadonlySet<PairingPermissionId>,
+): RemoteAccessPermission[] {
+  return PAIRING_PERMISSION_OPTIONS.filter((permission) => permissionIds.has(permission.id)).map(
+    (permission) => permission.scope,
+  );
+}
+
+function resolvePairingUrl(baseUrl: string, credential: string): string {
+  const url = new URL(baseUrl);
+  url.pathname = "/pair";
+  url.hash = new URLSearchParams([["token", credential]]).toString();
+  return url.toString();
+}
+
+function formatPairingLinkExpiresIn(expiresAt: string | null, nowMs: number): string | null {
+  if (!expiresAt) {
+    return null;
+  }
+  const expiresAtMs = Date.parse(expiresAt);
+  if (!Number.isFinite(expiresAtMs)) {
+    return null;
+  }
+  const remainingMs = expiresAtMs - nowMs;
+  if (remainingMs <= 0) {
+    return "Expired";
+  }
+  const remainingMinutes = Math.floor(remainingMs / 60_000);
+  const remainingSeconds = Math.floor((remainingMs % 60_000) / 1_000);
+  if (remainingMinutes >= 1) {
+    return `${remainingMinutes}m ${remainingSeconds}s left`;
+  }
+  return `${remainingSeconds}s left`;
+}
+
+function isPairingLinkStillActive(expiresAt: string | null, nowMs: number): boolean {
+  if (!expiresAt) {
+    return true;
+  }
+  const expiresAtMs = Date.parse(expiresAt);
+  return Number.isFinite(expiresAtMs) && expiresAtMs > nowMs;
+}
+
+async function copyRemoteAccessValue(value: string, title: string) {
+  const copied = await copyTextToClipboard(value);
+  toastManager.add({
+    type: copied ? "success" : "error",
+    title: copied ? title : "Clipboard unavailable",
+  });
+}
+
+function BlurredEmail({ value }: { value: string }) {
+  return (
+    <span className="rounded-sm blur-xs select-none" title={value} aria-label={value}>
+      {value}
+    </span>
+  );
+}
+
+function BlurredSecret({ value, className }: { value: string; className?: string }) {
+  return (
+    <span
+      className={cn("rounded-sm blur-xs select-none", className)}
+      title={value}
+      aria-label={value}
+    >
+      {value}
+    </span>
+  );
+}
 
 function normalizeBrowserDomainInput(value: string): string | null {
   const normalized = value
@@ -244,7 +409,7 @@ const MODEL_PROVIDER_SETTINGS: Array<{
     title: "Claude",
     description: "Save additional Claude model slugs for the picker and `/model` command.",
     placeholder: "claude-model-slug",
-    example: "claude-sonnet-4-6-latest",
+    example: "claude-mythos-5",
   },
 ] as const;
 
@@ -319,6 +484,77 @@ function SettingsRouteView() {
     retry: false,
     staleTime: 5_000,
   });
+  const remoteAccessQuery = useQuery({
+    queryKey: REMOTE_ACCESS_QUERY_KEY,
+    queryFn: () => ensureNativeApi().remoteAccess.getSnapshot(),
+    staleTime: 5_000,
+  });
+  const applyRemoteAccessSnapshot = useCallback(
+    (snapshot: Awaited<ReturnType<ReturnType<typeof ensureNativeApi>["remoteAccess"]["getSnapshot"]>>) => {
+      queryClient.setQueryData(REMOTE_ACCESS_QUERY_KEY, snapshot);
+    },
+    [queryClient],
+  );
+  const createPairingLinkMutation = useMutation({
+    mutationFn: (input: {
+      label: string;
+      scopes: RemoteAccessPermission[];
+    }) => ensureNativeApi().remoteAccess.createPairingLink(input),
+    onSuccess: (result) => {
+      applyRemoteAccessSnapshot(result.snapshot);
+      setPairingClientName("");
+      setPairingPermissionIds(new Set(PAIRING_PERMISSION_PRESETS.standard));
+      setPairingLinkDialogOpen(false);
+      toastManager.add({
+        type: "success",
+        title: "Pairing link created",
+        description: "Copy the pairing URL or code from the client list.",
+      });
+    },
+    onError: (error) => {
+      toastManager.add({
+        type: "error",
+        title: "Could not create pairing link",
+        description: error instanceof Error ? error.message : String(error),
+      });
+    },
+  });
+  const setNetworkAccessMutation = useMutation({
+    mutationFn: (enabled: boolean) => ensureNativeApi().remoteAccess.setNetworkAccess({ enabled }),
+    onSuccess: applyRemoteAccessSnapshot,
+  });
+  const setTailscaleHttpsMutation = useMutation({
+    mutationFn: (enabled: boolean) => ensureNativeApi().remoteAccess.setTailscaleHttps({ enabled }),
+    onSuccess: applyRemoteAccessSnapshot,
+    onError: (error) => {
+      toastManager.add({
+        type: "error",
+        title: "Could not update Tailscale HTTPS",
+        description: error instanceof Error ? error.message : String(error),
+      });
+    },
+  });
+  const revokePairingLinkMutation = useMutation({
+    mutationFn: (id: string) => ensureNativeApi().remoteAccess.revokePairingLink({ id }),
+    onSuccess: (snapshot) => {
+      applyRemoteAccessSnapshot(snapshot);
+      toastManager.add({ type: "success", title: "Pairing link revoked" });
+    },
+  });
+  const revokeClientMutation = useMutation({
+    mutationFn: (id: string) => ensureNativeApi().remoteAccess.revokeClient({ id }),
+    onSuccess: (snapshot) => {
+      applyRemoteAccessSnapshot(snapshot);
+      toastManager.add({ type: "success", title: "Client revoked" });
+    },
+  });
+  const revokeOtherClientsMutation = useMutation({
+    mutationFn: () => ensureNativeApi().remoteAccess.revokeOtherClients(),
+    onSuccess: (snapshot) => {
+      applyRemoteAccessSnapshot(snapshot);
+      toastManager.add({ type: "success", title: "Other clients revoked" });
+    },
+  });
   const [isOpeningKeybindings, setIsOpeningKeybindings] = useState(false);
   const [openKeybindingsError, setOpenKeybindingsError] = useState<string | null>(null);
   const [customModelInputByProvider, setCustomModelInputByProvider] = useState<
@@ -374,6 +610,52 @@ function SettingsRouteView() {
   const [opencodeServerPasswordDraft, setOpencodeServerPasswordDraft] = useState(
     opencodeServerSettings?.serverPassword ?? "",
   );
+  const [expandedProviders, setExpandedProviders] = useState<ReadonlySet<ProviderKind>>(
+    () => new Set<ProviderKind>(["codex", "opencode", "claudeAgent"]),
+  );
+  const [pairingLinkDialogOpen, setPairingLinkDialogOpen] = useState(false);
+  const [pairingClientName, setPairingClientName] = useState("");
+  const [pairingPermissionIds, setPairingPermissionIds] = useState<ReadonlySet<PairingPermissionId>>(
+    () => new Set(PAIRING_PERMISSION_PRESETS.standard),
+  );
+  const [pairingNowMs, setPairingNowMs] = useState(() => Date.now());
+  const toggleProviderExpanded = useCallback((provider: ProviderKind) => {
+    setExpandedProviders((prev) => {
+      const next = new Set(prev);
+      if (next.has(provider)) {
+        next.delete(provider);
+      } else {
+        next.add(provider);
+      }
+      return next;
+    });
+  }, []);
+  const applyPairingPermissionPreset = useCallback(
+    (preset: keyof typeof PAIRING_PERMISSION_PRESETS) => {
+      setPairingPermissionIds(new Set(PAIRING_PERMISSION_PRESETS[preset]));
+    },
+    [],
+  );
+  const togglePairingPermission = useCallback((permissionId: PairingPermissionId) => {
+    setPairingPermissionIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(permissionId)) {
+        next.delete(permissionId);
+      } else {
+        next.add(permissionId);
+      }
+      return next;
+    });
+  }, []);
+  const handlePairingDialogOpenChange = useCallback((open: boolean) => {
+    setPairingLinkDialogOpen(open);
+  }, []);
+  const handleCreatePairingLink = useCallback(() => {
+    createPairingLinkMutation.mutate({
+      label: pairingClientName,
+      scopes: pairingPermissionIdsToScopes(pairingPermissionIds),
+    });
+  }, [createPairingLinkMutation, pairingClientName, pairingPermissionIds]);
   const threads = useStore((store) => store.threads);
   const projects = useStore((store) => store.projects);
   const suggestionModelOptions = getSuggestionModelOptions({
@@ -394,6 +676,128 @@ function SettingsRouteView() {
     () => groupComputerUseApps(computerUseApps),
     [computerUseApps],
   );
+
+  const providers = serverConfigQuery.data?.providers ?? [];
+  const codexStatus = useMemo(
+    () => providers.find((p) => p.provider === "codex"),
+    [providers],
+  );
+  const opencodeStatus = useMemo(
+    () => providers.find((p) => p.provider === "opencode"),
+    [providers],
+  );
+  const claudeStatus = useMemo(
+    () => providers.find((p) => p.provider === "claudeAgent"),
+    [providers],
+  );
+
+  const providerAccounts = serverConfigQuery.data?.providerAccounts ?? [];
+  const codexAccount = useMemo(
+    () => providerAccounts.find((a) => a.provider === "codex"),
+    [providerAccounts],
+  );
+  const claudeAccount = useMemo(
+    () => providerAccounts.find((a) => a.provider === "claudeAgent"),
+    [providerAccounts],
+  );
+  const claudeAuthenticationLabel =
+    claudeAccount?.state === "authenticated"
+      ? claudeAccount.account && "email" in claudeAccount.account
+        ? <BlurredEmail value={claudeAccount.account.email} />
+        : "Signed in"
+      : claudeAccount?.state === "error"
+        ? claudeAccount.message ?? "Error"
+        : claudeAccount?.state === "loading"
+          ? "Checking..."
+          : claudeStatus?.authStatus === "authenticated"
+            ? "Signed in"
+            : claudeStatus?.authStatus === "unknown"
+              ? "Authentication status unavailable"
+              : "Not signed in";
+  const claudeCollapsedAuthenticationLabel =
+    claudeAccount?.state === "authenticated"
+      ? claudeAccount.account && "email" in claudeAccount.account
+        ? (
+          <>
+            Signed in as <BlurredEmail value={claudeAccount.account.email} />
+          </>
+        )
+        : claudeAccount.authMode === "apikey"
+          ? "Signed in (API key)"
+          : "Signed in"
+      : claudeStatus?.authStatus === "authenticated"
+        ? "Signed in"
+        : claudeStatus?.authStatus === "unknown"
+          ? "Authentication status unavailable"
+          : "Not signed in";
+  const claudeAuthenticationModeLabel =
+    claudeAccount?.authMode === "apikey"
+      ? "API key"
+      : claudeAccount?.authMode
+        ? claudeAccount.authMode
+        : claudeStatus?.authStatus === "authenticated"
+          ? "Claude CLI"
+          : "";
+
+  const startLoginMutation = useMutation({
+    mutationFn: async () => {
+      const result = await ensureNativeApi().server.startProviderLogin({
+        provider: "codex",
+        type: "chatgpt",
+      });
+      return result;
+    },
+    onSuccess: (result) => {
+      void ensureNativeApi().shell.openExternal(result.authUrl);
+    },
+    onError: () => {
+      void queryClient.invalidateQueries({ queryKey: serverQueryKeys.config() });
+    },
+  });
+
+  const isLoggingIn = startLoginMutation.isPending;
+  const loginId = startLoginMutation.data?.loginId ?? null;
+
+  const cancelLoginMutation = useMutation({
+    mutationFn: async (id: string) => {
+      return ensureNativeApi().server.cancelProviderLogin({
+        provider: "codex",
+        loginId: id,
+      });
+    },
+  });
+
+  const isCancelingLogin = cancelLoginMutation.isPending;
+
+  const logoutMutation = useMutation({
+    mutationFn: async () => {
+      return ensureNativeApi().server.logoutProvider({ provider: "codex" });
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: serverQueryKeys.config() });
+    },
+  });
+
+  const isLoggingOut = logoutMutation.isPending;
+
+  const handleCodexAuthAction = useCallback(() => {
+    if (codexAccount?.state === "authenticated") {
+      logoutMutation.mutate();
+      return;
+    }
+    if (isLoggingIn && loginId) {
+      cancelLoginMutation.mutate(loginId);
+      return;
+    }
+    startLoginMutation.mutate();
+  }, [
+    codexAccount?.state,
+    isLoggingIn,
+    loginId,
+    cancelLoginMutation,
+    logoutMutation,
+    startLoginMutation,
+  ]);
 
   const openKeybindingsFile = useCallback(() => {
     if (!keybindingsConfigPath) return;
@@ -746,6 +1150,54 @@ function SettingsRouteView() {
     [deleteArchivedThread, unarchiveThread],
   );
 
+  const serverHost = serverConfigQuery.data?.serverHost;
+  const serverPort = serverConfigQuery.data?.serverPort;
+  const remoteProtocol =
+    typeof window !== "undefined" && window.location.protocol === "https:" ? "https" : "http";
+  const remoteDisplayHost =
+    serverHost && serverHost !== "0.0.0.0"
+      ? serverHost
+      : typeof window !== "undefined"
+        ? window.location.hostname
+        : "127.0.0.1";
+  const remoteConnectionUrl = `${remoteProtocol}://${remoteDisplayHost}${
+    serverPort ? `:${serverPort}` : ""
+  }/`;
+  const tailscaleHttpsUrl =
+    remoteDisplayHost.endsWith(".ts.net") || remoteDisplayHost.includes("tail")
+      ? `https://${remoteDisplayHost}${serverPort ? `:${serverPort}` : ""}/`
+      : remoteConnectionUrl;
+  const remoteAccessSnapshot = remoteAccessQuery.data;
+  const remoteNetworkEnabled =
+    remoteAccessSnapshot?.networkAccessEnabled ?? Boolean(serverHost && serverHost !== "127.0.0.1");
+  const tailscaleHttpsEnabled = remoteAccessSnapshot?.tailscaleHttpsEnabled ?? false;
+  const resolvedTailscaleHttpsUrl = remoteAccessSnapshot?.tailscaleHttpsUrl ?? tailscaleHttpsUrl;
+  const remotePairingLinks = (remoteAccessSnapshot?.pairingLinks ?? []).filter((pairingLink) =>
+    isPairingLinkStillActive(pairingLink.expiresAt, pairingNowMs),
+  );
+  const remoteClients = remoteAccessSnapshot?.clients ?? [];
+  const remoteEnvironments = remoteAccessSnapshot?.remoteEnvironments ?? [];
+  const readOnlyPairingPresetSelected = arePairingPermissionSetsEqual(
+    pairingPermissionIds,
+    PAIRING_PERMISSION_PRESETS.readOnly,
+  );
+  const standardPairingPresetSelected = arePairingPermissionSetsEqual(
+    pairingPermissionIds,
+    PAIRING_PERMISSION_PRESETS.standard,
+  );
+
+  useEffect(() => {
+    if (remotePairingLinks.length === 0) {
+      return;
+    }
+    const intervalId = window.setInterval(() => {
+      setPairingNowMs(Date.now());
+    }, 1000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [remotePairingLinks.length]);
+
   return (
     <AppPageShell className="h-dvh text-foreground isolate">
       <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-[var(--app-page-shell-surface)] text-foreground">
@@ -769,14 +1221,16 @@ function SettingsRouteView() {
 
         <div className="flex-1 overflow-y-auto px-4 py-8 sm:px-8">
           <div className="mx-auto flex w-full max-w-[840px] flex-col gap-6">
-            <header className="space-y-2">
-              <h1 className="text-2xl font-semibold tracking-normal text-foreground">
-                {activeSectionLabel}
-              </h1>
-              <p className="text-sm text-muted-foreground">
-                Configure app-level preferences for this device.
-              </p>
-            </header>
+            {activeSection !== SETTINGS_SECTION_IDS.remoteAccess ? (
+              <header className="space-y-2">
+                <h1 className="text-2xl font-semibold tracking-normal text-foreground">
+                  {activeSectionLabel}
+                </h1>
+                <p className="text-sm text-muted-foreground">
+                  Configure app-level preferences for this device.
+                </p>
+              </header>
+            ) : null}
 
             {activeSection === SETTINGS_SECTION_IDS.appearance ? (
               <section id={SETTINGS_SECTION_IDS.appearance} className={SETTINGS_SECTION_CLASS}>
@@ -821,169 +1275,6 @@ function SettingsRouteView() {
                   Active theme: <span className="font-medium text-foreground">{resolvedTheme}</span>
                 </p>
               </section>
-            ) : null}
-
-            {activeSection === SETTINGS_SECTION_IDS.codexAppServer ? (
-              <>
-                <section
-                  id={SETTINGS_SECTION_IDS.codexAppServer}
-                  className={SETTINGS_SECTION_CLASS}
-                >
-                  <div className="mb-4">
-                    <h2 className="text-sm font-medium text-foreground">Codex App Server</h2>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      These overrides apply to new sessions and let you use a non-default Codex
-                      install.
-                    </p>
-                  </div>
-
-                  <div className="space-y-4">
-                    <label htmlFor="codex-binary-path" className="block space-y-1">
-                      <span className="text-xs font-medium text-foreground">Codex binary path</span>
-                      <Input
-                        id="codex-binary-path"
-                        value={codexBinaryPath}
-                        onChange={(event) =>
-                          updateSettings({ codexBinaryPath: event.target.value })
-                        }
-                        placeholder="codex"
-                        spellCheck={false}
-                      />
-                      <span className="text-xs text-muted-foreground">
-                        Leave blank to use <code>codex</code> from your PATH.
-                      </span>
-                    </label>
-
-                    <label htmlFor="codex-home-path" className="block space-y-1">
-                      <span className="text-xs font-medium text-foreground">CODEX_HOME path</span>
-                      <Input
-                        id="codex-home-path"
-                        value={codexHomePath}
-                        onChange={(event) => updateSettings({ codexHomePath: event.target.value })}
-                        placeholder="/Users/you/.codex"
-                        spellCheck={false}
-                      />
-                      <span className="text-xs text-muted-foreground">
-                        Optional custom Codex home/config directory.
-                      </span>
-                    </label>
-
-                    <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-                      <p>
-                        Binary source:{" "}
-                        <span className="font-medium text-foreground">
-                          {codexBinaryPath || "PATH"}
-                        </span>
-                      </p>
-                      <Button
-                        size="xs"
-                        variant="outline"
-                        onClick={() =>
-                          updateSettings({
-                            codexBinaryPath: defaults.codexBinaryPath,
-                            codexHomePath: defaults.codexHomePath,
-                          })
-                        }
-                      >
-                        Reset codex overrides
-                      </Button>
-                    </div>
-                  </div>
-                </section>
-
-                <section className={SETTINGS_SECTION_CLASS}>
-                  <div className="mb-4">
-                    <h2 className="text-sm font-medium text-foreground">OpenCode Server</h2>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      Configure how T3 Code connects to OpenCode for provider sessions and model
-                      discovery.
-                    </p>
-                  </div>
-
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
-                      <div>
-                        <p className="text-sm font-medium text-foreground">Enable OpenCode</p>
-                        <p className="text-xs text-muted-foreground">
-                          Disable this to hide OpenCode from new provider sessions.
-                        </p>
-                      </div>
-                      <Switch
-                        checked={opencodeServerSettings?.enabled ?? true}
-                        onCheckedChange={(checked) => {
-                          void updateOpenCodeServerSettings({ enabled: Boolean(checked) });
-                        }}
-                        aria-label="Enable OpenCode"
-                      />
-                    </div>
-
-                    <label className="block space-y-1">
-                      <span className="text-xs font-medium text-foreground">Binary path</span>
-                      <Input
-                        value={opencodeBinaryPathDraft}
-                        onChange={(event) => {
-                          setOpencodeBinaryPathDraft(event.target.value);
-                        }}
-                        onBlur={commitOpenCodeBinaryPath}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            event.currentTarget.blur();
-                          }
-                        }}
-                        placeholder="opencode"
-                        spellCheck={false}
-                      />
-                      <span className="text-xs text-muted-foreground">
-                        Leave blank to use <code>opencode</code> from your PATH.
-                      </span>
-                    </label>
-
-                    <label className="block space-y-1">
-                      <span className="text-xs font-medium text-foreground">Server URL</span>
-                      <Input
-                        value={opencodeServerUrlDraft}
-                        onChange={(event) => {
-                          setOpencodeServerUrlDraft(event.target.value);
-                        }}
-                        onBlur={commitOpenCodeServerUrl}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            event.currentTarget.blur();
-                          }
-                        }}
-                        placeholder="http://127.0.0.1:4096"
-                        spellCheck={false}
-                      />
-                      <span className="text-xs text-muted-foreground">
-                        Leave blank to let T3 Code spawn the OpenCode server locally when needed.
-                      </span>
-                    </label>
-
-                    <label className="block space-y-1">
-                      <span className="text-xs font-medium text-foreground">Server password</span>
-                      <Input
-                        type="password"
-                        autoComplete="off"
-                        value={opencodeServerPasswordDraft}
-                        onChange={(event) => {
-                          setOpencodeServerPasswordDraft(event.target.value);
-                        }}
-                        onBlur={commitOpenCodeServerPassword}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            event.currentTarget.blur();
-                          }
-                        }}
-                        placeholder="Optional password"
-                        spellCheck={false}
-                      />
-                      <span className="text-xs text-muted-foreground">
-                        Used only when the configured OpenCode server requires authentication.
-                      </span>
-                    </label>
-                  </div>
-                </section>
-              </>
             ) : null}
 
             {activeSection === SETTINGS_SECTION_IDS.models ? (
@@ -1167,6 +1458,7 @@ function SettingsRouteView() {
                           </div>
                         </div>
                       </div>
+
                     );
                   })}
 
@@ -1259,6 +1551,292 @@ function SettingsRouteView() {
                         </div>
                       )}
                     </div>
+                  </div>
+                </div>
+              </section>
+            ) : null}
+
+            {activeSection === SETTINGS_SECTION_IDS.remoteAccess ? (
+              <section
+                id={SETTINGS_SECTION_IDS.remoteAccess}
+                className="mx-auto w-full max-w-3xl space-y-9 px-0 py-2"
+              >
+                <div className="space-y-4">
+                  <div className="flex items-center gap-3">
+                    <div className="h-px w-3 bg-border" />
+                    <h2 className="text-[11px] font-semibold tracking-[0.12em] text-muted-foreground uppercase">
+                      Manage local backend
+                    </h2>
+                  </div>
+
+                  <div className="overflow-hidden rounded-2xl border border-border bg-card/80">
+                    <div className="flex min-h-17 items-center justify-between gap-4 px-5 py-4">
+                      <div className="min-w-0">
+                        <h3 className="text-sm font-semibold text-foreground">Network access</h3>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {remoteNetworkEnabled
+                            ? `Available from ${remoteDisplayHost}.`
+                            : "Limited to this machine."}
+                        </p>
+                      </div>
+                      <Switch
+                        checked={remoteNetworkEnabled}
+                        aria-label="Network access"
+                        className="data-unchecked:bg-muted"
+                        disabled={setNetworkAccessMutation.isPending}
+                        onCheckedChange={(checked) => setNetworkAccessMutation.mutate(checked)}
+                      />
+                    </div>
+
+                    <div className="border-t border-border" />
+
+                    <div className="flex min-h-17 items-center justify-between gap-4 px-5 py-4">
+                      <div className="min-w-0">
+                        <h3 className="text-sm font-semibold text-foreground">Tailscale HTTPS</h3>
+                        <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
+                          {resolvedTailscaleHttpsUrl}
+                        </p>
+                      </div>
+                      <Switch
+                        checked={tailscaleHttpsEnabled}
+                        aria-label="Tailscale HTTPS"
+                        className="data-checked:bg-blue-600"
+                        disabled={setTailscaleHttpsMutation.isPending}
+                        onCheckedChange={(checked) => setTailscaleHttpsMutation.mutate(checked)}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="h-px w-3 bg-border" />
+                      <h2 className="text-[11px] font-semibold tracking-[0.12em] text-muted-foreground uppercase">
+                        Authorized clients
+                      </h2>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Button
+                        size="xs"
+                        variant="destructive-outline"
+                        disabled={revokeOtherClientsMutation.isPending}
+                        onClick={() => revokeOtherClientsMutation.mutate()}
+                      >
+                        Revoke others
+                      </Button>
+                      <Button size="xs" onClick={() => setPairingLinkDialogOpen(true)}>
+                        <PlusIcon className="size-3.5" />
+                        Create link
+                      </Button>
+                    </div>
+                  </div>
+
+                  <div className="overflow-hidden rounded-2xl border border-border bg-card/80">
+                    {remoteAccessQuery.isLoading ? (
+                      <div className="px-5 py-4">
+                        <p className="text-xs text-muted-foreground">Loading clients...</p>
+                      </div>
+                    ) : remotePairingLinks.length === 0 && remoteClients.length === 0 ? (
+                      <div className="px-5 py-4">
+                        <p className="text-xs text-muted-foreground">
+                          No authorized clients or pending pairing links yet.
+                        </p>
+                      </div>
+                    ) : (
+                      <>
+                        {remotePairingLinks.map((pairingLink, index) => {
+                          const pairingUrl = resolvePairingUrl(
+                            resolvedTailscaleHttpsUrl,
+                            pairingLink.credential,
+                          );
+                          const expiresInLabel = formatPairingLinkExpiresIn(
+                            pairingLink.expiresAt,
+                            pairingNowMs,
+                          );
+                          return (
+                            <div
+                              key={pairingLink.id}
+                              className={cn(
+                                "px-5 py-4",
+                                index > 0 && "border-t border-border",
+                              )}
+                            >
+                              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                                <div className="min-w-0 flex-1">
+                                  <div className="flex items-center gap-2">
+                                    <span className="size-2 rounded-full bg-blue-500" />
+                                    <h3 className="truncate text-sm font-semibold text-foreground">
+                                      {pairingLink.label || "Pairing link"}
+                                    </h3>
+                                    <span className="rounded-md border border-border bg-muted/30 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                                      Pending
+                                    </span>
+                                    {expiresInLabel ? (
+                                      <span className="rounded-md border border-border bg-muted/30 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                                        {expiresInLabel}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                  <p className="mt-1 text-xs text-muted-foreground">
+                                    Scan the QR code or enter the pairing URL/code on another
+                                    client.
+                                  </p>
+
+                                  <div className="mt-3 grid gap-3 sm:grid-cols-[auto_minmax(0,1fr)]">
+                                    <div className="flex size-34 items-center justify-center rounded-lg border border-border bg-white p-2">
+                                      <QRCodeSvg
+                                        value={pairingUrl}
+                                        size={112}
+                                        level="M"
+                                        marginSize={2}
+                                        title="Pairing link QR code"
+                                      />
+                                    </div>
+                                    <div className="min-w-0 space-y-3">
+                                      <div className="space-y-1">
+                                        <div className="flex items-center justify-between gap-2">
+                                          <span className="text-[11px] font-medium text-muted-foreground uppercase">
+                                            Pairing URL
+                                          </span>
+                                          <Button
+                                            size="xs"
+                                            variant="outline"
+                                            onClick={() =>
+                                              void copyRemoteAccessValue(
+                                                pairingUrl,
+                                                "Pairing URL copied",
+                                              )
+                                            }
+                                          >
+                                            <CopyIcon className="size-3" />
+                                            Copy
+                                          </Button>
+                                        </div>
+                                        <p className="rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs break-all text-foreground">
+                                          <BlurredSecret value={pairingUrl} />
+                                        </p>
+                                      </div>
+                                      <div className="space-y-1">
+                                        <div className="flex items-center justify-between gap-2">
+                                          <span className="text-[11px] font-medium text-muted-foreground uppercase">
+                                            Pairing code
+                                          </span>
+                                          <Button
+                                            size="xs"
+                                            variant="outline"
+                                            onClick={() =>
+                                              void copyRemoteAccessValue(
+                                                pairingLink.credential,
+                                                "Pairing code copied",
+                                              )
+                                            }
+                                          >
+                                            <QrCodeIcon className="size-3" />
+                                            Copy
+                                          </Button>
+                                        </div>
+                                        <p className="rounded-md border border-border bg-background px-2 py-1.5 font-mono text-xs tracking-wide text-foreground">
+                                          <BlurredSecret value={pairingLink.credential} />
+                                        </p>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </div>
+                                <Button
+                                  size="xs"
+                                  variant="destructive-outline"
+                                  disabled={revokePairingLinkMutation.isPending}
+                                  onClick={() => revokePairingLinkMutation.mutate(pairingLink.id)}
+                                >
+                                  Revoke
+                                </Button>
+                              </div>
+                            </div>
+                          );
+                        })}
+
+                        {remoteClients.map((client, index) => (
+                          <div
+                            key={client.id}
+                            className={cn(
+                              "flex items-center justify-between gap-4 px-5 py-4",
+                              (remotePairingLinks.length > 0 || index > 0) &&
+                                "border-t border-border",
+                            )}
+                          >
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={cn(
+                                    "rounded-full",
+                                    client.connected
+                                      ? "size-3 bg-emerald-500 p-1"
+                                      : "size-2 bg-muted-foreground/40",
+                                  )}
+                                >
+                                  {client.connected ? (
+                                    <span className="block size-1 rounded-full bg-background" />
+                                  ) : null}
+                                </span>
+                                <h3 className="truncate text-sm font-semibold text-foreground">
+                                  {client.label}
+                                </h3>
+                                {client.isCurrent ? (
+                                  <span className="rounded-md border border-border bg-muted/30 px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                                    This device
+                                  </span>
+                                ) : null}
+                              </div>
+                              <p className="mt-1 text-xs text-muted-foreground">
+                                {client.deviceType} - {client.os} - {client.client} - {client.host} -{" "}
+                                {client.scopes.length} scopes
+                              </p>
+                            </div>
+                            {!client.isCurrent ? (
+                              <Button
+                                size="xs"
+                                variant="destructive-outline"
+                                disabled={revokeClientMutation.isPending}
+                                onClick={() => revokeClientMutation.mutate(client.id)}
+                              >
+                                Revoke
+                              </Button>
+                            ) : null}
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="h-px w-3 bg-border" />
+                      <h2 className="text-[11px] font-semibold tracking-[0.12em] text-muted-foreground uppercase">
+                        Remote environments
+                      </h2>
+                    </div>
+
+                    <Button
+                      size="xs"
+                      variant="ghost"
+                      className="text-muted-foreground"
+                      disabled
+                    >
+                      <PlusIcon className="size-3.5" />
+                      Add environment
+                    </Button>
+                  </div>
+
+                  <div className="rounded-2xl border border-border bg-card/80 px-5 py-4">
+                    <p className="text-xs text-muted-foreground">
+                      {remoteEnvironments.length === 0
+                        ? 'No remote environments yet. Click "Add environment" to pair another environment.'
+                        : `${remoteEnvironments.length} remote environments connected.`}
+                    </p>
                   </div>
                 </div>
               </section>
@@ -1928,6 +2506,538 @@ function SettingsRouteView() {
               </section>
             ) : null}
 
+            {activeSection === SETTINGS_SECTION_IDS.providers ? (
+              <section id={SETTINGS_SECTION_IDS.providers} className={SETTINGS_SECTION_CLASS}>
+                <div className="mb-4">
+                  <h2 className="text-sm font-medium text-foreground">Providers</h2>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Manage providers and authentication.
+                  </p>
+                </div>
+
+                <div className="space-y-4">
+                  {/* ── Codex ── */}
+                  <div className="rounded-xl border border-border bg-background p-4">
+                    <button
+                      type="button"
+                      onClick={() => toggleProviderExpanded("codex")}
+                      className="flex w-full items-center justify-between text-left"
+                      aria-expanded={expandedProviders.has("codex")}
+                    >
+                      <div className="flex items-center gap-2">
+                        <ProviderLogo provider="codex" className="text-muted-foreground" />
+                        <h3 className="text-sm font-medium text-foreground">
+                          {PROVIDER_DISPLAY_NAMES.codex}
+                        </h3>
+                        {codexStatus?.status === "ready" ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-green-500/10 px-2 py-0.5 text-[11px] text-green-600">
+                            <CircleCheckIcon className="size-2.5" />
+                            Ready
+                          </span>
+                        ) : codexStatus?.status === "warning" ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-600">
+                            <CircleAlertIcon className="size-2.5" />
+                            Warning
+                          </span>
+                        ) : codexStatus?.status === "error" ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 text-[11px] text-destructive">
+                            <CircleXIcon className="size-2.5" />
+                            Error
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
+                            <CircleEllipsisIcon className="size-2.5" />
+                            Checking...
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {codexStatus?.version ? (
+                          <span className="text-[11px] text-muted-foreground">
+                            v{codexStatus.version}
+                          </span>
+                        ) : null}
+                        <ProviderUpdateButton
+                          provider="codex"
+                          currentVersion={codexStatus?.version ?? null}
+                          updateInfo={codexStatus?.updateInfo}
+                        />
+                        <ChevronDownIcon
+                          className={cn(
+                            "size-4 shrink-0 text-muted-foreground transition-transform",
+                            !expandedProviders.has("codex") && "-rotate-90",
+                          )}
+                          aria-hidden
+                        />
+                      </div>
+                    </button>
+
+                    {expandedProviders.has("codex") ? (
+                      <>
+                        {codexStatus?.message ? (
+                          <p className="mb-3 text-xs text-muted-foreground">
+                            {codexStatus.message}
+                          </p>
+                        ) : null}
+                        <div className="space-y-3 pt-3">
+                          <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
+                            <div>
+                              <span className="text-xs font-medium text-foreground">
+                                Account
+                              </span>
+                              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                                {codexAccount?.state === "authenticated"
+                                  ? codexAccount.account && "email" in codexAccount.account
+                                    ? <BlurredEmail value={codexAccount.account.email} />
+                                    : "Signed in"
+                                  : "Not signed in"}
+                              </p>
+                            </div>
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              disabled={isLoggingOut || isCancelingLogin}
+                              onClick={handleCodexAuthAction}
+                            >
+                              {codexAccount?.state === "authenticated"
+                                ? isLoggingOut
+                                  ? "Signing out..."
+                                  : "Sign out"
+                                : isLoggingIn
+                                  ? loginId
+                                    ? "Cancel sign in"
+                                    : "Signing in..."
+                                  : "Sign in"}
+                            </Button>
+                          </div>
+
+                          <label
+                            htmlFor="connections-codex-binary-path"
+                            className="block space-y-1"
+                          >
+                            <span className="text-xs font-medium text-foreground">
+                              Binary path
+                            </span>
+                            <Input
+                              id="connections-codex-binary-path"
+                              value={codexBinaryPath}
+                              onChange={(event) =>
+                                updateSettings({ codexBinaryPath: event.target.value })
+                              }
+                              placeholder="codex"
+                              spellCheck={false}
+                            />
+                            <span className="text-xs text-muted-foreground">
+                              Leave blank to use <code>codex</code> from your PATH.
+                            </span>
+                          </label>
+
+                          <label
+                            htmlFor="connections-codex-home-path"
+                            className="block space-y-1"
+                          >
+                            <span className="text-xs font-medium text-foreground">
+                              Home path
+                            </span>
+                            <Input
+                              id="connections-codex-home-path"
+                              value={codexHomePath}
+                              onChange={(event) =>
+                                updateSettings({ codexHomePath: event.target.value })
+                              }
+                              placeholder="/Users/you/.codex"
+                              spellCheck={false}
+                            />
+                            <span className="text-xs text-muted-foreground">
+                              Optional custom Codex home/config directory.
+                            </span>
+                          </label>
+
+                          <label
+                            htmlFor="connections-codex-service-tier"
+                            className="block space-y-1"
+                          >
+                            <span className="text-xs font-medium text-foreground">
+                              Service tier
+                            </span>
+                            <Select
+                              items={APP_SERVICE_TIER_OPTIONS.map((option) => ({
+                                label: option.label,
+                                value: option.value,
+                              }))}
+                              value={codexServiceTier}
+                              onValueChange={(value) => {
+                                if (!value) return;
+                                updateSettings({ codexServiceTier: value });
+                              }}
+                            >
+                              <SelectTrigger>
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectPopup alignItemWithTrigger={false}>
+                                {APP_SERVICE_TIER_OPTIONS.map((option) => (
+                                  <SelectItem key={option.value} value={option.value}>
+                                    <div className="flex min-w-0 items-center gap-2">
+                                      {option.value === "fast" ? (
+                                        <ZapIcon className="size-3.5 text-amber-500" />
+                                      ) : (
+                                        <span
+                                          className="size-3.5 shrink-0"
+                                          aria-hidden="true"
+                                        />
+                                      )}
+                                      <span className="truncate">{option.label}</span>
+                                    </div>
+                                  </SelectItem>
+                                ))}
+                              </SelectPopup>
+                            </Select>
+                            <span className="text-xs text-muted-foreground">
+                              {APP_SERVICE_TIER_OPTIONS.find(
+                                (option) => option.value === codexServiceTier,
+                              )?.description ??
+                                "Use Codex defaults without forcing a service tier."}
+                            </span>
+                          </label>
+
+                          <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                            <p>
+                              Binary source:{" "}
+                              <span className="font-medium text-foreground">
+                                {codexBinaryPath || "PATH"}
+                              </span>
+                            </p>
+                            <Button
+                              size="xs"
+                              variant="outline"
+                              onClick={() =>
+                                updateSettings({
+                                  codexBinaryPath: defaults.codexBinaryPath,
+                                  codexHomePath: defaults.codexHomePath,
+                                })
+                              }
+                            >
+                              Reset codex overrides
+                            </Button>
+                          </div>
+                        </div>
+                      </>
+                    ) : (
+                      <p className="pt-3 text-xs text-muted-foreground">
+                        {codexAccount?.state === "authenticated"
+                          ? codexAccount.account && "email" in codexAccount.account
+                            ? <>
+                                Signed in as{" "}
+                                <BlurredEmail value={codexAccount.account.email} />
+                              </>
+                            : "Signed in"
+                          : "Not signed in"}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* ── OpenCode ── */}
+                  <div className="rounded-xl border border-border bg-background p-4">
+                    <button
+                      type="button"
+                      onClick={() => toggleProviderExpanded("opencode")}
+                      className="flex w-full items-center justify-between text-left"
+                      aria-expanded={expandedProviders.has("opencode")}
+                    >
+                      <div className="flex items-center gap-2">
+                        <ProviderLogo provider="opencode" className="text-muted-foreground" />
+                        <h3 className="text-sm font-medium text-foreground">
+                          {PROVIDER_DISPLAY_NAMES.opencode}
+                        </h3>
+                        {opencodeStatus?.status === "ready" ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-green-500/10 px-2 py-0.5 text-[11px] text-green-600">
+                            <CircleCheckIcon className="size-2.5" />
+                            Ready
+                          </span>
+                        ) : opencodeStatus?.status === "warning" ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-600">
+                            <CircleAlertIcon className="size-2.5" />
+                            Warning
+                          </span>
+                        ) : opencodeStatus?.status === "error" ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 text-[11px] text-destructive">
+                            <CircleXIcon className="size-2.5" />
+                            Error
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
+                            <CircleEllipsisIcon className="size-2.5" />
+                            Checking...
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {opencodeStatus?.version ? (
+                          <span className="text-[11px] text-muted-foreground">
+                            v{opencodeStatus.version}
+                          </span>
+                        ) : null}
+                        <ProviderUpdateButton
+                          provider="opencode"
+                          currentVersion={opencodeStatus?.version ?? null}
+                          updateInfo={opencodeStatus?.updateInfo}
+                        />
+                        <ChevronDownIcon
+                          className={cn(
+                            "size-4 shrink-0 text-muted-foreground transition-transform",
+                            !expandedProviders.has("opencode") && "-rotate-90",
+                          )}
+                          aria-hidden
+                        />
+                      </div>
+                    </button>
+
+                    {expandedProviders.has("opencode") ? (
+                      <>
+                        {opencodeStatus?.message ? (
+                          <p className="mb-3 text-xs text-muted-foreground">
+                            {opencodeStatus.message}
+                          </p>
+                        ) : null}
+                        <div className="space-y-3 pt-3">
+                          <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
+                            <div>
+                              <p className="text-sm font-medium text-foreground">
+                                Enable OpenCode
+                              </p>
+                              <p className="text-xs text-muted-foreground">
+                                Show OpenCode as a provider option in new sessions.
+                              </p>
+                            </div>
+                            <Switch
+                              checked={opencodeServerSettings?.enabled ?? true}
+                              onCheckedChange={(checked) =>
+                                void updateOpenCodeServerSettings({
+                                  enabled: Boolean(checked),
+                                })
+                              }
+                              aria-label="Enable OpenCode"
+                            />
+                          </div>
+
+                          <label
+                            htmlFor="connections-opencode-binary-path"
+                            className="block space-y-1"
+                          >
+                            <span className="text-xs font-medium text-foreground">
+                              Binary path
+                            </span>
+                            <Input
+                              id="connections-opencode-binary-path"
+                              value={opencodeBinaryPathDraft}
+                              onChange={(event) => {
+                                setOpencodeBinaryPathDraft(event.target.value);
+                              }}
+                              onBlur={commitOpenCodeBinaryPath}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                  event.currentTarget.blur();
+                                }
+                              }}
+                              placeholder="opencode"
+                              spellCheck={false}
+                            />
+                            <span className="text-xs text-muted-foreground">
+                              Leave blank to use <code>opencode</code> from your PATH.
+                            </span>
+                          </label>
+
+                          <label
+                            htmlFor="connections-opencode-server-url"
+                            className="block space-y-1"
+                          >
+                            <span className="text-xs font-medium text-foreground">
+                              Server URL
+                            </span>
+                            <Input
+                              id="connections-opencode-server-url"
+                              value={opencodeServerUrlDraft}
+                              onChange={(event) => {
+                                setOpencodeServerUrlDraft(event.target.value);
+                              }}
+                              onBlur={commitOpenCodeServerUrl}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                  event.currentTarget.blur();
+                                }
+                              }}
+                              placeholder="http://127.0.0.1:4096"
+                              spellCheck={false}
+                            />
+                            <span className="text-xs text-muted-foreground">
+                              Leave blank to spawn the OpenCode server locally.
+                            </span>
+                          </label>
+
+                          <label
+                            htmlFor="connections-opencode-server-password"
+                            className="block space-y-1"
+                          >
+                            <span className="text-xs font-medium text-foreground">
+                              Server password
+                            </span>
+                            <Input
+                              id="connections-opencode-server-password"
+                              type="password"
+                              autoComplete="off"
+                              value={opencodeServerPasswordDraft}
+                              onChange={(event) => {
+                                setOpencodeServerPasswordDraft(event.target.value);
+                              }}
+                              onBlur={commitOpenCodeServerPassword}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") {
+                                  event.currentTarget.blur();
+                                }
+                              }}
+                              placeholder="Optional password"
+                              spellCheck={false}
+                            />
+                            <span className="text-xs text-muted-foreground">
+                              Used when the configured OpenCode server requires
+                              authentication.
+                            </span>
+                          </label>
+                        </div>
+                      </>
+                    ) : (
+                      <p className="pt-3 text-xs text-muted-foreground">
+                        {(opencodeServerSettings?.enabled ?? true) ? "Enabled" : "Disabled"}
+                      </p>
+                    )}
+                  </div>
+
+                  {/* ── Claude ── */}
+                  <div className="rounded-xl border border-border bg-background p-4">
+                    <button
+                      type="button"
+                      onClick={() => toggleProviderExpanded("claudeAgent")}
+                      className="flex w-full items-center justify-between text-left"
+                      aria-expanded={expandedProviders.has("claudeAgent")}
+                    >
+                      <div className="flex items-center gap-2">
+                        <ProviderLogo provider="claudeAgent" className="text-muted-foreground" />
+                        <h3 className="text-sm font-medium text-foreground">
+                          {PROVIDER_DISPLAY_NAMES.claudeAgent}
+                        </h3>
+                        {claudeStatus?.status === "ready" ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-green-500/10 px-2 py-0.5 text-[11px] text-green-600">
+                            <CircleCheckIcon className="size-2.5" />
+                            Ready
+                          </span>
+                        ) : claudeStatus?.status === "warning" ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-600">
+                            <CircleAlertIcon className="size-2.5" />
+                            Warning
+                          </span>
+                        ) : claudeStatus?.status === "error" ? (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-destructive/10 px-2 py-0.5 text-[11px] text-destructive">
+                            <CircleXIcon className="size-2.5" />
+                            Error
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-[11px] text-muted-foreground">
+                            <CircleEllipsisIcon className="size-2.5" />
+                            Checking...
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {claudeStatus?.version ? (
+                          <span className="text-[11px] text-muted-foreground">
+                            v{claudeStatus.version}
+                          </span>
+                        ) : null}
+                        <ProviderUpdateButton
+                          provider="claudeAgent"
+                          currentVersion={claudeStatus?.version ?? null}
+                          updateInfo={claudeStatus?.updateInfo}
+                        />
+                        <ChevronDownIcon
+                          className={cn(
+                            "size-4 shrink-0 text-muted-foreground transition-transform",
+                            !expandedProviders.has("claudeAgent") && "-rotate-90",
+                          )}
+                          aria-hidden
+                        />
+                      </div>
+                    </button>
+
+                    {expandedProviders.has("claudeAgent") ? (
+                      <>
+                        {claudeStatus?.message ? (
+                          <p className="mb-3 text-xs text-muted-foreground">
+                            {claudeStatus.message}
+                          </p>
+                        ) : null}
+                        <div className="space-y-3 pt-3">
+                          <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
+                            <div>
+                              <span className="text-xs font-medium text-foreground">
+                                Authentication
+                              </span>
+                              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                                {claudeAuthenticationLabel}
+                              </p>
+                            </div>
+                            <span className="text-[11px] text-muted-foreground">
+                              {claudeAuthenticationModeLabel}
+                            </span>
+                          </div>
+
+                          {claudeAccount?.rateLimits &&
+                          claudeAccount.rateLimits.length > 0 ? (
+                            <div className="rounded-lg border border-border px-3 py-2">
+                              <span className="text-xs font-medium text-foreground">
+                                Rate limits
+                              </span>
+                              <div className="mt-2 space-y-2">
+                                {claudeAccount.rateLimits.map((bucket, index) => (
+                                  <div
+                                    key={bucket.limitId ?? index}
+                                    className="space-y-1 text-[11px]"
+                                  >
+                                    {bucket.limitName ? (
+                                      <span className="font-medium text-foreground">
+                                        {bucket.limitName}
+                                      </span>
+                                    ) : null}
+                                    {bucket.primary ? (
+                                      <div className="flex items-center justify-between text-muted-foreground">
+                                        <span>Used</span>
+                                        <span>
+                                          {bucket.primary.usedPercent}%
+                                        </span>
+                                      </div>
+                                    ) : null}
+                                    {bucket.credits?.balance ? (
+                                      <div className="flex items-center justify-between text-muted-foreground">
+                                        <span>Credits</span>
+                                        <span>{bucket.credits.balance}</span>
+                                      </div>
+                                    ) : null}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                      </>
+                    ) : (
+                      <p className="pt-3 text-xs text-muted-foreground">
+                        {claudeCollapsedAuthenticationLabel}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </section>
+            ) : null}
+
             {activeSection === SETTINGS_SECTION_IDS.archived ? (
               <section id={SETTINGS_SECTION_IDS.archived} className={SETTINGS_SECTION_CLASS}>
                 <div className="mb-4">
@@ -2006,6 +3116,97 @@ function SettingsRouteView() {
           </div>
         </div>
       </div>
+      <Dialog open={pairingLinkDialogOpen} onOpenChange={handlePairingDialogOpenChange}>
+        <DialogPopup className="max-w-md">
+          <DialogHeader className="pb-3">
+            <DialogTitle>Create pairing link</DialogTitle>
+            <DialogDescription>
+              Generate a one-time link that another device can use to pair with this backend as an
+              authorized client.
+            </DialogDescription>
+          </DialogHeader>
+
+          <DialogPanel className="space-y-4 px-6 pb-1 pt-0">
+            <Input
+              value={pairingClientName}
+              onChange={(event) => setPairingClientName(event.target.value)}
+              placeholder="e.g. Living room iPad"
+              aria-label="Client name"
+              autoFocus
+            />
+
+            <div className="space-y-2">
+              <div className="flex items-end justify-between gap-3">
+                <div>
+                  <h3 className="text-xs font-semibold text-foreground">Permissions</h3>
+                  <p className="text-xs text-muted-foreground">
+                    Limit what the paired client can do.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <Button
+                    size="xs"
+                    variant={readOnlyPairingPresetSelected ? "default" : "outline"}
+                    onClick={() => applyPairingPermissionPreset("readOnly")}
+                  >
+                    Read only
+                  </Button>
+                  <Button
+                    size="xs"
+                    variant={standardPairingPresetSelected ? "default" : "outline"}
+                    onClick={() => applyPairingPermissionPreset("standard")}
+                  >
+                    Standard
+                  </Button>
+                </div>
+              </div>
+
+              <div className="overflow-hidden rounded-lg border border-border">
+                {PAIRING_PERMISSION_OPTIONS.map((permission, index) => {
+                  const checked = pairingPermissionIds.has(permission.id);
+                  return (
+                    <label
+                      key={permission.id}
+                      className={cn(
+                        "flex cursor-pointer items-start gap-3 px-3 py-3",
+                        index > 0 && "border-t border-border",
+                      )}
+                    >
+                      <Checkbox
+                        checked={checked}
+                        onCheckedChange={() => togglePairingPermission(permission.id)}
+                        aria-label={permission.label}
+                        className="mt-0.5"
+                      />
+                      <span className="min-w-0">
+                        <span className="block text-xs font-semibold text-foreground">
+                          {permission.label}
+                        </span>
+                        <span className="mt-0.5 block text-xs text-muted-foreground">
+                          {permission.description}
+                        </span>
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </div>
+          </DialogPanel>
+
+          <DialogFooter variant="bare">
+            <Button variant="outline" onClick={() => setPairingLinkDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              disabled={createPairingLinkMutation.isPending || pairingPermissionIds.size === 0}
+              onClick={handleCreatePairingLink}
+            >
+              Create link
+            </Button>
+          </DialogFooter>
+        </DialogPopup>
+      </Dialog>
     </AppPageShell>
   );
 }

@@ -463,6 +463,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
         ) : filePanelState.activeTab.kind === "review" ? (
           <ReviewSurface
             cwd={activeCwd}
+            mode={mode}
             thread={activeThread}
             theme={resolvedTheme}
             commentsByFilePath={filePanelState.commentsByFilePath}
@@ -696,6 +697,7 @@ type ReviewScope = GitDiffScope | "last-turn";
 
 function ReviewSurface(props: {
   cwd: string | null;
+  mode: NonNullable<DiffPanelProps["mode"]>;
   thread: Thread;
   theme: "light" | "dark";
   commentsByFilePath: Record<string, FilePanelComment[]>;
@@ -711,7 +713,7 @@ function ReviewSurface(props: {
   onDeleteComment: (filePath: string, commentId: string) => void;
 }) {
   const [scope, setScope] = useState<ReviewScope>("unstaged");
-  const [wordWrap, setWordWrap] = useState(false);
+  const [wordWrap, setWordWrap] = useState(() => props.mode === "sheet");
   const [wordDiffs, setWordDiffs] = useState(true);
   const [collapsed, setCollapsed] = useState(false);
   const [diffStyle, setDiffStyle] = useState<"unified" | "split">("unified");
@@ -721,6 +723,7 @@ function ReviewSurface(props: {
     side: AnnotationSide;
   } | null>(null);
   const [draftText, setDraftText] = useState("");
+  const reviewDiffStyle = props.mode === "sheet" ? "unified" : diffStyle;
   const queryClient = useQueryClient();
   const statusQuery = useQuery(gitStatusQueryOptions(props.cwd));
   const gitScope: GitDiffScope = scope === "last-turn" ? "unstaged" : scope;
@@ -859,12 +862,16 @@ function ReviewSurface(props: {
                 <Rows3Icon className="size-3.5 text-muted-foreground" />
                 {collapsed ? "Expand all diffs" : "Collapse all diffs"}
               </MenuItem>
-              <MenuItem
-                onClick={() => setDiffStyle((value) => (value === "unified" ? "split" : "unified"))}
-              >
-                <SplitSquareHorizontalIcon className="size-3.5 text-muted-foreground" />
-                {diffStyle === "unified" ? "Use split diff" : "Use unified diff"}
-              </MenuItem>
+              {props.mode !== "sheet" ? (
+                <MenuItem
+                  onClick={() =>
+                    setDiffStyle((value) => (value === "unified" ? "split" : "unified"))
+                  }
+                >
+                  <SplitSquareHorizontalIcon className="size-3.5 text-muted-foreground" />
+                  {diffStyle === "unified" ? "Use split diff" : "Use unified diff"}
+                </MenuItem>
+              ) : null}
               <MenuItem disabled={!hasPatch} onClick={copyPatch}>
                 <CopyIcon className="size-3.5 text-muted-foreground" />
                 Copy patch
@@ -921,6 +928,13 @@ function ReviewSurface(props: {
                     onAddPdfAnnotation={props.onAddPdfAnnotation}
                     onAction={(action) => void runReviewAction(action, fileDiff.name)}
                   />
+                ) : props.mode === "sheet" ? (
+                  <MobileReviewFileDiff
+                    fileDiff={fileDiff}
+                    scope={scope}
+                    disabled={reviewActionMutation.isPending}
+                    onAction={(action) => void runReviewAction(action, fileDiff.name)}
+                  />
                 ) : (
                   <FileDiff
                     fileDiff={fileDiff}
@@ -931,7 +945,7 @@ function ReviewSurface(props: {
                     })}
                     options={{
                       collapsed,
-                      diffStyle,
+                      diffStyle: reviewDiffStyle,
                       enableGutterUtility: true,
                       hunkSeparators: "line-info",
                       lineDiffType: wordDiffs ? "word" : "none",
@@ -1072,6 +1086,153 @@ function parseBinaryReviewPatchFiles(patch: string): FileDiffMetadata[] {
     } as FileDiffMetadata);
   }
   return files;
+}
+
+function MobileReviewFileDiff(props: {
+  disabled: boolean;
+  fileDiff: FileDiffMetadata;
+  onAction: (action: GitReviewAction) => void;
+  scope: ReviewScope;
+}) {
+  const stats = summarizeReviewFile(props.fileDiff);
+
+  return (
+    <section className="border-b border-border/60 bg-background">
+      <div className="sticky top-10 z-[9] flex min-h-11 items-center justify-between gap-3 border-b border-border/55 bg-background/95 px-3 py-2 backdrop-blur">
+        <div className="min-w-0">
+          <div className="truncate text-[13px] font-medium text-foreground">
+            {props.fileDiff.name}
+            <span className="ml-2 font-mono text-[12px] text-emerald-600 dark:text-emerald-400">
+              +{stats.additions}
+            </span>
+            <span className="ml-1 font-mono text-[12px] text-red-600 dark:text-red-400">
+              -{stats.deletions}
+            </span>
+          </div>
+          {props.fileDiff.prevName && props.fileDiff.prevName !== props.fileDiff.name ? (
+            <div className="truncate text-[11px] text-muted-foreground/70">
+              {props.fileDiff.prevName}
+            </div>
+          ) : null}
+        </div>
+        <ReviewFileActions
+          filePath={props.fileDiff.name}
+          scope={props.scope}
+          disabled={props.disabled}
+          onAction={props.onAction}
+        />
+      </div>
+      {props.fileDiff.hunks.length === 0 ? (
+        <div className="px-3 py-8 text-center text-xs text-muted-foreground/70">
+          Binary or metadata-only change.
+        </div>
+      ) : (
+        <div className="font-mono text-[11px] leading-5">
+          {props.fileDiff.hunks.map((hunk) => {
+            let deletionLine = hunk.deletionStart;
+            let additionLine = hunk.additionStart;
+            const hunkKey =
+              hunk.hunkSpecs ??
+              `${props.fileDiff.name}:${hunk.deletionStart}:${hunk.deletionCount}:${hunk.additionStart}:${hunk.additionCount}`;
+            return (
+              <div key={`${props.fileDiff.cacheKey ?? props.fileDiff.name}:hunk:${hunkKey}`}>
+                <div className="border-y border-border/50 bg-muted/45 px-3 py-1 text-[11px] text-muted-foreground">
+                  {hunk.hunkSpecs ?? `@@ -${hunk.deletionStart} +${hunk.additionStart} @@`}
+                  {hunk.hunkContext ? ` ${hunk.hunkContext}` : ""}
+                </div>
+                {hunk.hunkContent.map((content) => {
+                  if (content.type === "context") {
+                    const rows = Array.from({ length: content.lines }, (_, offset) => {
+                      const oldLine = deletionLine++;
+                      const newLine = additionLine++;
+                      const text =
+                        props.fileDiff.additionLines[content.additionLineIndex + offset] ?? "";
+                      return (
+                        <MobileReviewLine
+                          key={`context:${oldLine}:${newLine}`}
+                          kind="context"
+                          newLine={newLine}
+                          oldLine={oldLine}
+                          text={text}
+                        />
+                      );
+                    });
+                    return rows;
+                  }
+
+                  const deletionRows = Array.from({ length: content.deletions }, (_, offset) => {
+                    const oldLine = deletionLine++;
+                    const text =
+                      props.fileDiff.deletionLines[content.deletionLineIndex + offset] ?? "";
+                    return (
+                      <MobileReviewLine
+                        key={`deletion:${oldLine}`}
+                        kind="deletion"
+                        oldLine={oldLine}
+                        text={text}
+                      />
+                    );
+                  });
+                  const additionRows = Array.from({ length: content.additions }, (_, offset) => {
+                    const newLine = additionLine++;
+                    const text =
+                      props.fileDiff.additionLines[content.additionLineIndex + offset] ?? "";
+                    return (
+                      <MobileReviewLine
+                        key={`addition:${newLine}`}
+                        kind="addition"
+                        newLine={newLine}
+                        text={text}
+                      />
+                    );
+                  });
+                  return [...deletionRows, ...additionRows];
+                })}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function MobileReviewLine(props: {
+  kind: "addition" | "context" | "deletion";
+  newLine?: number | undefined;
+  oldLine?: number | undefined;
+  text: string;
+}) {
+  const prefix = props.kind === "addition" ? "+" : props.kind === "deletion" ? "-" : " ";
+  return (
+    <div
+      className={cn(
+        "grid grid-cols-[2.5rem_2.5rem_1rem_minmax(0,1fr)] border-b border-border/20 px-2",
+        props.kind === "addition" && "bg-emerald-500/12",
+        props.kind === "deletion" && "bg-red-500/12",
+      )}
+    >
+      <span className="select-none text-right text-muted-foreground/45">
+        {props.oldLine ?? ""}
+      </span>
+      <span className="select-none text-right text-muted-foreground/45">
+        {props.newLine ?? ""}
+      </span>
+      <span
+        className={cn(
+          "select-none text-center",
+          props.kind === "addition" && "text-emerald-600 dark:text-emerald-400",
+          props.kind === "deletion" && "text-red-600 dark:text-red-400",
+          props.kind === "context" && "text-muted-foreground/45",
+        )}
+      >
+        {prefix}
+      </span>
+      <code className="min-w-0 whitespace-pre-wrap break-words pl-1 text-foreground/88">
+        {props.text || " "}
+      </code>
+    </div>
+  );
 }
 
 function ReviewPdfDiff(props: {

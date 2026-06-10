@@ -72,15 +72,7 @@ describe("getAvailableComposerSlashCommands", () => {
         canOfferForkCommand: true,
         providerNativeCommandNames: ["clear", "status"],
       }),
-    ).toEqual([
-      "model",
-      "plan",
-      "default",
-      "review",
-      "fork",
-      "browser",
-      "subagents",
-    ]);
+    ).toEqual(["model", "plan", "default", "review", "fork", "browser", "subagents"]);
   });
 });
 
@@ -91,10 +83,11 @@ describe("buildBrowserUseComposerPrompt", () => {
     });
 
     expect(prompt).toContain("T3 Browser Use");
+    expect(prompt).toContain("If a `t3_browser` MCP server is exposed");
     expect(prompt).toContain("Do not use OpenAI Browser Use");
-    expect(prompt).toContain("Do not use OpenAI Browser Use, Chrome MCP, `t3_browser` MCP");
+    expect(prompt).not.toContain("`t3_browser` MCP, Playwright");
     expect(prompt).toContain("pathToFileURL");
-    expect(prompt).toContain("projectId: \"PROJECT_ID\"");
+    expect(prompt).toContain('projectId: "PROJECT_ID"');
     expect(prompt).toContain("Use projectId `project-1`");
     expect(prompt).toContain("Task: open localhost:3000");
   });

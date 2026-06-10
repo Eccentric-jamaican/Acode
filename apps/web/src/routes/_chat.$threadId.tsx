@@ -148,7 +148,7 @@ const RightPanelSheet = (props: {
         side="right"
         showCloseButton={false}
         keepMounted
-        className="w-[min(88vw,820px)] max-w-[820px] p-0"
+        className="w-screen max-w-none p-0 sm:w-[min(88vw,820px)] sm:max-w-[820px]"
       >
         {props.children}
       </SheetPopup>
@@ -186,6 +186,7 @@ function ViewerPanelSurface(props: {
   expanded?: boolean;
   onToggleExpanded?: (() => void) | undefined;
   onClosePanel: () => void;
+  onCloseFiles?: (() => void) | undefined;
   onRevealFile?: (path: string) => void;
 }) {
   if (props.panelMode === null) {
@@ -193,10 +194,12 @@ function ViewerPanelSurface(props: {
       return null;
     }
     return props.railOverlay ? (
-      <div className="absolute inset-y-0 right-0 z-30 w-[min(82vw,22rem)] border-l border-border/50 shadow-xl">
+      <div className="absolute inset-y-0 right-0 z-30 w-full border-l border-border/50 bg-background shadow-xl sm:w-[min(82vw,22rem)]">
         <WorkspaceFilesRail
           threadId={props.threadId}
           cwd={props.cwd}
+          className="w-full bg-background"
+          onClose={props.onClosePanel}
           onRevealFile={props.onRevealFile}
         />
       </div>
@@ -260,8 +263,12 @@ function ViewerPanelSurface(props: {
         </div>
       ) : null}
       <div
-        className="flex-1 overflow-hidden"
-        style={{ minWidth: `${VIEWER_PANEL_MIN_WIDTH_PX}px` }}
+        className="min-w-0 flex-1 overflow-hidden"
+        style={
+          props.railOverlay
+            ? undefined
+            : ({ minWidth: `${VIEWER_PANEL_MIN_WIDTH_PX}px` } as React.CSSProperties)
+        }
       >
         <Suspense fallback={<DiffLoadingFallback inline />}>
           <DiffPanel mode={props.railOverlay ? "sheet" : "sidebar"} />
@@ -269,10 +276,12 @@ function ViewerPanelSurface(props: {
       </div>
       {props.filesOpen ? (
         props.railOverlay ? (
-          <div className="absolute inset-y-0 right-0 z-30 w-[min(82vw,22rem)] border-l border-border/50 shadow-xl">
+          <div className="absolute inset-y-0 right-0 z-30 w-full border-l border-border/50 bg-background shadow-xl sm:w-[min(82vw,22rem)]">
             <WorkspaceFilesRail
               threadId={props.threadId}
               cwd={props.cwd}
+              className="w-full bg-background"
+              onClose={props.onCloseFiles}
               onRevealFile={props.onRevealFile}
             />
           </div>
@@ -1272,6 +1281,14 @@ function SingleChatSurface(props: {
     });
   }, [navigate, props.threadId]);
 
+  const closeFiles = useCallback(() => {
+    void navigate({
+      to: "/$threadId",
+      params: { threadId: props.threadId },
+      search: (previous) => withFilesRailOpen(previous as Record<string, unknown>, false),
+    });
+  }, [navigate, props.threadId]);
+
   const handleSplitSurface = useCallback(() => {
     if (!props.projectId) return;
     const splitViewId = createSplitView({
@@ -1349,6 +1366,7 @@ function SingleChatSurface(props: {
               expanded
               onToggleExpanded={() => setViewerExpanded(false)}
               onClosePanel={closePanel}
+              onCloseFiles={closeFiles}
               onRevealFile={openFileViewer}
             />
           </div>
@@ -1388,6 +1406,7 @@ function SingleChatSurface(props: {
               filesOpen={props.filesOpen}
               railOverlay
               onClosePanel={closePanel}
+              onCloseFiles={closeFiles}
               onRevealFile={openFileViewer}
             />
           )

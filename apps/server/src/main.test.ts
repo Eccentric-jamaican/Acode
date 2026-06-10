@@ -64,6 +64,7 @@ const testLayer = Layer.mergeAll(
   Layer.succeed(Open, {
     openBrowser: (_target: string) => Effect.void,
     openInEditor: () => Effect.void,
+    launchCommand: () => Effect.void,
   } satisfies OpenShape),
   Layer.succeed(OrchestrationReactor, {
     start: Effect.void,
@@ -314,6 +315,7 @@ it.layer(testLayer)("server CLI command", (it) => {
           projectCount: 1,
         },
       ]);
+      assert.deepEqual(getSnapshot.mock.calls[0], [{ mode: "bootstrap" }]);
     }),
   );
 

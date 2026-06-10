@@ -46,7 +46,11 @@ export const Route = createRootRouteWithContext<{
 });
 
 function RootRouteView() {
-  if (!readNativeApi()) {
+  const isPairRoute =
+    typeof window !== "undefined" &&
+    (window.location.pathname === "/pair" || window.location.hash.startsWith("#/pair"));
+
+  if (!isPairRoute && !readNativeApi()) {
     return (
       <div className="flex h-screen flex-col bg-background text-foreground">
         <div className="flex flex-1 items-center justify-center">

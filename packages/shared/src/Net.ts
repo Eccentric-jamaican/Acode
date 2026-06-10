@@ -1,6 +1,9 @@
 import * as Net from "node:net";
 
-import { Data, Effect, Layer, ServiceMap } from "effect";
+import * as Data from "effect/Data";
+import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as ServiceMap from "effect/ServiceMap";
 
 export class NetError extends Data.TaggedError("NetError")<{
   readonly message: string;

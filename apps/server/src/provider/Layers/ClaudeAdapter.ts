@@ -88,6 +88,7 @@ import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogg
 import { normalizeInvocationDiffFiles } from "./InvocationDiffNormalization.ts";
 import { discoverSkillsForCwd } from "./SkillDiscovery.ts";
 import { materializeSkillMentionsForProvider } from "./SkillPromptMaterialization.ts";
+import { resolveClaudeCodeSdkExecutablePath } from "../claudeExecutable.ts";
 
 const PROVIDER = "claudeAgent" as const;
 type ClaudeTextStreamKind = Extract<RuntimeContentStreamKind, "assistant_text" | "reasoning_text">;
@@ -2125,6 +2126,11 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
           },
         };
 
+        const runtimeSubtype = (message as { readonly subtype?: unknown }).subtype;
+        if (runtimeSubtype === "thinking_tokens") {
+          return;
+        }
+
         switch (message.subtype) {
           case "init":
             yield* offerRuntimeEvent({
@@ -2886,6 +2892,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         const permissionMode =
           toPermissionMode(providerOptions?.permissionMode) ??
           (input.runtimeMode === "full-access" ? "bypassPermissions" : undefined);
+        const claudeExecutablePath = resolveClaudeCodeSdkExecutablePath(providerOptions?.binaryPath);
         const settings = {
           ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
           ...(fastMode ? { fastMode: true } : {}),
@@ -2894,7 +2901,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         const queryOptions: ClaudeQueryOptions = {
           ...(input.cwd ? { cwd: input.cwd } : {}),
           ...(modelConfig.model ? { model: modelConfig.model } : {}),
-          pathToClaudeCodeExecutable: providerOptions?.binaryPath ?? "claude",
+          pathToClaudeCodeExecutable: claudeExecutablePath,
           settingSources: [...CLAUDE_SETTING_SOURCES],
           mcpServers: {
             t3_imagegen: buildT3ImagegenMcpServer(input.cwd),
@@ -3218,7 +3225,7 @@ function makeClaudeAdapter(options?: ClaudeAdapterLiveOptions) {
         prompt: neverResolvingUserMessageStream(),
         options: {
           cwd,
-          pathToClaudeCodeExecutable: "claude",
+          pathToClaudeCodeExecutable: resolveClaudeCodeSdkExecutablePath(undefined),
           settingSources: [...CLAUDE_SETTING_SOURCES],
           permissionMode: "plan" as PermissionMode,
           persistSession: false,

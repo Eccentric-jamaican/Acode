@@ -8,6 +8,8 @@
  *
  * @module ProviderHealthLive
  */
+import * as Path from "node:path";
+
 import type {
   ServerProviderAuthStatus,
   ServerProviderStatus,
@@ -17,6 +19,7 @@ import { Effect, Layer, Option, Result, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { ProviderHealth, type ProviderHealthShape } from "../Services/ProviderHealth";
+import { resolveClaudeCodeExecutablePath } from "../claudeExecutable";
 
 const DEFAULT_TIMEOUT_MS = 4_000;
 const OPENCODE_TIMEOUT_MS = 12_000;
@@ -67,16 +70,22 @@ function withProviderDefaults(
   provider: ServerProviderStatus["provider"],
   input: Omit<ServerProviderStatus, "provider" | "enabled" | "installed" | "version" | "models"> & {
     readonly installed?: boolean;
+    readonly version?: string | null;
   },
 ): ServerProviderStatus {
   return {
     provider,
     enabled: true,
     installed: input.installed ?? input.available,
-    version: null,
+    version: input.version ?? null,
     models: [],
     ...input,
   };
+}
+
+function extractCliVersion(output: string): string | null {
+  const match = output.match(/v?(\d+\.\d+\.\d+(?:[-+][^\s]+)?)/i);
+  return match?.[1] ?? null;
 }
 
 function extractAuthBoolean(value: unknown): boolean | undefined {
@@ -285,7 +294,10 @@ function resolveCommandInvocation(
   commandName: string,
   args: ReadonlyArray<string>,
 ): { command: string; args: ReadonlyArray<string>; shell: boolean } {
-  if (process.platform !== "win32") {
+  if (
+    process.platform !== "win32" ||
+    (Path.isAbsolute(commandName) && Path.extname(commandName).toLowerCase() === ".exe")
+  ) {
     return { command: commandName, args, shell: false };
   }
   const commandLine = [commandName, ...args].map(quoteForCmd).join(" ");
@@ -369,6 +381,7 @@ export const checkCodexProviderStatus: Effect.Effect<
         : "Codex CLI is installed but failed to run.",
     });
   }
+  const parsedVersion = extractCliVersion(`${version.stdout}\n${version.stderr}`);
 
   // Probe 2: `codex login status` — is the user authenticated?
   const authProbe = yield* runCommand("codex", ["login", "status"]).pipe(
@@ -383,6 +396,7 @@ export const checkCodexProviderStatus: Effect.Effect<
       available: true,
       authStatus: "unknown" as const,
       checkedAt,
+      version: parsedVersion,
       message:
         error instanceof Error
           ? `Could not verify Codex authentication status: ${error.message}.`
@@ -396,6 +410,7 @@ export const checkCodexProviderStatus: Effect.Effect<
       available: true,
       authStatus: "unknown" as const,
       checkedAt,
+      version: parsedVersion,
       message: "Could not verify Codex authentication status. Timed out while running command.",
     });
   }
@@ -406,6 +421,7 @@ export const checkCodexProviderStatus: Effect.Effect<
     available: true,
     authStatus: parsed.authStatus,
     checkedAt,
+    version: parsedVersion,
     ...(parsed.message ? { message: parsed.message } : {}),
   });
 });
@@ -458,12 +474,14 @@ export const checkOpencodeProviderStatus: Effect.Effect<
         : "OpenCode CLI is installed but failed to run.",
     });
   }
+  const parsedVersion = extractCliVersion(`${version.stdout}\n${version.stderr}`);
 
   return withProviderDefaults(OPENCODE_PROVIDER, {
     status: "ready",
     available: true,
     authStatus: "unknown",
     checkedAt,
+    version: parsedVersion,
     message: "OpenCode authentication status is managed externally in v1.",
   });
 });
@@ -474,8 +492,9 @@ export const checkClaudeProviderStatus: Effect.Effect<
   ChildProcessSpawner.ChildProcessSpawner
 > = Effect.gen(function* () {
   const checkedAt = new Date().toISOString();
+  const claudeExecutable = resolveClaudeCodeExecutablePath(undefined);
 
-  const versionProbe = yield* runCommand("claude", ["--version"]).pipe(
+  const versionProbe = yield* runCommand(claudeExecutable, ["--version"]).pipe(
     Effect.timeoutOption(DEFAULT_TIMEOUT_MS),
     Effect.result,
   );
@@ -487,7 +506,7 @@ export const checkClaudeProviderStatus: Effect.Effect<
       available: false,
       authStatus: "unknown" as const,
       checkedAt,
-      message: isCommandMissingCause(error, "claude")
+      message: isCommandMissingCause(error, claudeExecutable)
         ? "Claude Agent CLI (`claude`) is not installed or not on PATH."
         : `Failed to execute Claude Agent CLI health check: ${error instanceof Error ? error.message : String(error)}.`,
     });
@@ -516,8 +535,9 @@ export const checkClaudeProviderStatus: Effect.Effect<
         : "Claude Agent CLI is installed but failed to run.",
     });
   }
+  const parsedVersion = extractCliVersion(`${version.stdout}\n${version.stderr}`);
 
-  const authProbe = yield* runCommand("claude", ["auth", "status"]).pipe(
+  const authProbe = yield* runCommand(claudeExecutable, ["auth", "status"]).pipe(
     Effect.timeoutOption(DEFAULT_TIMEOUT_MS),
     Effect.result,
   );
@@ -529,6 +549,7 @@ export const checkClaudeProviderStatus: Effect.Effect<
       available: true,
       authStatus: "unknown" as const,
       checkedAt,
+      version: parsedVersion,
       message:
         error instanceof Error
           ? `Could not verify Claude authentication status: ${error.message}.`
@@ -542,6 +563,7 @@ export const checkClaudeProviderStatus: Effect.Effect<
       available: true,
       authStatus: "unknown" as const,
       checkedAt,
+      version: parsedVersion,
       message: "Could not verify Claude authentication status. Timed out while running command.",
     });
   }
@@ -552,6 +574,7 @@ export const checkClaudeProviderStatus: Effect.Effect<
     available: true,
     authStatus: parsed.authStatus,
     checkedAt,
+    version: parsedVersion,
     ...(parsed.message ? { message: parsed.message } : {}),
   });
 });

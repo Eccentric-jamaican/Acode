@@ -122,6 +122,7 @@ import { isScrollContainerNearBottom } from "../chat-scroll";
 import {
   buildPendingUserInputAnswers,
   derivePendingUserInputProgress,
+  filterLocallyDismissedPendingUserInputs,
   setPendingUserInputCustomAnswer,
   type PendingUserInputDraftAnswer,
 } from "../pendingUserInput";
@@ -328,11 +329,28 @@ const DEFAULT_COMPUTER_USE_SETTINGS: ComputerUseSettings = {
 const EMPTY_PENDING_USER_INPUT_ANSWERS: Record<string, PendingUserInputDraftAnswer> = {};
 const EMPTY_HANDOFF_TARGET_PROVIDERS: readonly ProviderKind[] = [];
 const COMPOSER_PATH_QUERY_DEBOUNCE_MS = 120;
+const dismissedProviderHealthBannerKeys = new Set<string>();
+const CHAT_BANNER_CONTAINER_CLASS = "px-3 pt-3 mx-auto max-w-3xl sm:px-0";
+const CHAT_BANNER_ALERT_CLASS = "grid-cols-[1rem_minmax(0,1fr)_auto] rounded-lg sm:rounded-xl";
+const CHAT_BANNER_TITLE_CLASS = "min-w-0 pr-1";
+const CHAT_BANNER_DESCRIPTION_CLASS = "min-w-0 break-words pr-1";
+const CHAT_BANNER_ACTION_CLASS =
+  "col-start-3 row-start-1 row-end-3 mt-0 self-start justify-self-end max-sm:col-start-3 max-sm:mt-0 sm:row-start-1 sm:row-end-3 sm:self-start";
 const SCRIPT_TERMINAL_COLS = 120;
 const SCRIPT_TERMINAL_ROWS = 30;
 const WORKTREE_BRANCH_PREFIX = "t3code";
 const HEADER_COMPACT_BREAKPOINT = 480;
 const DESKTOP_APP_RESOLUTION_TIMEOUT_MS = 2_500;
+
+function isTerminalUserInputSubmitFailure(error: unknown): boolean {
+  const message =
+    error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  return (
+    message.includes("Unknown pending") ||
+    message.includes('Expected a string starting with "que"') ||
+    message.includes('Expected a string starting with \\"que\\"')
+  );
+}
 
 function attachmentTypeForFile(file: File): ChatAttachment["type"] | null {
   if (file.type.startsWith("image/")) {
@@ -2306,8 +2324,9 @@ export default function ChatView({
   );
   const effectivePendingUserInputs = useMemo(
     () =>
-      pendingUserInputs.filter(
-        (userInput) => !locallyDismissedUserInputRequestIds[`${userInput.requestId}`],
+      filterLocallyDismissedPendingUserInputs(
+        pendingUserInputs,
+        locallyDismissedUserInputRequestIds,
       ),
     [locallyDismissedUserInputRequestIds, pendingUserInputs],
   );
@@ -2323,18 +2342,6 @@ export default function ChatView({
       return Object.keys(next).length === Object.keys(existing).length ? existing : next;
     });
   }, [pendingApprovals, locallyDismissedApprovalRequestIds]);
-  useEffect(() => {
-    if (Object.keys(locallyDismissedUserInputRequestIds).length === 0) {
-      return;
-    }
-    const activeRequestIds = new Set(pendingUserInputs.map((request) => `${request.requestId}`));
-    setLocallyDismissedUserInputRequestIds((existing) => {
-      const next = Object.fromEntries(
-        Object.entries(existing).filter(([requestId]) => activeRequestIds.has(requestId)),
-      );
-      return Object.keys(next).length === Object.keys(existing).length ? existing : next;
-    });
-  }, [pendingUserInputs, locallyDismissedUserInputRequestIds]);
   const handoffBadgeLabel = useMemo(
     () => (activeThread ? resolveThreadHandoffBadgeLabel(activeThread) : null),
     [activeThread],
@@ -4799,7 +4806,17 @@ export default function ChatView({
     async (requestId: ApprovalRequestId, answers: Record<string, unknown>) => {
       const api = readNativeApi();
       if (!api || !activeThreadId) return;
+      if (respondingUserInputRequestIds.includes(requestId)) return;
 
+      const requestKey = String(requestId);
+      setLocallyDismissedUserInputRequestIds((existing) =>
+        existing[requestKey]
+          ? existing
+          : {
+              ...existing,
+              [requestKey]: true,
+            },
+      );
       setRespondingUserInputRequestIds((existing) =>
         existing.includes(requestId) ? existing : [...existing, requestId],
       );
@@ -4815,6 +4832,14 @@ export default function ChatView({
         });
         wasSubmitted = true;
       } catch (err: unknown) {
+        if (!isTerminalUserInputSubmitFailure(err)) {
+          setLocallyDismissedUserInputRequestIds((existing) => {
+            if (!existing[requestKey]) return existing;
+            const next = { ...existing };
+            delete next[requestKey];
+            return next;
+          });
+        }
         setStoreThreadError(
           activeThreadId,
           err instanceof Error ? err.message : "Failed to submit user input.",
@@ -4823,27 +4848,27 @@ export default function ChatView({
         setRespondingUserInputRequestIds((existing) => existing.filter((id) => id !== requestId));
       }
       if (wasSubmitted) {
-        setLocallyDismissedUserInputRequestIds((existing) => ({
-          ...existing,
-          [String(requestId)]: true,
-        }));
         setPendingUserInputAnswersByRequestId((existing) => {
-          const key = String(requestId);
-          if (!existing[key]) return existing;
+          const key = requestKey;
+          if (!existing[key]) {
+            return existing;
+          }
           const next = { ...existing };
           delete next[key];
           return next;
         });
         setPendingUserInputQuestionIndexByRequestId((existing) => {
-          const key = String(requestId);
-          if (!existing[key]) return existing;
+          const key = requestKey;
+          if (!existing[key]) {
+            return existing;
+          }
           const next = { ...existing };
           delete next[key];
           return next;
         });
       }
     },
-    [activeThreadId, setStoreThreadError],
+    [activeThreadId, respondingUserInputRequestIds, setStoreThreadError],
   );
 
   const setActivePendingUserInputQuestionIndex = useCallback(
@@ -8388,14 +8413,17 @@ const ThreadErrorBanner = memo(function ThreadErrorBanner({ error }: { error: st
 
   if (!error || dismissed) return null;
   return (
-    <div className="pt-3 mx-auto max-w-3xl">
-      <Alert variant="error">
+    <div className={CHAT_BANNER_CONTAINER_CLASS}>
+      <Alert className={CHAT_BANNER_ALERT_CLASS} variant="error">
         <CircleAlertIcon />
-        <AlertTitle>Session error</AlertTitle>
-        <AlertDescription className="line-clamp-3" title={error}>
+        <AlertTitle className={CHAT_BANNER_TITLE_CLASS}>Session error</AlertTitle>
+        <AlertDescription
+          className={cn("line-clamp-3", CHAT_BANNER_DESCRIPTION_CLASS)}
+          title={error}
+        >
           {error}
         </AlertDescription>
-        <AlertAction>
+        <AlertAction className={CHAT_BANNER_ACTION_CLASS}>
           <Button
             aria-label="Dismiss session error"
             onClick={() => setDismissed(true)}
@@ -8416,6 +8444,8 @@ const ProviderHealthBanner = memo(function ProviderHealthBanner({
 }: {
   status: ServerProviderStatus | null;
 }) {
+  const [dismissedKey, setDismissedKey] = useState<string | null>(null);
+
   if (!status || status.status === "ready") {
     return null;
   }
@@ -8424,17 +8454,45 @@ const ProviderHealthBanner = memo(function ProviderHealthBanner({
     status.status === "error"
       ? `${status.provider} provider is unavailable.`
       : `${status.provider} provider has limited availability.`;
+  const message = status.message ?? defaultMessage;
+  const bannerKey = `${status.provider}:${status.status}:${message}`;
+
+  if (dismissedKey === bannerKey || dismissedProviderHealthBannerKeys.has(bannerKey)) {
+    return null;
+  }
+
+  const dismiss = () => {
+    dismissedProviderHealthBannerKeys.add(bannerKey);
+    setDismissedKey(bannerKey);
+  };
 
   return (
-    <div className="pt-3 mx-auto max-w-3xl">
-      <Alert variant={status.status === "error" ? "error" : "warning"}>
+    <div className={CHAT_BANNER_CONTAINER_CLASS}>
+      <Alert
+        className={CHAT_BANNER_ALERT_CLASS}
+        variant={status.status === "error" ? "error" : "warning"}
+      >
         <CircleAlertIcon />
-        <AlertTitle>
+        <AlertTitle className={CHAT_BANNER_TITLE_CLASS}>
           {status.provider === "codex" ? "Codex provider status" : `${status.provider} status`}
         </AlertTitle>
-        <AlertDescription className="line-clamp-3" title={status.message ?? defaultMessage}>
-          {status.message ?? defaultMessage}
+        <AlertDescription
+          className={cn("line-clamp-3", CHAT_BANNER_DESCRIPTION_CLASS)}
+          title={message}
+        >
+          {message}
         </AlertDescription>
+        <AlertAction className={CHAT_BANNER_ACTION_CLASS}>
+          <Button
+            aria-label="Dismiss provider status"
+            onClick={dismiss}
+            size="icon-xs"
+            title="Dismiss"
+            variant="ghost"
+          >
+            <XIcon />
+          </Button>
+        </AlertAction>
       </Alert>
     </div>
   );

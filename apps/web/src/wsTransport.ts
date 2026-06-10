@@ -9,6 +9,10 @@ import { Cause, Schema } from "effect";
 
 type PushListener = (data: unknown) => void;
 
+export interface WsAuthProvider {
+  readonly resolveUrl: (baseUrl: string) => Promise<string>;
+}
+
 interface PendingRequest {
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
@@ -117,6 +121,27 @@ function toHttpProbeUrl(url: string): string | null {
   }
 }
 
+function isLoopbackHostname(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return (
+    normalized === "localhost" ||
+    normalized === "127.0.0.1" ||
+    normalized === "[::1]" ||
+    normalized === "::1"
+  );
+}
+
+function currentWindowWebSocketUrl(): string | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  if (isLoopbackHostname(window.location.hostname)) {
+    return null;
+  }
+  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${window.location.host}`;
+}
+
 export class WsTransport {
   private ws: WebSocket | null = null;
   private nextId = 1;
@@ -128,11 +153,12 @@ export class WsTransport {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
   private readonly url: string;
+  private readonly authProvider: WsAuthProvider | null;
   private readonly shouldPreflightConnection: boolean;
   private readonly httpProbeUrl: string | null;
   private connectionAttemptInFlight = false;
 
-  constructor(url?: string) {
+  constructor(url?: string, authProvider?: WsAuthProvider | null) {
     const desktopBridge = window.desktopBridge;
     const hasDesktopBridge = typeof desktopBridge?.getWsUrl === "function";
     const bridgeUrl = hasDesktopBridge ? desktopBridge.getWsUrl() : null;
@@ -150,11 +176,14 @@ export class WsTransport {
         );
       }
       this.url = bridgeUrl;
+    } else if (currentWindowWebSocketUrl()) {
+      this.url = currentWindowWebSocketUrl()!;
     } else if (envUrl && envUrl.length > 0) {
       this.url = envUrl;
     } else {
       this.url = `ws://${window.location.hostname}:${window.location.port}`;
     }
+    this.authProvider = authProvider ?? null;
     this.httpProbeUrl = this.shouldPreflightConnection ? toHttpProbeUrl(this.url) : null;
     this.connect();
   }
@@ -278,7 +307,7 @@ export class WsTransport {
       return;
 
     if (!this.shouldPreflightConnection) {
-      this.createSocketConnection();
+      void this.createSocketConnection();
       return;
     }
 
@@ -554,7 +583,7 @@ export class WsTransport {
       return;
     }
 
-    this.createSocketConnection();
+    await this.createSocketConnection();
   }
 
   private async isServerReadyForWebSocket(): Promise<boolean> {
@@ -582,11 +611,25 @@ export class WsTransport {
     }
   }
 
-  private createSocketConnection(): void {
-    const ws = new WebSocket(this.url);
+  private async createSocketConnection(): Promise<void> {
+    let resolvedUrl: string;
+    try {
+      resolvedUrl = this.authProvider ? await this.authProvider.resolveUrl(this.url) : this.url;
+    } catch (error) {
+      const message =
+        error instanceof Error && error.message.trim().length > 0
+          ? error.message
+          : "Could not authorize the WebSocket connection.";
+      this.rejectPendingRequests(message);
+      this.scheduleReconnect();
+      return;
+    }
+    const ws = new WebSocket(resolvedUrl);
     this.ws = ws;
+    let opened = false;
 
     ws.addEventListener("open", () => {
+      opened = true;
       this.reconnectAttempt = 0;
     });
 
@@ -594,9 +637,15 @@ export class WsTransport {
       this.handleMessage(event.data);
     });
 
-    ws.addEventListener("close", () => {
+    ws.addEventListener("close", (event?: CloseEvent) => {
       this.ws = null;
-      this.rejectPendingRequests("Connection to the T3 Code server was lost.", { onlySent: true });
+      const reason =
+        event?.reason && event.reason.trim().length > 0 ? ` (${event.reason})` : "";
+      const authRejected =
+        event?.code === 1008 || (event?.reason !== undefined && event.reason.trim().length > 0);
+      this.rejectPendingRequests(`Connection to the T3 Code server was lost${reason}.`, {
+        onlySent: opened || !authRejected,
+      });
       this.scheduleReconnect();
     });
 

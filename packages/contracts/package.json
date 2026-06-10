@@ -1,6 +1,6 @@
 {
   "name": "@t3tools/contracts",
-  "version": "0.2.60",
+  "version": "0.2.61",
   "private": true,
   "files": [
     "dist"
@@ -21,7 +21,7 @@
     "build": "tsdown src/index.ts --format esm,cjs --dts --clean",
     "prepare": "node ../../scripts/effect-language-service-prepare.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "node ../../scripts/run-vitest.cjs run"
   },
   "dependencies": {
     "effect": "catalog:"

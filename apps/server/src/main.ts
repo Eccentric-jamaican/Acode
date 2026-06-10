@@ -6,17 +6,15 @@
  *
  * @module CliConfig
  */
-import {
-  Config,
-  Data,
-  Effect,
-  FileSystem,
-  Layer,
-  Option,
-  Path,
-  Schema,
-  ServiceMap,
-} from "effect";
+import * as Config from "effect/Config";
+import * as Data from "effect/Data";
+import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
+import * as ServiceMap from "effect/ServiceMap";
 import type { Layer as LayerType } from "effect/Layer";
 import { Command, Flag } from "effect/unstable/cli";
 import { NetService } from "@t3tools/shared/Net";
@@ -37,6 +35,7 @@ import {
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery";
 import { CodexAccountServiceLive } from "./provider/Layers/CodexAccountService";
 import { ProviderHealthLive } from "./provider/Layers/ProviderHealth";
+import { ProviderUpdateLive } from "./provider/Layers/ProviderUpdate";
 import { Server, ServerLive } from "./wsServer";
 import { ServerRuntimeStartup } from "./serverRuntimeStartup";
 import { ServerLoggerLive } from "./serverLogger";
@@ -223,6 +222,7 @@ export const makeServerProgramLayer = (input: CliInput) =>
     Layer.provideMerge(ServerSettingsLive),
     Layer.provideMerge(CodexAccountServiceLive),
     Layer.provideMerge(ProviderHealthLive),
+    Layer.provideMerge(ProviderUpdateLive),
     Layer.provideMerge(SqlitePersistence.layerConfig),
     Layer.provideMerge(ServerLoggerLive),
     Layer.provideMerge(AnalyticsServiceLayerLive),

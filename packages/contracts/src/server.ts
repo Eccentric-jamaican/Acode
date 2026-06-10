@@ -1,10 +1,12 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { IsoDateTime, TrimmedNonEmptyString } from "./baseSchemas";
 import { KeybindingRule, ResolvedKeybindingsConfig } from "./keybindings";
 import { EditorId } from "./editor";
 import { ProviderKind } from "./orchestration";
 import { ModelCapabilities } from "./model";
 import { ServerSettings } from "./settings";
+import { ServerProviderUpdateInfo } from "./providerUpdate";
+import { ProviderUpdateCommandId } from "./providerUpdate";
 import {
   ErrorInboxEntry,
   ServerErrorInboxUpdatedPayload,
@@ -68,6 +70,7 @@ export const ServerProviderStatus = Schema.Struct({
       }),
     ),
   ),
+  updateInfo: Schema.optional(Schema.NullOr(ServerProviderUpdateInfo)),
 });
 export type ServerProviderStatus = typeof ServerProviderStatus.Type;
 
@@ -163,6 +166,9 @@ export const ServerConfig = Schema.Struct({
   providerAccounts: ServerProviderAccounts,
   availableEditors: Schema.Array(EditorId),
   settings: Schema.optional(ServerSettings),
+  serverHost: Schema.optional(Schema.String),
+  serverPort: Schema.Number,
+  serverAuthEnabled: Schema.Boolean,
 });
 export type ServerConfig = typeof ServerConfig.Type;
 
@@ -200,6 +206,17 @@ export type ServerLogoutProviderInput = typeof ServerLogoutProviderInput.Type;
 
 export const ServerLogoutProviderResult = Schema.Struct({});
 export type ServerLogoutProviderResult = typeof ServerLogoutProviderResult.Type;
+
+export const ServerUpdateProviderInput = Schema.Struct({
+  provider: ProviderKind,
+  commandId: ProviderUpdateCommandId,
+});
+export type ServerUpdateProviderInput = typeof ServerUpdateProviderInput.Type;
+
+export const ServerUpdateProviderResult = Schema.Struct({
+  command: TrimmedNonEmptyString,
+});
+export type ServerUpdateProviderResult = typeof ServerUpdateProviderResult.Type;
 
 export const ServerGetSettingsInput = Schema.Struct({});
 export type ServerGetSettingsInput = typeof ServerGetSettingsInput.Type;
@@ -250,6 +267,17 @@ export const ServerProviderStateUpdatedPayload = Schema.Struct({
   providerAccounts: ServerProviderAccounts,
 });
 export type ServerProviderStateUpdatedPayload = typeof ServerProviderStateUpdatedPayload.Type;
+
+export const ServerProviderUpdateStatus = Schema.Literals(["started", "finished", "failed"]);
+export type ServerProviderUpdateStatus = typeof ServerProviderUpdateStatus.Type;
+
+export const ServerProviderUpdateStatusPayload = Schema.Struct({
+  provider: ProviderKind,
+  status: ServerProviderUpdateStatus,
+  command: TrimmedNonEmptyString,
+  message: Schema.optional(TrimmedNonEmptyString),
+});
+export type ServerProviderUpdateStatusPayload = typeof ServerProviderUpdateStatusPayload.Type;
 
 export {
   ErrorInboxEntry,

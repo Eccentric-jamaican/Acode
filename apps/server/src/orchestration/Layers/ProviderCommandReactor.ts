@@ -16,6 +16,9 @@ import {
   buildPromptThreadTitleFallback,
   isGenericChatThreadTitle,
 } from "@t3tools/shared/chatThreads";
+import * as Fs from "node:fs";
+import * as Os from "node:os";
+import * as Path from "node:path";
 import { Cache, Cause, Duration, Effect, Layer, Option, Queue, Schema, Stream } from "effect";
 
 import { resolveThreadWorkspaceCwd } from "../../checkpointing/Utils.ts";
@@ -121,6 +124,49 @@ function hasT3ComputerMcpResumeCursor(resumeCursor: unknown): boolean {
     !Array.isArray(resumeCursor) &&
     (resumeCursor as { readonly t3ComputerMcp?: unknown }).t3ComputerMcp === true
   );
+}
+
+function isExistingDirectory(candidate: string): boolean {
+  try {
+    return Fs.statSync(candidate).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function resolveExistingProviderCwd(input: {
+  readonly cwd: string | undefined;
+  readonly projectRoots: ReadonlyArray<string>;
+}): string | undefined {
+  const raw = input.cwd?.trim();
+  if (!raw) {
+    return undefined;
+  }
+
+  const candidates = new Set<string>();
+  if (Path.isAbsolute(raw)) {
+    candidates.add(raw);
+  } else {
+    candidates.add(Path.resolve(process.cwd(), raw));
+    candidates.add(Path.resolve(process.cwd(), "..", "..", raw));
+    candidates.add(Path.resolve(Os.homedir(), "source", "repos", raw));
+    candidates.add(Path.resolve(Os.homedir(), raw));
+
+    for (const projectRoot of input.projectRoots) {
+      if (Path.isAbsolute(projectRoot)) {
+        candidates.add(Path.resolve(projectRoot, raw));
+        candidates.add(Path.resolve(Path.dirname(projectRoot), raw));
+      }
+    }
+  }
+
+  for (const candidate of candidates) {
+    if (isExistingDirectory(candidate)) {
+      return candidate;
+    }
+  }
+
+  return raw;
 }
 
 function buildGeneratedWorktreeBranchName(raw: string): string {
@@ -241,9 +287,13 @@ const make = Effect.gen(function* () {
       : undefined;
     const preferredProvider: ProviderKind | undefined = options?.provider ?? currentProvider;
     const desiredModel = options?.model ?? thread.model;
-    const effectiveCwd = resolveThreadWorkspaceCwd({
+    const rawCwd = resolveThreadWorkspaceCwd({
       thread,
       projects: readModel.projects,
+    });
+    const effectiveCwd = resolveExistingProviderCwd({
+      cwd: rawCwd,
+      projectRoots: readModel.projects.map((project) => project.workspaceRoot),
     });
 
     const resolveActiveSession = (threadId: ThreadId) =>
@@ -500,9 +550,13 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    const cwd = resolveThreadWorkspaceCwd({
+    const rawCwd = resolveThreadWorkspaceCwd({
       thread,
       projects: readModel.projects,
+    });
+    const cwd = resolveExistingProviderCwd({
+      cwd: rawCwd,
+      projectRoots: readModel.projects.map((project) => project.workspaceRoot),
     });
     const nextTitle = yield* textGeneration
       .generateThreadTitle({

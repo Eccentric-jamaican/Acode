@@ -1,6 +1,6 @@
 {
   "name": "@t3tools/shared",
-  "version": "0.2.60",
+  "version": "0.2.61",
   "private": true,
   "type": "module",
   "exports": {
@@ -60,6 +60,20 @@
       "import": "./src/computerUsePermissions.ts",
       "default": "./src/computerUsePermissions.ts"
     },
+    "./qrCode": {
+      "types": "./src/qrCode.ts",
+      "development": "./src/qrCode.ts",
+      "browser": "./src/qrCode.ts",
+      "import": "./src/qrCode.ts",
+      "default": "./src/qrCode.ts"
+    },
+    "./dpop": {
+      "types": "./src/dpop.ts",
+      "development": "./src/dpop.ts",
+      "browser": "./src/dpop.ts",
+      "import": "./src/dpop.ts",
+      "default": "./src/dpop.ts"
+    },
     "./subagents": {
       "types": "./src/subagents.ts",
       "development": "./src/subagents.ts",
@@ -71,7 +85,7 @@
   "scripts": {
     "prepare": "node ../../scripts/effect-language-service-prepare.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "node ../../scripts/run-vitest.cjs run"
   },
   "dependencies": {
     "@t3tools/contracts": "workspace:*",

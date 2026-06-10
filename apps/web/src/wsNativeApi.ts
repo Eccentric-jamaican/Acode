@@ -9,6 +9,7 @@ import {
   ServerConfigUpdatedPayload,
   ServerErrorInboxUpdatedPayload,
   ServerProviderStateUpdatedPayload,
+  ServerProviderUpdateStatusPayload,
   TerminalEvent,
   WS_CHANNELS,
   WS_METHODS,
@@ -18,7 +19,7 @@ import { Cause, Schema } from "effect";
 
 import { showContextMenuFallback } from "./contextMenuFallback";
 import { reportClientDiagnostic, setClientDiagnosticReporter } from "./errorInboxReporter";
-import { WsTransport } from "./wsTransport";
+import { WsTransport, type WsAuthProvider } from "./wsTransport";
 
 let instance: { api: NativeApi; transport: WsTransport } | null = null;
 const welcomeListeners = new Set<(payload: WsWelcomePayload) => void>();
@@ -29,9 +30,20 @@ const serverErrorInboxUpdatedListeners = new Set<
 const serverProviderStateUpdatedListeners = new Set<
   (payload: ServerProviderStateUpdatedPayload) => void
 >();
+const serverProviderUpdateStatusListeners = new Set<
+  (payload: ServerProviderUpdateStatusPayload) => void
+>();
 let lastWelcome: WsWelcomePayload | null = null;
 let lastServerConfigUpdated: ServerConfigUpdatedPayload | null = null;
 let lastServerProviderStateUpdated: ServerProviderStateUpdatedPayload | null = null;
+
+export function resetWsNativeApi(): void {
+  instance?.transport.dispose();
+  instance = null;
+  lastWelcome = null;
+  lastServerConfigUpdated = null;
+  lastServerProviderStateUpdated = null;
+}
 
 const decodeAndWarnOnFailure = <T>(
   schema: Schema.Schema<T> & { readonly DecodingServices: never },
@@ -163,6 +175,16 @@ export function onServerProviderStateUpdated(
   };
 }
 
+export function onServerProviderUpdateStatus(
+  listener: (payload: ServerProviderUpdateStatusPayload) => void,
+): () => void {
+  serverProviderUpdateStatusListeners.add(listener);
+
+  return () => {
+    serverProviderUpdateStatusListeners.delete(listener);
+  };
+}
+
 export function onServerErrorInboxUpdated(
   listener: (payload: ServerErrorInboxUpdatedPayload) => void,
 ): () => void {
@@ -172,10 +194,13 @@ export function onServerErrorInboxUpdated(
   };
 }
 
-export function createWsNativeApi(): NativeApi {
+export function createWsNativeApi(options?: {
+  url?: string;
+  authProvider?: WsAuthProvider | null;
+}): NativeApi {
   if (instance) return instance.api;
 
-  const transport = new WsTransport();
+  const transport = new WsTransport(options?.url, options?.authProvider);
 
   // Listen for server welcome and forward to registered listeners.
   // Also cache it so late subscribers (React effects) get it immediately.
@@ -208,6 +233,17 @@ export function createWsNativeApi(): NativeApi {
     if (!payload) return;
     lastServerProviderStateUpdated = payload;
     for (const listener of serverProviderStateUpdatedListeners) {
+      try {
+        listener(payload);
+      } catch {
+        // Swallow listener errors
+      }
+    }
+  });
+  transport.subscribe(WS_CHANNELS.serverProviderUpdateStatus, (data) => {
+    const payload = decodeAndWarnOnFailure(ServerProviderUpdateStatusPayload, data);
+    if (!payload) return;
+    for (const listener of serverProviderUpdateStatusListeners) {
       try {
         listener(payload);
       } catch {
@@ -311,15 +347,30 @@ export function createWsNativeApi(): NativeApi {
       cancelProviderLogin: (input) =>
         transport.request(WS_METHODS.serverCancelProviderLogin, input),
       logoutProvider: (input) => transport.request(WS_METHODS.serverLogoutProvider, input),
+      updateProvider: (input) => transport.request(WS_METHODS.serverUpdateProvider, input),
       suggestNewThreadTasks: (input) =>
         transport.request(WS_METHODS.serverSuggestNewThreadTasks, input),
       updateSettings: (input) => transport.request(WS_METHODS.serverUpdateSettings, input),
+      onProviderUpdateStatus: (callback) => onServerProviderUpdateStatus(callback),
       onErrorInboxUpdated: (callback) => onServerErrorInboxUpdated(callback),
     },
     computerUse: {
       listApps: () => transport.request(WS_METHODS.computerUseListApps),
       getSettings: () => transport.request(WS_METHODS.computerUseGetSettings),
       updateSettings: (input) => transport.request(WS_METHODS.computerUseUpdateSettings, input),
+    },
+    remoteAccess: {
+      getSnapshot: () => transport.request(WS_METHODS.remoteAccessGetSnapshot),
+      createPairingLink: (input) =>
+        transport.request(WS_METHODS.remoteAccessCreatePairingLink, input),
+      revokePairingLink: (input) =>
+        transport.request(WS_METHODS.remoteAccessRevokePairingLink, input),
+      revokeClient: (input) => transport.request(WS_METHODS.remoteAccessRevokeClient, input),
+      revokeOtherClients: () => transport.request(WS_METHODS.remoteAccessRevokeOtherClients),
+      setNetworkAccess: (input) =>
+        transport.request(WS_METHODS.remoteAccessSetNetworkAccess, input),
+      setTailscaleHttps: (input) =>
+        transport.request(WS_METHODS.remoteAccessSetTailscaleHttps, input),
     },
     provider: {
       getComposerCapabilities: (input) =>

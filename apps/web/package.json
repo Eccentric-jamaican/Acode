@@ -1,6 +1,6 @@
 {
   "name": "@t3tools/web",
-  "version": "0.2.60",
+  "version": "0.2.61",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,7 +9,7 @@
     "prepare": "node ../../scripts/effect-language-service-prepare.mjs",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --passWithNoTests",
+    "test": "node ../../scripts/run-vitest.cjs run --passWithNoTests",
     "test:browser": "vitest run --config vitest.browser.config.ts",
     "test:browser:install": "playwright install --with-deps chromium"
   },

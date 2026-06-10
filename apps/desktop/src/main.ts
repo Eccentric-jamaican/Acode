@@ -36,6 +36,7 @@ import { RotatingFileSink } from "@t3tools/shared/logging";
 import { BrowserRuntimeRegistry } from "./browserRuntime";
 import { showDesktopConfirmDialog } from "./confirmDialog";
 import { fixPath } from "./fixPath";
+import { createRendererRecoveryController } from "./rendererRecovery";
 import { getAutoUpdateDisabledReason, shouldBroadcastDownloadProgress } from "./updateState";
 import {
   createInitialDesktopUpdateState,
@@ -254,6 +255,9 @@ const AUTO_UPDATE_POLL_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const BACKEND_READY_TIMEOUT_MS = 90_000;
 const BACKEND_READY_POLL_INTERVAL_MS = 250;
 const BACKEND_READY_SOCKET_TIMEOUT_MS = 500;
+const RENDERER_RECOVERY_COOLDOWN_MS = 250;
+const RENDERER_RECOVERY_WINDOW_MS = 60_000;
+const RENDERER_RECOVERY_MAX_ATTEMPTS = 3;
 
 type DesktopUpdateErrorContext = DesktopUpdateState["errorContext"];
 
@@ -2602,6 +2606,28 @@ function createWindow(): BrowserWindow {
   });
 
   window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  const rendererRecovery = createRendererRecoveryController({
+    cooldownMs: RENDERER_RECOVERY_COOLDOWN_MS,
+    maxRecoveries: RENDERER_RECOVERY_MAX_ATTEMPTS,
+    windowMs: RENDERER_RECOVERY_WINDOW_MS,
+    now: () => Date.now(),
+    setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+    clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+    log: writeDesktopLogHeader,
+    recover: () => {
+      if (isQuitting || window.isDestroyed()) {
+        return;
+      }
+      const currentUrl = window.webContents.getURL();
+      const fallbackUrl = isDevelopment
+        ? (process.env.VITE_DEV_SERVER_URL as string)
+        : `${DESKTOP_SCHEME}://app/index.html`;
+      const targetUrl = currentUrl.length > 0 && currentUrl !== "about:blank" ? currentUrl : fallbackUrl;
+      void window.loadURL(targetUrl).catch((error) => {
+        writeDesktopLogHeader(`renderer recovery load failed message=${formatErrorMessage(error)}`);
+      });
+    },
+  });
   window.on("page-title-updated", (event) => {
     event.preventDefault();
     window.setTitle(APP_DISPLAY_NAME);
@@ -2609,6 +2635,32 @@ function createWindow(): BrowserWindow {
   window.webContents.on("did-finish-load", () => {
     window.setTitle(APP_DISPLAY_NAME);
     emitUpdateState();
+  });
+  window.webContents.on(
+    "did-fail-load",
+    (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+      if (isQuitting || !isMainFrame || errorCode === -3) {
+        return;
+      }
+      rendererRecovery.schedule(
+        `did-fail-load code=${errorCode} description=${sanitizeLogValue(errorDescription)} url=${sanitizeLogValue(validatedURL)}`,
+      );
+    },
+  );
+  window.webContents.on("render-process-gone", (_event, details) => {
+    if (isQuitting || details.reason === "clean-exit") {
+      return;
+    }
+    rendererRecovery.schedule(
+      `render-process-gone reason=${details.reason} exitCode=${details.exitCode}`,
+    );
+  });
+  window.on("unresponsive", () => {
+    writeDesktopLogHeader("renderer window became unresponsive");
+  });
+  window.on("responsive", () => {
+    writeDesktopLogHeader("renderer window became responsive");
+    rendererRecovery.cancel("responsive");
   });
   window.webContents.on("context-menu", (event, params) => {
     const template = buildRendererContextMenuTemplate(params);

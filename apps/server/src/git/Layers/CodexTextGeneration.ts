@@ -5,6 +5,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { sanitizeGeneratedThreadTitle } from "@t3tools/shared/chatThreads";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
+import { DEFAULT_GIT_TEXT_GENERATION_MODEL } from "@t3tools/contracts";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
@@ -19,7 +20,7 @@ import {
   TextGeneration,
 } from "../Services/TextGeneration.ts";
 
-const CODEX_MODEL = "gpt-5.3-codex";
+const CODEX_MODEL = DEFAULT_GIT_TEXT_GENERATION_MODEL;
 const CODEX_REASONING_EFFORT = "low";
 const CODEX_TIMEOUT_MS = 180_000;
 

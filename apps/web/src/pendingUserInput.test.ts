@@ -4,6 +4,7 @@ import {
   buildPendingUserInputAnswers,
   countAnsweredPendingUserInputQuestions,
   derivePendingUserInputProgress,
+  filterLocallyDismissedPendingUserInputs,
   findFirstUnansweredPendingUserInputQuestionIndex,
   resolvePendingUserInputAnswer,
   setPendingUserInputCustomAnswer,
@@ -104,6 +105,33 @@ describe("buildPendingUserInputAnswers", () => {
         {},
       ),
     ).toBeNull();
+  });
+});
+
+describe("filterLocallyDismissedPendingUserInputs", () => {
+  it("keeps answered prompts hidden when stale snapshots still include them", () => {
+    expect(
+      filterLocallyDismissedPendingUserInputs(
+        [
+          {
+            requestId: "req-answered",
+            label: "stale question",
+          },
+          {
+            requestId: "req-open",
+            label: "new question",
+          },
+        ],
+        {
+          "req-answered": true,
+        },
+      ),
+    ).toEqual([
+      {
+        requestId: "req-open",
+        label: "new question",
+      },
+    ]);
   });
 });
 

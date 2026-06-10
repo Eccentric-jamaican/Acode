@@ -1,4 +1,5 @@
 import * as Http from "node:http";
+import * as NodeCrypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -26,6 +27,7 @@ import {
   type WebSocketResponse,
   type ProviderRuntimeEvent,
   type ServerProviderStatus,
+  type ServerProviderUpdateInfo,
   type KeybindingsConfig,
   type ResolvedKeybindingsConfig,
   type ServerProviderAccountSummary,
@@ -52,6 +54,7 @@ import {
 } from "./provider/Services/ProviderDiscoveryService";
 import { ProviderRegistry, type ProviderRegistryShape } from "./provider/Services/ProviderRegistry";
 import { ProviderHealth, type ProviderHealthShape } from "./provider/Services/ProviderHealth";
+import { ProviderUpdate, type ProviderUpdateShape } from "./provider/Services/ProviderUpdate";
 import {
   CodexAccountService,
   type CodexAccountServiceShape,
@@ -64,6 +67,7 @@ import { ServerSettingsService } from "./serverSettings";
 import { GitCommandError, GitManagerError } from "./git/Errors.ts";
 import { MigrationError } from "@effect/sql-sqlite-bun/SqliteMigrator";
 import { AnalyticsService } from "./telemetry/Services/AnalyticsService.ts";
+import { computeDpopAccessTokenHash, type DpopPublicJwk } from "@t3tools/shared/dpop";
 
 interface PendingMessages {
   queue: unknown[];
@@ -80,6 +84,7 @@ const asTurnId = (value: string): TurnId => TurnId.makeUnsafe(value);
 const defaultOpenService: OpenShape = {
   openBrowser: () => Effect.void,
   openInEditor: () => Effect.void,
+  launchCommand: () => Effect.void,
 };
 
 const defaultProviderStatuses: ReadonlyArray<ServerProviderStatus> = [
@@ -117,6 +122,23 @@ const defaultProviderAccounts: ReadonlyArray<ServerProviderAccountSummary> = [
 
 const defaultProviderHealthService: ProviderHealthShape = {
   getStatuses: Effect.succeed(defaultProviderStatuses),
+};
+
+const defaultUpdateInfo: ServerProviderUpdateInfo = {
+  packageName: "test",
+  homepageUrl: "https://example.com",
+  repositoryUrl: "https://example.com/repo",
+  latestVersion: null,
+  currentVersion: null,
+  updateAvailable: false,
+  fetchedAt: "2026-01-01T00:00:00.000Z",
+  verification: { trusted: false, publisher: null },
+  commands: [],
+};
+
+const defaultProviderUpdateService: ProviderUpdateShape = {
+  getUpdates: Effect.succeed(new Map()),
+  refresh: () => Effect.succeed(defaultUpdateInfo),
 };
 
 const defaultProviderRegistryService: ProviderRegistryShape = {
@@ -359,10 +381,9 @@ class MockTerminalManager implements TerminalManagerShape {
   readonly dispose: TerminalManagerShape["dispose"] = Effect.void;
 }
 
-function connectWs(port: number, token?: string): Promise<WebSocket> {
+function connectWsUrl(url: string): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
-    const query = token ? `?token=${encodeURIComponent(token)}` : "";
-    const ws = new WebSocket(`ws://127.0.0.1:${port}/${query}`);
+    const ws = new WebSocket(url);
     const pending: PendingMessages = { queue: [], waiters: [] };
     pendingBySocket.set(ws, pending);
 
@@ -379,6 +400,53 @@ function connectWs(port: number, token?: string): Promise<WebSocket> {
     ws.once("open", () => resolve(ws));
     ws.once("error", () => reject(new Error("WebSocket connection failed")));
   });
+}
+
+function connectWs(port: number, token?: string): Promise<WebSocket> {
+  const query = token ? `?token=${encodeURIComponent(token)}` : "";
+  return connectWsUrl(`ws://127.0.0.1:${port}/${query}`);
+}
+
+function normalizeDpopTestUrl(value: string): string {
+  const url = new URL(value);
+  url.search = "";
+  url.hash = "";
+  if (url.protocol === "ws:") {
+    url.protocol = "http:";
+  } else if (url.protocol === "wss:") {
+    url.protocol = "https:";
+  }
+  return url.toString();
+}
+
+function signDpopProof(input: {
+  readonly method: string;
+  readonly url: string;
+  readonly privateKey: NodeCrypto.KeyObject;
+  readonly publicJwk: DpopPublicJwk;
+  readonly accessToken?: string;
+}) {
+  const header = Buffer.from(
+    JSON.stringify({
+      typ: "dpop+jwt",
+      alg: "ES256",
+      jwk: input.publicJwk,
+    }),
+  ).toString("base64url");
+  const payload = Buffer.from(
+    JSON.stringify({
+      htm: input.method.toUpperCase(),
+      htu: normalizeDpopTestUrl(input.url),
+      jti: crypto.randomUUID(),
+      iat: Math.floor(Date.now() / 1000),
+      ...(input.accessToken ? { ath: computeDpopAccessTokenHash(input.accessToken) } : {}),
+    }),
+  ).toString("base64url");
+  const signature = NodeCrypto.sign("sha256", Buffer.from(`${header}.${payload}`), {
+    key: input.privateKey,
+    dsaEncoding: "ieee-p1363",
+  }).toString("base64url");
+  return `${header}.${payload}.${signature}`;
 }
 
 function waitForMessage(ws: WebSocket): Promise<unknown> {
@@ -570,6 +638,7 @@ describe("WebSocket Server", () => {
       CodexAccountService,
       options.codexAccountService ?? defaultCodexAccountService,
     );
+    const providerUpdateLayer = Layer.succeed(ProviderUpdate, defaultProviderUpdateService);
     const openLayer = Layer.succeed(Open, options.open ?? defaultOpenService);
     const serverConfigLayer = Layer.succeed(ServerConfig, {
       mode: "web",
@@ -615,6 +684,7 @@ describe("WebSocket Server", () => {
       Layer.provideMerge(providerRegistryLayer),
       Layer.provideMerge(providerDiscoveryLayer),
       Layer.provideMerge(codexAccountServiceLayer),
+      Layer.provideMerge(providerUpdateLayer),
       Layer.provideMerge(openLayer),
       Layer.provideMerge(baseLayer),
       Layer.provideMerge(AnalyticsService.layerTest),
@@ -1262,6 +1332,7 @@ describe("WebSocket Server", () => {
         openCalls.push({ cwd: input.cwd, editor: input.editor });
         return Effect.void;
       },
+      launchCommand: () => Effect.void,
     };
 
     server = await createTestServer({ cwd: "/my/workspace", open: openService });
@@ -1278,6 +1349,34 @@ describe("WebSocket Server", () => {
     });
     expect(response.error).toBeUndefined();
     expect(openCalls).toEqual([{ cwd: "/my/workspace", editor: "cursor" }]);
+  });
+
+  it("routes server.updateProvider through the injected open service", async () => {
+    const launchCalls: string[] = [];
+    const openService: OpenShape = {
+      openBrowser: () => Effect.void,
+      openInEditor: () => Effect.void,
+      launchCommand: (command) => {
+        launchCalls.push(command);
+        return Effect.void;
+      },
+    };
+
+    server = await createTestServer({ cwd: "/my/workspace", open: openService });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+    const ws = await connectWs(port);
+    connections.push(ws);
+    await waitForMessage(ws);
+
+    const response = await sendRequest(ws, WS_METHODS.serverUpdateProvider, {
+      provider: "codex",
+      commandId: "npm",
+    });
+    expect(response.error).toBeUndefined();
+    expect(response.result).toEqual({ command: "npm install -g @openai/codex@latest" });
+    expect(launchCalls).toEqual(["npm install -g @openai/codex@latest"]);
   });
 
   it("reads keybindings from the configured state directory", async () => {
@@ -1762,6 +1861,7 @@ describe("WebSocket Server", () => {
       openBrowser: () => Effect.void,
       openInEditor: () =>
         Effect.sync(() => BigInt(1)).pipe(Effect.map((result) => result as unknown as void)),
+      launchCommand: () => Effect.void,
     };
 
     try {
@@ -2138,5 +2238,114 @@ describe("WebSocket Server", () => {
     connections.push(authorizedWs);
     const welcome = (await waitForMessage(authorizedWs)) as WsPush;
     expect(welcome.channel).toBe(WS_CHANNELS.serverWelcome);
+  });
+
+  it("accepts DPoP-bound remote websocket sessions authenticated through websocket tickets", async () => {
+    server = await createTestServer({ cwd: "/test" });
+    const addr = server.address();
+    const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+
+    const localWs = await connectWs(port);
+    connections.push(localWs);
+    await waitForMessage(localWs);
+
+    const pairingResponse = await sendRequest(localWs, WS_METHODS.remoteAccessCreatePairingLink, {
+      label: "Android phone",
+      scopes: ["orchestration:read"],
+    });
+    expect(pairingResponse.error).toBeUndefined();
+    const credential = (pairingResponse.result as { pairingLink?: { credential?: string } })
+      .pairingLink?.credential;
+    expect(typeof credential).toBe("string");
+
+    const { privateKey, publicKey } = NodeCrypto.generateKeyPairSync("ec", {
+      namedCurve: "P-256",
+    });
+    const publicJwk = publicKey.export({ format: "jwk" }) as DpopPublicJwk;
+    const tokenUrl = `http://127.0.0.1:${port}/api/auth/token`;
+    const tokenResponse = await fetch(tokenUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        dpop: signDpopProof({
+          method: "POST",
+          url: tokenUrl,
+          privateKey,
+          publicJwk,
+        }),
+      },
+      body: new URLSearchParams({
+        grant_type: "urn:ietf:params:oauth:grant-type:token-exchange",
+        subject_token: credential!,
+        subject_token_type: "urn:t3:params:oauth:token-type:environment-bootstrap",
+        requested_token_type: "urn:ietf:params:oauth:token-type:access_token",
+        client_label: "Android phone",
+        client_device_type: "mobile",
+        client_os: "Android",
+      }),
+    });
+    expect(tokenResponse.status).toBe(200);
+    const tokenPayload = (await tokenResponse.json()) as {
+      readonly access_token?: string;
+      readonly token_type?: string;
+    };
+    expect(tokenPayload.token_type).toBe("DPoP");
+    expect(typeof tokenPayload.access_token).toBe("string");
+
+    const ticketUrl = `http://127.0.0.1:${port}/api/auth/websocket-ticket`;
+    const wrongKey = NodeCrypto.generateKeyPairSync("ec", {
+      namedCurve: "P-256",
+    });
+    const rejectedTicketResponse = await fetch(ticketUrl, {
+      method: "POST",
+      headers: {
+        authorization: `DPoP ${tokenPayload.access_token}`,
+        dpop: signDpopProof({
+          method: "POST",
+          url: ticketUrl,
+          privateKey: wrongKey.privateKey,
+          publicJwk: wrongKey.publicKey.export({ format: "jwk" }) as DpopPublicJwk,
+          accessToken: tokenPayload.access_token!,
+        }),
+      },
+    });
+    expect(rejectedTicketResponse.status).toBe(401);
+    await expect(rejectedTicketResponse.json()).resolves.toMatchObject({
+      error: "invalid_dpop",
+      message: "DPoP key thumbprint mismatch.",
+    });
+
+    const ticketResponse = await fetch(ticketUrl, {
+      method: "POST",
+      headers: {
+        authorization: `DPoP ${tokenPayload.access_token}`,
+        dpop: signDpopProof({
+          method: "POST",
+          url: ticketUrl,
+          privateKey,
+          publicJwk,
+          accessToken: tokenPayload.access_token!,
+        }),
+      },
+    });
+    expect(ticketResponse.status).toBe(200);
+    const ticketPayload = (await ticketResponse.json()) as {
+      readonly ticket?: string;
+      readonly expiresAt?: string;
+    };
+    expect(typeof ticketPayload.ticket).toBe("string");
+
+    const wsUrl = new URL(`ws://127.0.0.1:${port}/ws`);
+    wsUrl.searchParams.set("wsTicket", ticketPayload.ticket!);
+
+    const remoteWs = await connectWsUrl(wsUrl.toString());
+    connections.push(remoteWs);
+    await waitForMessage(remoteWs);
+
+    const snapshotResponse = await sendRequest(remoteWs, ORCHESTRATION_WS_METHODS.getSnapshot, {
+      mode: "bootstrap",
+    });
+    expect(snapshotResponse.error).toBeUndefined();
+    expect(snapshotResponse.result).toMatchObject({ snapshotSequence: expect.any(Number) });
   });
 });

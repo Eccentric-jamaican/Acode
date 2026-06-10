@@ -1,6 +1,5 @@
-import { Schema } from "effect";
+import * as Schema from "effect/Schema";
 import { TrimmedNonEmptyString } from "./baseSchemas";
-import { ProviderModelOptions } from "./model";
 import {
   ApprovalRequestId,
   EventId,
@@ -24,6 +23,7 @@ import {
   ProviderUserInputAnswers,
   RuntimeMode,
 } from "./orchestration";
+import { ProviderModelOptions } from "./model";
 
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
 const ProviderSessionStatus = Schema.Literals([

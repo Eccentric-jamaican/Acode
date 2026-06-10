@@ -373,11 +373,66 @@ function parseUserInputQuestions(
   return parsed.length > 0 ? parsed : null;
 }
 
+function isTerminalUserInputResponseFailure(detail: string | null | undefined): boolean {
+  if (detail === null || detail === undefined) {
+    return false;
+  }
+  return (
+    detail.includes("Unknown pending") ||
+    detail.includes('Expected a string starting with "que"') ||
+    detail.includes('Expected a string starting with \\"que\\"')
+  );
+}
+
+function isOpenCodeToolCallRequestId(requestId: string): boolean {
+  return requestId.startsWith("call_function_");
+}
+
+function fingerprintUserInputQuestions(questions: ReadonlyArray<UserInputQuestion>): string {
+  return JSON.stringify(
+    questions.map((question) => ({
+      id: question.id,
+      header: question.header,
+      question: question.question,
+      options: question.options.map((option) => ({
+        label: option.label,
+        description: option.description,
+      })),
+    })),
+  );
+}
+
 export function derivePendingUserInputs(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): PendingUserInput[] {
-  const openByRequestId = new Map<ApprovalRequestId, PendingUserInput>();
+  const openByRequestId = new Map<string, PendingUserInput>();
+  const questionFingerprintByRequestId = new Map<string, string>();
+  const requestIdsByQuestionFingerprint = new Map<string, Set<string>>();
   const ordered = [...activities].toSorted(compareActivitiesByOrder);
+  const removeOpenRequestId = (requestId: string) => {
+    openByRequestId.delete(requestId);
+    const fingerprint = questionFingerprintByRequestId.get(requestId);
+    questionFingerprintByRequestId.delete(requestId);
+    if (!fingerprint) {
+      return;
+    }
+    const requestIds = requestIdsByQuestionFingerprint.get(fingerprint);
+    if (!requestIds) {
+      return;
+    }
+    requestIds.delete(requestId);
+    if (requestIds.size === 0) {
+      requestIdsByQuestionFingerprint.delete(fingerprint);
+    }
+  };
+  const removeOpenCodeToolCallMirrorsByQuestionFingerprint = (fingerprint: string) => {
+    const requestIds = Array.from(requestIdsByQuestionFingerprint.get(fingerprint) ?? []);
+    for (const requestId of requestIds) {
+      if (isOpenCodeToolCallRequestId(requestId)) {
+        removeOpenRequestId(requestId);
+      }
+    }
+  };
 
   for (const activity of ordered) {
     const payload =
@@ -386,14 +441,37 @@ export function derivePendingUserInputs(
         : null;
     const payloadRecord = asRecord(payload);
     const requestId = extractRequestId(payloadRecord);
+    const requestKey = requestId ? String(requestId) : null;
     const detail = extractDetail(payloadRecord);
 
-    if (activity.kind === "user-input.requested" && requestId) {
+    if (activity.kind === "user-input.requested" && requestId && requestKey) {
       const questions = extractQuestions(payloadRecord);
       if (!questions) {
         continue;
       }
-      openByRequestId.set(requestId, {
+      const fingerprint = fingerprintUserInputQuestions(questions);
+      const existingRequestIds = requestIdsByQuestionFingerprint.get(fingerprint) ?? new Set();
+      const existingPreferredRequestId = [...existingRequestIds].find(
+        (existingRequestId) => !isOpenCodeToolCallRequestId(existingRequestId),
+      );
+      if (isOpenCodeToolCallRequestId(requestKey) && existingPreferredRequestId) {
+        questionFingerprintByRequestId.set(requestKey, fingerprint);
+        existingRequestIds.add(requestKey);
+        requestIdsByQuestionFingerprint.set(fingerprint, existingRequestIds);
+        continue;
+      }
+      if (!isOpenCodeToolCallRequestId(requestKey)) {
+        for (const existingRequestId of Array.from(existingRequestIds)) {
+          if (isOpenCodeToolCallRequestId(existingRequestId)) {
+            removeOpenRequestId(existingRequestId);
+          }
+        }
+      }
+      questionFingerprintByRequestId.set(requestKey, fingerprint);
+      const nextRequestIds = requestIdsByQuestionFingerprint.get(fingerprint) ?? new Set();
+      nextRequestIds.add(requestKey);
+      requestIdsByQuestionFingerprint.set(fingerprint, nextRequestIds);
+      openByRequestId.set(requestKey, {
         requestId,
         createdAt: activity.createdAt,
         questions,
@@ -401,17 +479,21 @@ export function derivePendingUserInputs(
       continue;
     }
 
-    if (activity.kind === "user-input.resolved" && requestId) {
-      openByRequestId.delete(requestId);
+    if (activity.kind === "user-input.resolved" && requestKey) {
+      const fingerprint = questionFingerprintByRequestId.get(requestKey);
+      if (fingerprint) {
+        removeOpenCodeToolCallMirrorsByQuestionFingerprint(fingerprint);
+      }
+      removeOpenRequestId(requestKey);
       continue;
     }
 
     if (
       activity.kind === "provider.user-input.respond.failed" &&
-      requestId &&
-      detail?.includes("Unknown pending")
+      requestKey &&
+      isTerminalUserInputResponseFailure(detail)
     ) {
-      openByRequestId.delete(requestId);
+      removeOpenRequestId(requestKey);
     }
   }
 

@@ -49,7 +49,6 @@ export const ProviderRegistryLive = Layer.effect(
         ...status,
         enabled: true,
         installed: status.available,
-        version: null,
         models:
           status.provider === "codex"
             ? staticProviderModels("codex")
@@ -90,7 +89,6 @@ export const ProviderRegistryLive = Layer.effect(
               ...target,
               enabled: true,
               installed: target.available,
-              version: null,
               models: staticProviderModels(provider),
             },
           ]);
@@ -102,7 +100,6 @@ export const ProviderRegistryLive = Layer.effect(
             ...status,
             enabled: true,
             installed: status.available,
-            version: null,
             models:
               status.provider === "codex"
                 ? staticProviderModels("codex")

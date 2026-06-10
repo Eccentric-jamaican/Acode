@@ -37,6 +37,17 @@ describe("normalizeCustomModelSlugs", () => {
 });
 
 describe("getAppModelOptions", () => {
+  it("includes the current built-in Claude models first", () => {
+    const options = getAppModelOptions("claudeAgent", []);
+
+    expect(options.map((option) => option.slug)).toEqual([
+      "claude-fable-5",
+      "claude-opus-4-8",
+      "claude-sonnet-4-6",
+      "claude-haiku-4-5",
+    ]);
+  });
+
   it("appends saved custom models after the built-in options", () => {
     const options = getAppModelOptions("codex", ["custom/internal-model"]);
 
