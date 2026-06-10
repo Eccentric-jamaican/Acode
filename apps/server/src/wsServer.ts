@@ -2954,9 +2954,12 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
 
     if (authToken) {
       let providedToken: string | null = null;
+      let hasRemoteWebSocketTicket = false;
       try {
         const url = new URL(request.url ?? "/", `http://localhost:${port}`);
         providedToken = url.searchParams.get("token");
+        hasRemoteWebSocketTicket =
+          (url.searchParams.get(REMOTE_WEBSOCKET_TICKET_QUERY_PARAM)?.trim().length ?? 0) > 0;
       } catch {
         rejectUpgrade(socket, 400, "Invalid WebSocket URL");
         return;
@@ -2970,6 +2973,11 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       }
 
       if (providedToken !== null && providedToken !== authToken) {
+        rejectUpgrade(socket, 401, "Unauthorized WebSocket connection");
+        return;
+      }
+
+      if (!hasRemoteWebSocketTicket) {
         rejectUpgrade(socket, 401, "Unauthorized WebSocket connection");
         return;
       }
