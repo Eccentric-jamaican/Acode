@@ -14,7 +14,7 @@
     },
     "apps/desktop": {
       "name": "@t3tools/desktop",
-      "version": "0.2.60",
+      "version": "0.2.61",
       "dependencies": {
         "effect": "catalog:",
         "electron": "40.6.0",
@@ -44,7 +44,7 @@
     },
     "apps/server": {
       "name": "t3",
-      "version": "0.2.60",
+      "version": "0.2.61",
       "bin": {
         "t3": "./dist/index.mjs",
       },
@@ -53,7 +53,7 @@
         "@effect/platform-node": "catalog:",
         "@effect/sql-sqlite-bun": "catalog:",
         "@opencode-ai/sdk": "^1.4.3",
-        "@pierre/diffs": "^1.1.0-beta.16",
+        "@pierre/diffs": "1.1.12",
         "effect": "catalog:",
         "node-pty": "^1.1.0",
         "open": "^10.1.0",
@@ -76,12 +76,12 @@
     },
     "apps/web": {
       "name": "@t3tools/web",
-      "version": "0.2.60",
+      "version": "0.2.61",
       "dependencies": {
         "@base-ui/react": "^1.2.0",
         "@chenglou/pretext": "^0.0.4",
         "@lexical/react": "^0.41.0",
-        "@pierre/diffs": "^1.1.0-beta.16",
+        "@pierre/diffs": "1.1.12",
         "@pierre/trees": "1.0.0-beta.3",
         "@t3tools/contracts": "workspace:*",
         "@t3tools/shared": "workspace:*",
@@ -126,7 +126,7 @@
     },
     "packages/contracts": {
       "name": "@t3tools/contracts",
-      "version": "0.2.60",
+      "version": "0.2.61",
       "dependencies": {
         "effect": "catalog:",
       },
@@ -140,7 +140,7 @@
     },
     "packages/shared": {
       "name": "@t3tools/shared",
-      "version": "0.2.60",
+      "version": "0.2.61",
       "dependencies": {
         "@t3tools/contracts": "workspace:*",
         "effect": "catalog:",

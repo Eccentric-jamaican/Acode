@@ -17,7 +17,7 @@
     "@base-ui/react": "^1.2.0",
     "@chenglou/pretext": "^0.0.4",
     "@lexical/react": "^0.41.0",
-    "@pierre/diffs": "^1.1.0-beta.16",
+    "@pierre/diffs": "1.1.12",
     "@pierre/trees": "1.0.0-beta.3",
     "@t3tools/contracts": "workspace:*",
     "@t3tools/shared": "workspace:*",
