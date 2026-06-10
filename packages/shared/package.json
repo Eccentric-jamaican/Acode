@@ -1,6 +1,6 @@
 {
   "name": "@t3tools/shared",
-  "version": "0.2.61",
+  "version": "0.2.65",
   "private": true,
   "type": "module",
   "exports": {
