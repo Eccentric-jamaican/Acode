@@ -15,7 +15,7 @@ const shouldSkipServerTests = process.env.T3_SKIP_SERVER_TESTS === "true";
 const root = process.cwd();
 const bunExecutable = process.execPath;
 
-const steps: ReadonlyArray<TestStep> = [
+const steps: TestStep[] = [
   { label: "build contracts", args: ["run", "build:contracts"] },
   { label: "contracts tests", cwd: join(root, "packages", "contracts"), args: ["run", "test"] },
   { label: "shared tests", cwd: join(root, "packages", "shared"), args: ["run", "test"] },
