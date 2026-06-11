@@ -57,6 +57,7 @@ import {
   normalizeSettingsSectionId,
   SETTINGS_SECTION_IDS,
   SETTINGS_SIDEBAR_SECTIONS,
+  type SettingsSectionId,
 } from "../settingsSections";
 import { preferredTerminalEditor } from "../terminal-links";
 import { Button } from "../components/ui/button";
@@ -166,8 +167,26 @@ const BROWSING_DATA_OPTIONS: ReadonlyArray<{
   { value: "siteData", label: "Clear site data" },
 ];
 
-const SETTINGS_SECTION_CLASS =
-  "rounded-xl bg-card/80 p-5 shadow-[0_1px_0_rgba(255,255,255,0.02)]";
+const SETTINGS_SECTION_DESCRIPTIONS: Record<SettingsSectionId, string> = {
+  [SETTINGS_SECTION_IDS.appearance]: "Match your workspace to the environment you are in.",
+  [SETTINGS_SECTION_IDS.models]: "Tune the model picker and suggestion behavior for new work.",
+  [SETTINGS_SECTION_IDS.remoteAccess]: "Pair trusted clients and control how this backend is reached.",
+  [SETTINGS_SECTION_IDS.responses]: "Control how assistant output appears while work is running.",
+  [SETTINGS_SECTION_IDS.browserUse]: "Set how the browser stores state and asks for approval.",
+  [SETTINGS_SECTION_IDS.computerUse]: "Control desktop automation access and app permissions.",
+  [SETTINGS_SECTION_IDS.keybindings]: "Open and manage the keyboard shortcuts file.",
+  [SETTINGS_SECTION_IDS.safety]: "Choose when destructive thread actions ask for confirmation.",
+  [SETTINGS_SECTION_IDS.providers]: "Manage agent runtimes, accounts, and local binaries.",
+  [SETTINGS_SECTION_IDS.archived]: "Restore archived threads or remove them permanently.",
+};
+
+const SETTINGS_SECTION_CLASS = "space-y-4";
+const SETTINGS_GROUP_CLASS = "rounded-xl bg-card/45 p-5 shadow-[0_1px_0_rgba(255,255,255,0.03)]";
+const SETTINGS_SUBGROUP_CLASS = "rounded-xl bg-background/35 p-4";
+const SETTINGS_ROW_CLASS =
+  "flex items-center justify-between gap-4 rounded-lg bg-background/35 px-3 py-3";
+const SETTINGS_EMPTY_STATE_CLASS =
+  "rounded-lg bg-background/35 px-4 py-4 text-sm text-muted-foreground";
 const EMPTY_COMPUTER_USE_APPS: ComputerUseAppSummary[] = [];
 const COMPUTER_USE_PERMISSION_SWITCH_CLASS =
   "justify-self-end [&_[data-slot=switch-thumb]]:transition-none [&_[data-slot=switch-thumb]]:will-change-auto";
@@ -464,6 +483,7 @@ function SettingsRouteView() {
   });
   const activeSectionLabel =
     SETTINGS_SIDEBAR_SECTIONS.find((section) => section.id === activeSection)?.label ?? "Settings";
+  const activeSectionDescription = SETTINGS_SECTION_DESCRIPTIONS[activeSection];
   const usesDesktopAppChrome = isElectronRuntime();
   const { theme, setTheme, resolvedTheme } = useTheme();
   const { settings, defaults, updateSettings } = useAppSettings();
@@ -677,29 +697,14 @@ function SettingsRouteView() {
     [computerUseApps],
   );
 
-  const providers = serverConfigQuery.data?.providers ?? [];
-  const codexStatus = useMemo(
-    () => providers.find((p) => p.provider === "codex"),
-    [providers],
-  );
-  const opencodeStatus = useMemo(
-    () => providers.find((p) => p.provider === "opencode"),
-    [providers],
-  );
-  const claudeStatus = useMemo(
-    () => providers.find((p) => p.provider === "claudeAgent"),
-    [providers],
-  );
+  const providers = serverConfigQuery.data?.providers;
+  const codexStatus = providers?.find((p) => p.provider === "codex");
+  const opencodeStatus = providers?.find((p) => p.provider === "opencode");
+  const claudeStatus = providers?.find((p) => p.provider === "claudeAgent");
 
-  const providerAccounts = serverConfigQuery.data?.providerAccounts ?? [];
-  const codexAccount = useMemo(
-    () => providerAccounts.find((a) => a.provider === "codex"),
-    [providerAccounts],
-  );
-  const claudeAccount = useMemo(
-    () => providerAccounts.find((a) => a.provider === "claudeAgent"),
-    [providerAccounts],
-  );
+  const providerAccounts = serverConfigQuery.data?.providerAccounts;
+  const codexAccount = providerAccounts?.find((a) => a.provider === "codex");
+  const claudeAccount = providerAccounts?.find((a) => a.provider === "claudeAgent");
   const claudeAuthenticationLabel =
     claudeAccount?.state === "authenticated"
       ? claudeAccount.account && "email" in claudeAccount.account
@@ -1211,36 +1216,26 @@ function SettingsRouteView() {
           <div className="flex min-w-0 flex-1 items-center gap-2 overflow-hidden sm:gap-3">
             <SidebarInsetTrigger className="shrink-0 md:hidden" />
             <span
-              className="min-w-0 truncate text-sm font-medium text-foreground"
+              aria-hidden="true"
+              className="block h-4 w-px opacity-0"
               data-testid="settings-header-label"
-            >
-              Settings
-            </span>
+            />
           </div>
         </header>
 
         <div className="flex-1 overflow-y-auto px-4 py-8 sm:px-8">
-          <div className="mx-auto flex w-full max-w-[840px] flex-col gap-6">
-            {activeSection !== SETTINGS_SECTION_IDS.remoteAccess ? (
-              <header className="space-y-2">
-                <h1 className="text-2xl font-semibold tracking-normal text-foreground">
-                  {activeSectionLabel}
-                </h1>
-                <p className="text-sm text-muted-foreground">
-                  Configure app-level preferences for this device.
-                </p>
-              </header>
-            ) : null}
+          <div className="mx-auto flex w-full max-w-[820px] flex-col gap-7">
+            <header className="space-y-2">
+              <h1 className="text-2xl font-semibold tracking-normal text-foreground">
+                {activeSectionLabel}
+              </h1>
+              <p className="max-w-2xl text-sm text-muted-foreground">
+                {activeSectionDescription}
+              </p>
+            </header>
 
             {activeSection === SETTINGS_SECTION_IDS.appearance ? (
               <section id={SETTINGS_SECTION_IDS.appearance} className={SETTINGS_SECTION_CLASS}>
-                <div className="mb-4">
-                  <h2 className="text-sm font-medium text-foreground">Appearance</h2>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Choose how T3 Code handles light and dark mode.
-                  </p>
-                </div>
-
                 <div className="space-y-2" role="radiogroup" aria-label="Theme preference">
                   {THEME_OPTIONS.map((option) => {
                     const selected = theme === option.value;
@@ -1250,10 +1245,10 @@ function SettingsRouteView() {
                         type="button"
                         role="radio"
                         aria-checked={selected}
-                        className={`flex w-full items-start justify-between rounded-lg border px-3 py-2 text-left transition-colors ${
+                        className={`flex w-full items-start justify-between rounded-lg px-3 py-3 text-left transition-colors ${
                           selected
-                            ? "border-primary/60 bg-primary/8 text-foreground"
-                            : "border-border bg-background text-muted-foreground hover:bg-accent"
+                            ? "bg-primary/10 text-foreground shadow-[inset_0_0_0_1px_hsl(var(--primary)/0.38)]"
+                            : "bg-background/35 text-muted-foreground hover:bg-accent/45"
                         }`}
                         onClick={() => setTheme(option.value)}
                       >
@@ -1271,7 +1266,7 @@ function SettingsRouteView() {
                   })}
                 </div>
 
-                <p className="mt-4 text-xs text-muted-foreground">
+                <p className="text-xs text-muted-foreground">
                   Active theme: <span className="font-medium text-foreground">{resolvedTheme}</span>
                 </p>
               </section>
@@ -1279,14 +1274,6 @@ function SettingsRouteView() {
 
             {activeSection === SETTINGS_SECTION_IDS.models ? (
               <section id={SETTINGS_SECTION_IDS.models} className={SETTINGS_SECTION_CLASS}>
-                <div className="mb-4">
-                  <h2 className="text-sm font-medium text-foreground">Models</h2>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Save additional provider model slugs so they appear in the chat model picker and
-                    `/model` command suggestions.
-                  </p>
-                </div>
-
                 <div className="space-y-5">
                   <label className="block space-y-1">
                     <span className="text-xs font-medium text-foreground">
@@ -1338,7 +1325,7 @@ function SettingsRouteView() {
                     return (
                       <div
                         key={provider}
-                        className="rounded-xl border border-border bg-background/50 p-4"
+                        className={SETTINGS_SUBGROUP_CLASS}
                       >
                         <div className="mb-4">
                           <h3 className="text-sm font-medium text-foreground">
@@ -1429,7 +1416,7 @@ function SettingsRouteView() {
                                 {customModels.map((slug) => (
                                   <div
                                     key={`${provider}:${slug}`}
-                                    className="flex items-center justify-between gap-3 rounded-lg border border-border bg-background px-3 py-2"
+                                    className="flex items-center justify-between gap-3 rounded-lg bg-background/45 px-3 py-2"
                                   >
                                     <div className="flex min-w-0 flex-1 items-center gap-2">
                                       {provider === "codex" &&
@@ -1451,7 +1438,7 @@ function SettingsRouteView() {
                                 ))}
                               </div>
                             ) : (
-                              <div className="rounded-lg border border-dashed border-border bg-background px-3 py-4 text-xs text-muted-foreground">
+                              <div className="rounded-lg bg-background/35 px-3 py-4 text-xs text-muted-foreground">
                                 No custom models saved yet.
                               </div>
                             )}
@@ -1462,7 +1449,7 @@ function SettingsRouteView() {
                     );
                   })}
 
-                  <div className="rounded-xl border border-border bg-background/50 p-4">
+                  <div className={SETTINGS_SUBGROUP_CLASS}>
                     <div className="mb-4">
                       <h3 className="text-sm font-medium text-foreground">
                         New-thread suggestions
@@ -1475,7 +1462,7 @@ function SettingsRouteView() {
                     </div>
 
                     <div className="space-y-4">
-                      <div className="flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
+                      <div className={SETTINGS_ROW_CLASS}>
                         <div>
                           <p className="text-sm font-medium text-foreground">
                             Enable suggested tasks
@@ -1569,7 +1556,7 @@ function SettingsRouteView() {
                     </h2>
                   </div>
 
-                  <div className="overflow-hidden rounded-2xl border border-border bg-card/80">
+                  <div className={cn(SETTINGS_GROUP_CLASS, "overflow-hidden p-0")}>
                     <div className="flex min-h-17 items-center justify-between gap-4 px-5 py-4">
                       <div className="min-w-0">
                         <h3 className="text-sm font-semibold text-foreground">Network access</h3>
@@ -1633,7 +1620,7 @@ function SettingsRouteView() {
                     </div>
                   </div>
 
-                  <div className="overflow-hidden rounded-2xl border border-border bg-card/80">
+                  <div className={cn(SETTINGS_GROUP_CLASS, "overflow-hidden p-0")}>
                     {remoteAccessQuery.isLoading ? (
                       <div className="px-5 py-4">
                         <p className="text-xs text-muted-foreground">Loading clients...</p>
@@ -1831,7 +1818,7 @@ function SettingsRouteView() {
                     </Button>
                   </div>
 
-                  <div className="rounded-2xl border border-border bg-card/80 px-5 py-4">
+                  <div className={SETTINGS_GROUP_CLASS}>
                     <p className="text-xs text-muted-foreground">
                       {remoteEnvironments.length === 0
                         ? 'No remote environments yet. Click "Add environment" to pair another environment.'
@@ -1844,14 +1831,7 @@ function SettingsRouteView() {
 
             {activeSection === SETTINGS_SECTION_IDS.responses ? (
               <section id={SETTINGS_SECTION_IDS.responses} className={SETTINGS_SECTION_CLASS}>
-                <div className="mb-4">
-                  <h2 className="text-sm font-medium text-foreground">Responses</h2>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Control how assistant output is rendered during a turn.
-                  </p>
-                </div>
-
-                <div className="flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
+                <div className={SETTINGS_ROW_CLASS}>
                   <div>
                     <p className="text-sm font-medium text-foreground">Stream assistant messages</p>
                     <p className="text-xs text-muted-foreground">
@@ -1885,7 +1865,7 @@ function SettingsRouteView() {
                   </div>
                 ) : null}
 
-                <div className="flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
+                <div className={SETTINGS_ROW_CLASS}>
                   <div>
                     <p className="text-sm font-medium text-foreground">
                       Keep inspect mode after capture
@@ -1921,7 +1901,7 @@ function SettingsRouteView() {
                   </div>
                 ) : null}
 
-                <div className="flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
+                <div className={SETTINGS_ROW_CLASS}>
                   <div>
                     <p className="text-sm font-medium text-foreground">Wrap lines in turn diffs</p>
                     <p className="text-xs text-muted-foreground">
@@ -1960,16 +1940,9 @@ function SettingsRouteView() {
 
             {activeSection === SETTINGS_SECTION_IDS.browserUse ? (
               <section id={SETTINGS_SECTION_IDS.browserUse} className={SETTINGS_SECTION_CLASS}>
-                <div className="mb-4">
-                  <h2 className="text-sm font-medium text-foreground">Browser use</h2>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Control in-app browser storage, approvals, and domain rules used by Codex.
-                  </p>
-                </div>
-
                 {usesDesktopAppChrome ? (
                   <div className="space-y-5">
-                    <div className="rounded-xl border border-border bg-background">
+                    <div className={SETTINGS_SUBGROUP_CLASS}>
                       <div className="flex items-center justify-between gap-3 px-4 py-3">
                         <div>
                           <p className="text-sm font-medium text-foreground">Browsing data</p>
@@ -2010,13 +1983,13 @@ function SettingsRouteView() {
                         </Button>
                       </div>
                       {browsingDataStatus ? (
-                        <div className="border-t border-border px-4 py-2 text-xs text-muted-foreground">
+                        <div className="px-4 pb-3 text-xs text-muted-foreground">
                           {browsingDataStatus}
                         </div>
                       ) : null}
                     </div>
 
-                    <div className="rounded-xl border border-border bg-background">
+                    <div className={SETTINGS_SUBGROUP_CLASS}>
                       <div className="grid gap-3 px-4 py-3 sm:grid-cols-[1fr_220px] sm:items-center">
                         <div>
                           <p className="text-sm font-medium text-foreground">Approval</p>
@@ -2048,7 +2021,7 @@ function SettingsRouteView() {
                           </SelectPopup>
                         </Select>
                       </div>
-                      <div className="grid gap-3 border-t border-border px-4 py-3 sm:grid-cols-[1fr_220px] sm:items-center">
+                      <div className="grid gap-3 px-4 py-3 sm:grid-cols-[1fr_220px] sm:items-center">
                         <div>
                           <p className="text-sm font-medium text-foreground">History</p>
                           <p className="text-xs text-muted-foreground">
@@ -2126,7 +2099,7 @@ function SettingsRouteView() {
                           </form>
                         </div>
 
-                        <div className="rounded-xl border border-border bg-background">
+                        <div className={SETTINGS_SUBGROUP_CLASS}>
                           {browserUseSettings[list.key].length > 0 ? (
                             <div className="divide-y divide-border">
                               {browserUseSettings[list.key].map((domain) => (
@@ -2161,7 +2134,7 @@ function SettingsRouteView() {
                     {domainError ? <p className="text-xs text-destructive">{domainError}</p> : null}
                   </div>
                 ) : (
-                  <div className="rounded-lg border border-dashed border-border bg-background px-4 py-4 text-sm text-muted-foreground">
+                  <div className={SETTINGS_EMPTY_STATE_CLASS}>
                     Browser use settings are available in the desktop app.
                   </div>
                 )}
@@ -2170,15 +2143,8 @@ function SettingsRouteView() {
 
             {activeSection === SETTINGS_SECTION_IDS.computerUse ? (
               <section id={SETTINGS_SECTION_IDS.computerUse} className={SETTINGS_SECTION_CLASS}>
-                <div className="mb-4">
-                  <h2 className="text-sm font-medium text-foreground">Computer use</h2>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Manage T3 Computer Use for Windows-first desktop automation.
-                  </p>
-                </div>
-
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-background px-3 py-3">
+                  <div className={SETTINGS_ROW_CLASS}>
                     <div className="min-w-0">
                       <p className="text-sm font-medium text-foreground">Enable T3 Computer Use</p>
                       <p className="mt-1 text-xs text-muted-foreground">
@@ -2198,7 +2164,7 @@ function SettingsRouteView() {
                   </div>
 
                   <div className="grid gap-3 md:grid-cols-2">
-                    <div className="rounded-lg border border-border bg-background px-3 py-3">
+                    <div className="rounded-lg bg-background/35 px-3 py-3">
                       <p className="text-xs font-medium text-foreground">Approval behavior</p>
                       <Select
                         value={computerUseSettings.approvalPolicy}
@@ -2222,7 +2188,7 @@ function SettingsRouteView() {
                       </p>
                     </div>
 
-                    <div className="rounded-lg border border-border bg-background px-3 py-3">
+                    <div className="rounded-lg bg-background/35 px-3 py-3">
                       <p className="text-xs font-medium text-foreground">Capture retention</p>
                       <Input
                         className="mt-2 h-8 text-xs"
@@ -2243,7 +2209,7 @@ function SettingsRouteView() {
                     </div>
                   </div>
 
-                  <div className="rounded-lg border border-border bg-background px-3 py-3 text-xs text-muted-foreground">
+                  <div className="rounded-lg bg-background/35 px-3 py-3 text-xs text-muted-foreground">
                     <p className="font-medium text-foreground">Windows status</p>
                     <p className="mt-1">
                       On Windows, the bundled helper uses UI Automation and does not require macOS
@@ -2263,7 +2229,7 @@ function SettingsRouteView() {
                     )}
                   </div>
 
-                  <div className="rounded-lg border border-border bg-background px-3 py-3">
+                  <div className="rounded-lg bg-background/35 px-3 py-3">
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <p className="text-xs font-medium text-foreground">App permissions</p>
@@ -2290,7 +2256,7 @@ function SettingsRouteView() {
                         return (
                           <div
                             key={category}
-                            className="overflow-hidden rounded-lg border border-border/80 bg-card/40"
+                            className="overflow-hidden rounded-lg bg-card/45"
                           >
                             <div className="flex items-center gap-2 px-2.5 py-2">
                               <button
@@ -2329,12 +2295,12 @@ function SettingsRouteView() {
                             </div>
 
                             {expanded ? (
-                              <div className="border-t border-border/70 px-2.5 py-2">
+                              <div className="px-2.5 pb-2">
                                 <p className="mb-2 text-[11px] text-muted-foreground">
                                   {categoryInfo.description}
                                 </p>
                                 {categoryApps.length === 0 ? (
-                                  <p className="rounded-md border border-dashed border-border px-2 py-2 text-xs text-muted-foreground">
+                                  <p className="rounded-md bg-background/35 px-2 py-2 text-xs text-muted-foreground">
                                     No apps in this group.
                                   </p>
                                 ) : (
@@ -2405,16 +2371,8 @@ function SettingsRouteView() {
 
             {activeSection === SETTINGS_SECTION_IDS.keybindings ? (
               <section id={SETTINGS_SECTION_IDS.keybindings} className={SETTINGS_SECTION_CLASS}>
-                <div className="mb-4">
-                  <h2 className="text-sm font-medium text-foreground">Keybindings</h2>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Open the persisted <code>keybindings.json</code> file to edit advanced bindings
-                    directly.
-                  </p>
-                </div>
-
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between gap-3 rounded-lg border border-border bg-background px-3 py-2">
+                  <div className={SETTINGS_ROW_CLASS}>
                     <div className="min-w-0 flex-1">
                       <p className="text-xs font-medium text-foreground">Config file path</p>
                       <p className="mt-1 break-all font-mono text-[11px] text-muted-foreground">
@@ -2443,14 +2401,7 @@ function SettingsRouteView() {
 
             {activeSection === SETTINGS_SECTION_IDS.safety ? (
               <section id={SETTINGS_SECTION_IDS.safety} className={SETTINGS_SECTION_CLASS}>
-                <div className="mb-4">
-                  <h2 className="text-sm font-medium text-foreground">Safety</h2>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Additional guardrails for destructive local actions.
-                  </p>
-                </div>
-
-                <div className="flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
+                <div className={SETTINGS_ROW_CLASS}>
                   <div>
                     <p className="text-sm font-medium text-foreground">Confirm thread deletion</p>
                     <p className="text-xs text-muted-foreground">
@@ -2468,7 +2419,7 @@ function SettingsRouteView() {
                   />
                 </div>
 
-                <div className="mt-3 flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
+                <div className={SETTINGS_ROW_CLASS}>
                   <div>
                     <p className="text-sm font-medium text-foreground">Confirm thread archive</p>
                     <p className="text-xs text-muted-foreground">
@@ -2508,16 +2459,9 @@ function SettingsRouteView() {
 
             {activeSection === SETTINGS_SECTION_IDS.providers ? (
               <section id={SETTINGS_SECTION_IDS.providers} className={SETTINGS_SECTION_CLASS}>
-                <div className="mb-4">
-                  <h2 className="text-sm font-medium text-foreground">Providers</h2>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Manage providers and authentication.
-                  </p>
-                </div>
-
                 <div className="space-y-4">
                   {/* ── Codex ── */}
-                  <div className="rounded-xl border border-border bg-background p-4">
+                  <div className={SETTINGS_SUBGROUP_CLASS}>
                     <button
                       type="button"
                       onClick={() => toggleProviderExpanded("codex")}
@@ -2580,7 +2524,7 @@ function SettingsRouteView() {
                           </p>
                         ) : null}
                         <div className="space-y-3 pt-3">
-                          <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
+                          <div className={SETTINGS_ROW_CLASS}>
                             <div>
                               <span className="text-xs font-medium text-foreground">
                                 Account
@@ -2737,7 +2681,7 @@ function SettingsRouteView() {
                   </div>
 
                   {/* ── OpenCode ── */}
-                  <div className="rounded-xl border border-border bg-background p-4">
+                  <div className={SETTINGS_SUBGROUP_CLASS}>
                     <button
                       type="button"
                       onClick={() => toggleProviderExpanded("opencode")}
@@ -2800,7 +2744,7 @@ function SettingsRouteView() {
                           </p>
                         ) : null}
                         <div className="space-y-3 pt-3">
-                          <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
+                          <div className={SETTINGS_ROW_CLASS}>
                             <div>
                               <p className="text-sm font-medium text-foreground">
                                 Enable OpenCode
@@ -2913,7 +2857,7 @@ function SettingsRouteView() {
                   </div>
 
                   {/* ── Claude ── */}
-                  <div className="rounded-xl border border-border bg-background p-4">
+                  <div className={SETTINGS_SUBGROUP_CLASS}>
                     <button
                       type="button"
                       onClick={() => toggleProviderExpanded("claudeAgent")}
@@ -2976,7 +2920,7 @@ function SettingsRouteView() {
                           </p>
                         ) : null}
                         <div className="space-y-3 pt-3">
-                          <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
+                          <div className={SETTINGS_ROW_CLASS}>
                             <div>
                               <span className="text-xs font-medium text-foreground">
                                 Authentication
@@ -2992,7 +2936,7 @@ function SettingsRouteView() {
 
                           {claudeAccount?.rateLimits &&
                           claudeAccount.rateLimits.length > 0 ? (
-                            <div className="rounded-lg border border-border px-3 py-2">
+                            <div className="rounded-lg bg-background/35 px-3 py-2">
                               <span className="text-xs font-medium text-foreground">
                                 Rate limits
                               </span>
@@ -3040,15 +2984,8 @@ function SettingsRouteView() {
 
             {activeSection === SETTINGS_SECTION_IDS.archived ? (
               <section id={SETTINGS_SECTION_IDS.archived} className={SETTINGS_SECTION_CLASS}>
-                <div className="mb-4">
-                  <h2 className="text-sm font-medium text-foreground">Archived threads</h2>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    Restore archived threads to the sidebar or delete them permanently.
-                  </p>
-                </div>
-
                 {archivedGroups.length === 0 ? (
-                  <div className="flex items-center gap-3 rounded-lg border border-border bg-background px-4 py-4 text-sm text-muted-foreground">
+                  <div className={cn(SETTINGS_EMPTY_STATE_CLASS, "flex items-center gap-3")}>
                     <ArchiveIcon className="size-5" />
                     <span>No archived threads yet.</span>
                   </div>
@@ -3057,12 +2994,12 @@ function SettingsRouteView() {
                     {archivedGroups.map(({ project, threads: projectThreads }) => (
                       <div
                         key={project.id}
-                        className="rounded-xl border border-border bg-background"
+                        className="overflow-hidden rounded-xl bg-background/35"
                       >
-                        <div className="border-b border-border px-4 py-3 text-sm font-medium text-foreground">
+                        <div className="px-4 py-3 text-sm font-medium text-foreground">
                           {project.name}
                         </div>
-                        <div className="divide-y divide-border">
+                        <div className="divide-y divide-border/55">
                           {projectThreads.map((thread) => (
                             <div
                               key={thread.id}

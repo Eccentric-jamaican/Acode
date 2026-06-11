@@ -302,6 +302,10 @@ const LAST_EDITOR_KEY = "t3code:last-editor";
 const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by-project";
 const MODEL_PICKER_FAVORITES_KEY = "t3code:model-picker-favorites:v1";
 const THREAD_CONTEXT_PANEL_PINNED_KEY = "t3code:thread-context-panel-pinned";
+const THREAD_CONTEXT_PANEL_PROGRESS_COLLAPSED_KEY =
+  "t3code:thread-context-panel-progress-collapsed";
+const THREAD_CONTEXT_PANEL_ENVIRONMENT_COLLAPSED_KEY =
+  "t3code:thread-context-panel-environment-collapsed";
 const THREAD_CONTEXT_PANEL_ARTIFACTS_COLLAPSED_KEY =
   "t3code:thread-context-panel-artifacts-collapsed";
 const THREAD_CONTEXT_PANEL_SOURCES_COLLAPSED_KEY = "t3code:thread-context-panel-sources-collapsed";
@@ -434,6 +438,33 @@ const THREAD_CONTEXT_ARTIFACT_EXTENSIONS = new Set([
   "xls",
   "xlsx",
 ]);
+const THREAD_CONTEXT_ARTIFACT_COLLECT_LIMIT = 30;
+const THREAD_CONTEXT_ARTIFACT_PAGE_SIZE = 5;
+const THREAD_CONTEXT_MARKDOWN_ARTIFACT_EXTENSIONS = new Set(["md", "mdown", "mdx", "mkd"]);
+const THREAD_CONTEXT_LOW_VALUE_ARTIFACT_FILENAMES = new Set([
+  "agents.md",
+  "authors.md",
+  "changelog.md",
+  "code_of_conduct.md",
+  "contributing.md",
+  "license.md",
+  "readme.md",
+  "readme.mdx",
+  "security.md",
+  "support.md",
+]);
+const THREAD_CONTEXT_IGNORED_ARTIFACT_SEGMENTS = new Set([
+  ".git",
+  ".next",
+  ".turbo",
+  ".vite",
+  "coverage",
+  "node_modules",
+  "playwright-report",
+  "test-results",
+]);
+const THREAD_CONTEXT_DELIVERABLE_MARKDOWN_PATTERN =
+  /\b(analysis|architecture|audit|brief|design|guide|notes|plan|postmortem|proposal|prd|report|requirements|research|review|roadmap|runbook|spec|summary)\b/i;
 const CODEX_REASONING_LABEL_BY_OPTION: Record<CodexReasoningEffort, string> = {
   low: "Low",
   medium: "Medium",
@@ -494,6 +525,111 @@ function normalizeThreadContextPath(pathValue: string): string {
 
 function isThreadContextArtifactPath(pathValue: string): boolean {
   return THREAD_CONTEXT_ARTIFACT_EXTENSIONS.has(extensionOf(pathValue));
+}
+
+function isIgnoredThreadContextArtifactPath(pathValue: string): boolean {
+  const normalizedPath = normalizeThreadContextPath(pathValue).toLowerCase();
+  const fileName = basenameOfPath(normalizedPath);
+  if (THREAD_CONTEXT_LOW_VALUE_ARTIFACT_FILENAMES.has(fileName)) {
+    return true;
+  }
+  return normalizedPath
+    .split("/")
+    .some((segment) => THREAD_CONTEXT_IGNORED_ARTIFACT_SEGMENTS.has(segment));
+}
+
+function isDeliverableMarkdownArtifactPath(pathValue: string): boolean {
+  const extension = extensionOf(pathValue);
+  if (!THREAD_CONTEXT_MARKDOWN_ARTIFACT_EXTENSIONS.has(extension)) {
+    return true;
+  }
+  return THREAD_CONTEXT_DELIVERABLE_MARKDOWN_PATTERN.test(basenameOfPath(pathValue));
+}
+
+function shouldShowThreadContextArtifactPath(
+  pathValue: string,
+  source: "diff" | "generated" | "message",
+): boolean {
+  if (!isThreadContextArtifactPath(pathValue) || isIgnoredThreadContextArtifactPath(pathValue)) {
+    return false;
+  }
+  return source !== "diff" || isDeliverableMarkdownArtifactPath(pathValue);
+}
+
+function threadContextTimestampMs(value: string | null | undefined): number {
+  if (!value) {
+    return 0;
+  }
+  const timestamp = Date.parse(value);
+  return Number.isNaN(timestamp) ? 0 : timestamp;
+}
+
+function isThreadContextOnOrAfterBoundary(
+  createdAt: string | null | undefined,
+  boundary: string | null,
+): boolean {
+  if (!boundary) {
+    return true;
+  }
+  return threadContextTimestampMs(createdAt) >= threadContextTimestampMs(boundary);
+}
+
+function threadContextArtifactIdentity(pathValue: string, cwd?: string | undefined): string {
+  const normalizedPath = normalizeThreadContextPath(pathValue).toLowerCase();
+  const normalizedCwd = cwd ? normalizeThreadContextPath(cwd).toLowerCase() : "";
+  return `${normalizedCwd}\u0000${normalizedPath}`;
+}
+
+function asThreadContextRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+}
+
+function stringValueFromThreadContextPayload(
+  payload: Record<string, unknown>,
+  keys: ReadonlyArray<string>,
+): string | null {
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return null;
+}
+
+function normalizedThreadContextToolName(payload: Record<string, unknown>): string | null {
+  const toolName = stringValueFromThreadContextPayload(payload, [
+    "toolName",
+    "tool_name",
+    "name",
+    "title",
+    "itemName",
+  ]);
+  return (
+    toolName
+      ?.toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "") ?? null
+  );
+}
+
+function isThreadContextBrowserToolName(toolName: string | null): boolean {
+  return (
+    toolName === "browser" ||
+    toolName === "browser_use" ||
+    toolName === "control_in_app_browser" ||
+    toolName?.startsWith("browser_") === true ||
+    toolName?.includes("_browser_") === true
+  );
+}
+
+function isThreadContextWebSearchToolName(toolName: string | null): boolean {
+  return (
+    toolName === "web_search" ||
+    toolName === "websearch" ||
+    toolName === "search_web" ||
+    toolName === "searchweb"
+  );
 }
 
 function isBrowserPreviewArtifactPath(pathValue: string): boolean {
@@ -780,70 +916,110 @@ function collectThreadContextArtifacts(input: {
   thread: Thread;
   homeDirectory: string | undefined;
 }): ThreadContextArtifact[] {
-  const seen = new Set<string>();
-  const artifacts: ThreadContextArtifact[] = [];
-  const pushArtifact = (pathValue: string, kind: ThreadContextArtifact["kind"]) => {
+  const boundary = latestUserMessageCreatedAt(input.thread);
+  const candidates: Array<
+    ThreadContextArtifact & {
+      identityKey: string;
+      labelKey: string;
+      priority: number;
+      createdAt: string;
+    }
+  > = [];
+  const pushArtifact = (inputArtifact: {
+    pathValue: string;
+    kind: ThreadContextArtifact["kind"];
+    source: "diff" | "generated" | "message";
+    createdAt: string;
+    cwd?: string | undefined;
+    label?: string | undefined;
+  }) => {
+    const { pathValue, kind, source, createdAt, cwd, label } = inputArtifact;
     const normalizedPath = normalizeThreadContextPath(pathValue);
-    const dedupeKey = normalizedPath.toLowerCase();
-    if (!isThreadContextArtifactPath(normalizedPath) || seen.has(dedupeKey)) {
+    const normalizedCwd = cwd ? normalizeThreadContextPath(cwd) : undefined;
+    if (!shouldShowThreadContextArtifactPath(normalizedPath, source)) {
       return;
     }
-    seen.add(dedupeKey);
-    artifacts.push({
+    const displayLabel = label ?? basenameOfPath(normalizedPath);
+    candidates.push({
       path: normalizedPath,
-      label: basenameOfPath(normalizedPath),
+      label: displayLabel,
       kind,
+      priority: source === "generated" ? 3 : source === "message" ? 2 : 1,
+      identityKey: threadContextArtifactIdentity(normalizedPath, normalizedCwd),
+      labelKey: displayLabel.toLowerCase(),
+      createdAt,
+      ...(normalizedCwd ? { cwd: normalizedCwd } : {}),
     });
   };
   let generatedImageCount = 0;
   const pushGeneratedImageArtifact = (artifact: {
     path: string;
     label: string;
+    createdAt: string;
     cwd?: string | undefined;
   }) => {
     const normalizedPath = normalizeThreadContextPath(artifact.path);
-    const normalizedCwd = artifact.cwd ? normalizeThreadContextPath(artifact.cwd) : undefined;
-    const dedupeKey = `${normalizedCwd ?? ""}\u0000${normalizedPath}`.toLowerCase();
-    if (!isThreadContextArtifactPath(normalizedPath) || seen.has(dedupeKey)) {
+    if (!shouldShowThreadContextArtifactPath(normalizedPath, "generated")) {
       return;
     }
-    seen.add(dedupeKey);
     generatedImageCount += 1;
     const label =
       artifact.label === "Generated image"
         ? `Generated image ${generatedImageCount}`
         : artifact.label;
-    artifacts.push({
-      path: normalizedPath,
+    pushArtifact({
+      pathValue: normalizedPath,
       label,
       kind: "generated",
-      ...(normalizedCwd ? { cwd: normalizedCwd } : {}),
+      source: "generated",
+      createdAt: artifact.createdAt,
+      ...(artifact.cwd ? { cwd: artifact.cwd } : {}),
     });
   };
 
   for (const summary of input.thread.turnDiffSummaries) {
+    if (!isThreadContextOnOrAfterBoundary(summary.completedAt, boundary)) {
+      continue;
+    }
     for (const file of summary.files) {
-      pushArtifact(file.path, "workspace");
+      pushArtifact({
+        pathValue: file.path,
+        kind: "workspace",
+        source: "diff",
+        createdAt: summary.completedAt,
+      });
     }
   }
   for (const message of input.thread.messages) {
+    if (
+      message.role !== "assistant" ||
+      !isThreadContextOnOrAfterBoundary(message.createdAt, boundary)
+    ) {
+      continue;
+    }
     const pathPattern =
       /(?:^|[\s`"'(])((?:[A-Za-z]:[\\/])?(?:[\w .@()[\]-]+[\\/])*[\w .@()[\]-]+\.(?:avif|bmp|docx|gif|heic|jpe?g|md|mdown|mdx|mkd|pdf|png|pptx|webp|xls|xlsx))(?=$|[\s`"',).])/gi;
     for (const match of message.text.matchAll(pathPattern)) {
       const pathValue = match[1];
       if (pathValue) {
-        pushArtifact(pathValue, "workspace");
+        pushArtifact({
+          pathValue,
+          kind: "workspace",
+          source: "message",
+          createdAt: message.completedAt ?? message.createdAt,
+        });
       }
     }
   }
   for (const activity of input.thread.activities) {
-    const payload =
-      activity.payload && typeof activity.payload === "object"
-        ? (activity.payload as Record<string, unknown>)
-        : null;
+    if (!isThreadContextOnOrAfterBoundary(activity.createdAt, boundary)) {
+      continue;
+    }
+    const payload = asThreadContextRecord(activity.payload);
     for (const artifact of extractGeneratedImageArtifacts(payload)) {
       pushGeneratedImageArtifact({
         ...artifact,
+        createdAt: activity.createdAt,
         ...(artifact.cwd
           ? { cwd: artifact.cwd }
           : artifact.providerThreadId && input.homeDirectory
@@ -857,7 +1033,38 @@ function collectThreadContextArtifacts(input: {
     }
   }
 
-  return artifacts;
+  candidates.sort((left, right) => {
+    if (right.priority !== left.priority) {
+      return right.priority - left.priority;
+    }
+    const timeDelta =
+      threadContextTimestampMs(right.createdAt) - threadContextTimestampMs(left.createdAt);
+    if (timeDelta !== 0) {
+      return timeDelta;
+    }
+    return left.label.localeCompare(right.label);
+  });
+
+  const selected: ThreadContextArtifact[] = [];
+  const seenIdentities = new Set<string>();
+  const seenLabels = new Set<string>();
+  for (const candidate of candidates) {
+    if (seenIdentities.has(candidate.identityKey) || seenLabels.has(candidate.labelKey)) {
+      continue;
+    }
+    seenIdentities.add(candidate.identityKey);
+    seenLabels.add(candidate.labelKey);
+    selected.push({
+      path: candidate.path,
+      label: candidate.label,
+      kind: candidate.kind,
+      ...(candidate.cwd ? { cwd: candidate.cwd } : {}),
+    });
+    if (selected.length >= THREAD_CONTEXT_ARTIFACT_COLLECT_LIMIT) {
+      break;
+    }
+  }
+  return selected;
 }
 
 function collectThreadContextSources(thread: Thread): ThreadContextSource[] {
@@ -865,28 +1072,32 @@ function collectThreadContextSources(thread: Thread): ThreadContextSource[] {
   const addSource = (source: ThreadContextSource) => {
     sources.set(source.id, source);
   };
+  const boundary = latestUserMessageCreatedAt(thread);
 
   for (const message of thread.messages) {
-    if ((message.attachments?.length ?? 0) > 0) {
+    if (
+      isThreadContextOnOrAfterBoundary(message.createdAt, boundary) &&
+      (message.attachments?.length ?? 0) > 0
+    ) {
       addSource({ id: "attachments", label: "Attachments", icon: "file" });
     }
   }
 
   for (const activity of thread.activities) {
-    const payload =
-      activity.payload && typeof activity.payload === "object"
-        ? (activity.payload as Record<string, unknown>)
-        : {};
+    if (!isThreadContextOnOrAfterBoundary(activity.createdAt, boundary)) {
+      continue;
+    }
+    const payload = asThreadContextRecord(activity.payload) ?? {};
     const itemType = typeof payload.itemType === "string" ? payload.itemType : "";
-    const summary = `${activity.summary} ${JSON.stringify(payload)}`.toLowerCase();
-    if (itemType === "web_search" || summary.includes("web search")) {
+    const toolName = normalizedThreadContextToolName(payload);
+    if (itemType === "web_search" || isThreadContextWebSearchToolName(toolName)) {
       addSource({ id: "web-search", label: "Web search", icon: "web" });
     }
-    if (summary.includes("browser")) {
+    if (
+      (itemType === "mcp_tool_call" || itemType === "dynamic_tool_call") &&
+      isThreadContextBrowserToolName(toolName)
+    ) {
       addSource({ id: "browser", label: "Browser", icon: "browser" });
-    }
-    if (itemType === "file_change" || summary.includes("read") || summary.includes("file")) {
-      addSource({ id: "files", label: "Files", icon: "file" });
     }
   }
 
@@ -7440,36 +7651,46 @@ function persistThreadContextPanelPreference(key: string, value: boolean): void 
 
 function ThreadContextCollapsibleSection(props: {
   title: string;
-  count: number;
+  count?: number;
   collapsed: boolean;
-  emptyLabel: string;
+  emptyLabel?: string;
   onToggle: () => void;
+  contentClassName?: string;
+  action?: ReactNode;
   children: ReactNode;
 }) {
-  const { title, count, collapsed, emptyLabel, onToggle, children } = props;
+  const { title, count, collapsed, emptyLabel, onToggle, contentClassName, action, children } =
+    props;
 
   return (
     <div className="space-y-1">
-      <button
-        type="button"
-        className="flex w-full items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs font-medium text-muted-foreground/80 transition-colors hover:bg-muted/45 hover:text-foreground/78"
-        aria-expanded={!collapsed}
-        onClick={onToggle}
-      >
-        <ChevronDownIcon
-          className={cn(
-            "size-3.5 shrink-0 transition-transform",
-            collapsed ? "-rotate-90" : "rotate-0",
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-xs font-medium text-muted-foreground/80 transition-colors hover:bg-muted/45 hover:text-foreground/78"
+          aria-expanded={!collapsed}
+          onClick={onToggle}
+        >
+          <ChevronDownIcon
+            className={cn(
+              "size-3.5 shrink-0 transition-transform",
+              collapsed ? "-rotate-90" : "rotate-0",
+            )}
+            aria-hidden="true"
+          />
+          <span className="min-w-0 flex-1 truncate">{title}</span>
+          {count === undefined ? null : (
+            <span className="shrink-0 font-mono text-[11px] text-muted-foreground/55">{count}</span>
           )}
-          aria-hidden="true"
-        />
-        <span className="min-w-0 flex-1 truncate">{title}</span>
-        <span className="shrink-0 font-mono text-[11px] text-muted-foreground/55">{count}</span>
-      </button>
-      {collapsed ? null : count > 0 ? (
-        <div className="max-h-44 space-y-1 overflow-y-auto pr-1">{children}</div>
-      ) : (
+        </button>
+        {action ? <div className="shrink-0">{action}</div> : null}
+      </div>
+      {collapsed ? null : count === 0 && emptyLabel ? (
         <p className="px-1.5 py-1.5 text-xs text-muted-foreground/55">{emptyLabel}</p>
+      ) : (
+        <div className={contentClassName ?? "max-h-44 space-y-1 overflow-y-auto pr-1"}>
+          {children}
+        </div>
       )}
     </div>
   );
@@ -7575,11 +7796,20 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
     }
     return localStorage.getItem(THREAD_CONTEXT_PANEL_PINNED_KEY) !== "false";
   });
+  const [progressCollapsed, setProgressCollapsed] = useState(() =>
+    readThreadContextPanelPreference(THREAD_CONTEXT_PANEL_PROGRESS_COLLAPSED_KEY, false),
+  );
+  const [environmentCollapsed, setEnvironmentCollapsed] = useState(() =>
+    readThreadContextPanelPreference(THREAD_CONTEXT_PANEL_ENVIRONMENT_COLLAPSED_KEY, false),
+  );
   const [artifactsCollapsed, setArtifactsCollapsed] = useState(() =>
     readThreadContextPanelPreference(THREAD_CONTEXT_PANEL_ARTIFACTS_COLLAPSED_KEY, false),
   );
   const [sourcesCollapsed, setSourcesCollapsed] = useState(() =>
     readThreadContextPanelPreference(THREAD_CONTEXT_PANEL_SOURCES_COLLAPSED_KEY, false),
+  );
+  const [visibleArtifactCount, setVisibleArtifactCount] = useState(
+    THREAD_CONTEXT_ARTIFACT_PAGE_SIZE,
   );
   const [branchMenuOpen, setBranchMenuOpen] = useState(false);
   const [branchQuery, setBranchQuery] = useState("");
@@ -7596,7 +7826,16 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
     [homeDirectory, thread],
   );
   const sources = useMemo(() => collectThreadContextSources(thread), [thread]);
+  useEffect(() => {
+    setVisibleArtifactCount(THREAD_CONTEXT_ARTIFACT_PAGE_SIZE);
+  }, [activeThreadId]);
   const hasGitContext = gitCwd !== null;
+  const hasProgress = progressItems.length > 0;
+  const hasArtifacts = artifacts.length > 0;
+  const hasSources = sources.length > 0;
+  const displayedArtifacts = artifacts.slice(0, visibleArtifactCount);
+  const remainingArtifactCount = Math.max(0, artifacts.length - displayedArtifacts.length);
+  const showMoreArtifactCount = Math.min(THREAD_CONTEXT_ARTIFACT_PAGE_SIZE, remainingArtifactCount);
   const hasChanges =
     (gitStatus?.workingTree.insertions ?? 0) > 0 || (gitStatus?.workingTree.deletions ?? 0) > 0;
   const localBranches = useMemo(
@@ -7689,6 +7928,20 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
       return next;
     });
   }, []);
+  const toggleProgressCollapsed = useCallback(() => {
+    setProgressCollapsed((current) => {
+      const next = !current;
+      persistThreadContextPanelPreference(THREAD_CONTEXT_PANEL_PROGRESS_COLLAPSED_KEY, next);
+      return next;
+    });
+  }, []);
+  const toggleEnvironmentCollapsed = useCallback(() => {
+    setEnvironmentCollapsed((current) => {
+      const next = !current;
+      persistThreadContextPanelPreference(THREAD_CONTEXT_PANEL_ENVIRONMENT_COLLAPSED_KEY, next);
+      return next;
+    });
+  }, []);
   const toggleArtifactsCollapsed = useCallback(() => {
     setArtifactsCollapsed((current) => {
       const next = !current;
@@ -7703,85 +7956,96 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
       return next;
     });
   }, []);
+  const showMoreArtifacts = useCallback(() => {
+    setVisibleArtifactCount((current) =>
+      Math.min(current + THREAD_CONTEXT_ARTIFACT_PAGE_SIZE, artifacts.length),
+    );
+  }, [artifacts.length]);
+
+  const pinControl = (
+    <Button
+      type="button"
+      size="icon-xs"
+      variant="ghost"
+      className="size-6 text-muted-foreground/70 hover:text-foreground"
+      aria-label={pinned ? "Unpin branch details" : "Pin branch details"}
+      onClick={togglePinned}
+    >
+      {pinned ? <PinOffIcon className="size-3.5" /> : <PinIcon className="size-3.5" />}
+    </Button>
+  );
+  const showPinWithProgress = hasProgress;
+  const showPinWithEnvironment = !showPinWithProgress && hasGitContext;
+  const showPinWithArtifacts = !showPinWithProgress && !hasGitContext && hasArtifacts;
+  const showPinWithSources = !showPinWithProgress && !hasGitContext && !hasArtifacts && hasSources;
+
+  if (!hasProgress && !hasGitContext && !hasArtifacts && !hasSources) {
+    return null;
+  }
 
   const panel = (
     <aside
       className={cn(
-        "w-72 overflow-hidden rounded-2xl border border-border/70 bg-popover/95 text-sm text-popover-foreground shadow-xl shadow-black/18 backdrop-blur-xl supports-[backdrop-filter]:bg-popover/86",
+        "flex w-72 flex-col overflow-hidden rounded-2xl border border-border/70 bg-popover/95 text-sm text-popover-foreground shadow-xl shadow-black/18 backdrop-blur-xl supports-[backdrop-filter]:bg-popover/86",
         "transition-[opacity,transform] duration-150",
         pinned
           ? "opacity-100"
           : "pointer-events-none translate-x-2 opacity-0 group-hover/thread-context:pointer-events-auto group-hover/thread-context:translate-x-0 group-hover/thread-context:opacity-100 focus-within:pointer-events-auto focus-within:translate-x-0 focus-within:opacity-100",
       )}
       aria-label={hasGitContext ? "Branch details" : "Thread context"}
+      style={{ maxHeight: "min(560px, calc(100vh - 5rem))" }}
     >
-      <div className="flex items-center justify-between px-4 py-3">
-        <p className="text-sm font-medium text-muted-foreground">
-          {progressItems.length > 0 ? "Progress" : hasGitContext ? "Environment" : "Context"}
-        </p>
-        <Button
-          type="button"
-          size="icon-xs"
-          variant="ghost"
-          className="size-7 text-muted-foreground/70 hover:text-foreground"
-          aria-label={pinned ? "Unpin branch details" : "Pin branch details"}
-          onClick={togglePinned}
-        >
-          {pinned ? <PinOffIcon className="size-4" /> : <PinIcon className="size-4" />}
-        </Button>
-      </div>
-
-      <div className="px-3 pb-3">
-        {progressItems.length > 0 ? (
-          <>
-            <div className="space-y-1">
-              {progressItems.map((item) => (
-                <div
-                  key={item.id}
-                  className="flex items-start gap-2 rounded-md px-1.5 py-1.5 text-foreground/78"
-                  title={item.label}
+      <div className="min-h-0 space-y-2 overflow-y-auto px-3 pb-3 pt-2">
+        {hasProgress ? (
+          <ThreadContextCollapsibleSection
+            title="Progress"
+            count={progressItems.length}
+            collapsed={progressCollapsed}
+            onToggle={toggleProgressCollapsed}
+            contentClassName="space-y-1"
+            action={showPinWithProgress ? pinControl : undefined}
+          >
+            {progressItems.map((item) => (
+              <div
+                key={item.id}
+                className="flex items-start gap-2 rounded-md px-1.5 py-1.5 text-foreground/78"
+                title={item.label}
+              >
+                <span
+                  className={cn(
+                    "mt-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded-full border text-[10px] leading-none",
+                    item.status === "completed"
+                      ? "border-muted-foreground/35 bg-muted-foreground/80 text-background"
+                      : item.status === "failed"
+                        ? "border-destructive/45 text-destructive"
+                        : item.status === "inProgress"
+                          ? "border-muted-foreground/45 text-muted-foreground"
+                          : "border-muted-foreground/30 text-muted-foreground/60",
+                  )}
+                  aria-hidden="true"
                 >
-                  <span
-                    className={cn(
-                      "mt-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded-full border text-[10px] leading-none",
-                      item.status === "completed"
-                        ? "border-muted-foreground/35 bg-muted-foreground/80 text-background"
-                        : item.status === "failed"
-                          ? "border-destructive/45 text-destructive"
-                          : item.status === "inProgress"
-                            ? "border-muted-foreground/45 text-muted-foreground"
-                            : "border-muted-foreground/30 text-muted-foreground/60",
-                    )}
-                    aria-hidden="true"
-                  >
-                    {item.status === "completed" ? (
-                      <span className="size-1.5 rounded-full bg-background" />
-                    ) : item.status === "failed" ? (
-                      "!"
-                    ) : item.status === "inProgress" ? (
-                      <span className="size-1.5 rounded-full bg-muted-foreground/70" />
-                    ) : null}
-                  </span>
-                  <span className="min-w-0 flex-1 text-sm leading-5 line-clamp-2">
-                    {item.label}
-                  </span>
-                </div>
-              ))}
-            </div>
-
-            {hasGitContext ? (
-              <>
-                <Separator className="my-3 bg-border/60" />
-                <p className="px-1.5 pb-1 text-xs font-medium text-muted-foreground/80">
-                  Branch details
-                </p>
-              </>
-            ) : null}
-          </>
+                  {item.status === "completed" ? (
+                    <span className="size-1.5 rounded-full bg-background" />
+                  ) : item.status === "failed" ? (
+                    "!"
+                  ) : item.status === "inProgress" ? (
+                    <span className="size-1.5 rounded-full bg-muted-foreground/70" />
+                  ) : null}
+                </span>
+                <span className="min-w-0 flex-1 text-sm leading-5 line-clamp-2">{item.label}</span>
+              </div>
+            ))}
+          </ThreadContextCollapsibleSection>
         ) : null}
 
         {hasGitContext ? (
-          <>
+          <ThreadContextCollapsibleSection
+            title="Environment"
+            collapsed={environmentCollapsed}
+            onToggle={toggleEnvironmentCollapsed}
+            contentClassName="space-y-1"
+            action={showPinWithEnvironment ? pinControl : undefined}
+          >
             <button
               type="button"
               className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left transition-colors hover:bg-muted/60"
@@ -8072,75 +8336,84 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
               <span className="min-w-0 flex-1 text-foreground/88">Git actions</span>
               <GitActionsControl gitCwd={gitCwd} activeThreadId={activeThreadId} />
             </div>
-
-            <Separator className="my-2 bg-border/60" />
-          </>
+          </ThreadContextCollapsibleSection>
         ) : null}
 
-        <ThreadContextCollapsibleSection
-          title="Artifacts"
-          count={artifacts.length}
-          collapsed={artifactsCollapsed}
-          emptyLabel="No artifacts yet"
-          onToggle={toggleArtifactsCollapsed}
-        >
-          {artifacts.map((artifact) => (
-            <button
-              type="button"
-              key={`${artifact.kind}:${artifact.path}`}
-              className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left transition-colors hover:bg-muted/45"
-              title={artifact.path}
-              onClick={() =>
-                isBrowserPreviewArtifactPath(artifact.path)
-                  ? onOpenBrowserPreview(artifact.path, {
-                      cwd: artifact.cwd ?? workspaceCwd ?? undefined,
-                      displayName: artifact.label,
-                    })
-                  : onOpenFilePath(artifact.path, {
-                      cwd: artifact.cwd ?? workspaceCwd ?? undefined,
-                      displayName: artifact.label,
-                    })
-              }
-            >
-              {extensionOf(artifact.path) === "png" ||
-              extensionOf(artifact.path) === "jpg" ||
-              extensionOf(artifact.path) === "jpeg" ||
-              extensionOf(artifact.path) === "webp" ||
-              extensionOf(artifact.path) === "gif" ? (
-                <ImageIcon className="size-4 shrink-0 text-muted-foreground" />
-              ) : (
-                <FilesIcon className="size-4 shrink-0 text-muted-foreground" />
-              )}
-              <span className="min-w-0 flex-1 truncate text-foreground/88">{artifact.label}</span>
-            </button>
-          ))}
-        </ThreadContextCollapsibleSection>
+        {hasArtifacts ? (
+          <ThreadContextCollapsibleSection
+            title="Artifacts"
+            count={artifacts.length}
+            collapsed={artifactsCollapsed}
+            onToggle={toggleArtifactsCollapsed}
+            action={showPinWithArtifacts ? pinControl : undefined}
+          >
+            {displayedArtifacts.map((artifact) => (
+              <button
+                type="button"
+                key={`${artifact.kind}:${artifact.path}`}
+                className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left transition-colors hover:bg-muted/45"
+                title={artifact.path}
+                onClick={() =>
+                  isBrowserPreviewArtifactPath(artifact.path)
+                    ? onOpenBrowserPreview(artifact.path, {
+                        cwd: artifact.cwd ?? workspaceCwd ?? undefined,
+                        displayName: artifact.label,
+                      })
+                    : onOpenFilePath(artifact.path, {
+                        cwd: artifact.cwd ?? workspaceCwd ?? undefined,
+                        displayName: artifact.label,
+                      })
+                }
+              >
+                {extensionOf(artifact.path) === "png" ||
+                extensionOf(artifact.path) === "jpg" ||
+                extensionOf(artifact.path) === "jpeg" ||
+                extensionOf(artifact.path) === "webp" ||
+                extensionOf(artifact.path) === "gif" ? (
+                  <ImageIcon className="size-4 shrink-0 text-muted-foreground" />
+                ) : (
+                  <FilesIcon className="size-4 shrink-0 text-muted-foreground" />
+                )}
+                <span className="min-w-0 flex-1 truncate text-foreground/88">{artifact.label}</span>
+              </button>
+            ))}
+            {remainingArtifactCount > 0 ? (
+              <button
+                type="button"
+                className="flex h-8 w-full items-center justify-center rounded-md px-2 text-xs font-medium text-muted-foreground/75 transition-colors hover:bg-muted/45 hover:text-foreground/82"
+                onClick={showMoreArtifacts}
+              >
+                Show {showMoreArtifactCount} more
+              </button>
+            ) : null}
+          </ThreadContextCollapsibleSection>
+        ) : null}
 
-        <Separator className="my-2 bg-border/60" />
-
-        <ThreadContextCollapsibleSection
-          title="Sources"
-          count={sources.length}
-          collapsed={sourcesCollapsed}
-          emptyLabel="No sources yet"
-          onToggle={toggleSourcesCollapsed}
-        >
-          {sources.map((source) => (
-            <div
-              key={source.id}
-              className="flex items-center gap-2 rounded-md px-1.5 py-1.5 text-foreground/72"
-            >
-              {source.icon === "web" ? (
-                <GlobeIcon className="size-4 shrink-0 text-muted-foreground" />
-              ) : source.icon === "browser" ? (
-                <MousePointer2Icon className="size-4 shrink-0 text-muted-foreground" />
-              ) : (
-                <FilesIcon className="size-4 shrink-0 text-muted-foreground" />
-              )}
-              <span className="min-w-0 flex-1 truncate">{source.label}</span>
-            </div>
-          ))}
-        </ThreadContextCollapsibleSection>
+        {hasSources ? (
+          <ThreadContextCollapsibleSection
+            title="Sources"
+            count={sources.length}
+            collapsed={sourcesCollapsed}
+            onToggle={toggleSourcesCollapsed}
+            action={showPinWithSources ? pinControl : undefined}
+          >
+            {sources.map((source) => (
+              <div
+                key={source.id}
+                className="flex items-center gap-2 rounded-md px-1.5 py-1.5 text-foreground/72"
+              >
+                {source.icon === "web" ? (
+                  <GlobeIcon className="size-4 shrink-0 text-muted-foreground" />
+                ) : source.icon === "browser" ? (
+                  <MousePointer2Icon className="size-4 shrink-0 text-muted-foreground" />
+                ) : (
+                  <FilesIcon className="size-4 shrink-0 text-muted-foreground" />
+                )}
+                <span className="min-w-0 flex-1 truncate">{source.label}</span>
+              </div>
+            ))}
+          </ThreadContextCollapsibleSection>
+        ) : null}
       </div>
     </aside>
   );

@@ -199,7 +199,7 @@ function ProviderGlyph(props: { provider: ProviderKind; className?: string }) {
   const ProviderIcon = PROVIDER_ICON_BY_PROVIDER[props.provider];
   return (
     <ProviderIcon
-      className={cn("size-3 shrink-0 text-muted-foreground/70", props.className)}
+      className={cn("size-3.5 shrink-0 text-muted-foreground/74", props.className)}
       aria-label={`${props.provider} provider`}
     />
   );
@@ -233,12 +233,12 @@ function HandoffProviderGlyph(props: {
   targetProvider: ProviderKind;
 }) {
   return (
-    <span className="relative inline-flex h-4 w-5 shrink-0 items-center">
-      <span className="-ml-0.5 inline-flex size-3 items-center justify-center rounded-full border border-background bg-background shadow-xs">
-        <ProviderGlyph provider={props.sourceProvider} className="size-2.5" />
+    <span className="relative inline-flex h-[18px] w-6 shrink-0 items-center">
+      <span className="-ml-0.5 inline-flex size-3.5 items-center justify-center rounded-full border border-background bg-background shadow-xs">
+        <ProviderGlyph provider={props.sourceProvider} className="size-3" />
       </span>
-      <span className="-ml-1 inline-flex size-3 items-center justify-center rounded-full border border-background bg-background shadow-xs">
-        <ProviderGlyph provider={props.targetProvider} className="size-2.5" />
+      <span className="-ml-1 inline-flex size-3.5 items-center justify-center rounded-full border border-background bg-background shadow-xs">
+        <ProviderGlyph provider={props.targetProvider} className="size-3" />
       </span>
     </span>
   );
@@ -439,12 +439,18 @@ function SidebarSettingsPopover({
     <Popover onOpenChange={onOpenChange} open={open}>
       <PopoverTrigger
         className={cn(
-          "flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground transition-colors duration-150",
+          "relative flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors duration-150",
           pathname === "/settings"
-            ? "bg-accent text-foreground"
-            : "hover:bg-accent/60 hover:text-foreground",
+            ? "bg-accent/62 text-foreground"
+            : "hover:bg-accent/45 hover:text-foreground",
         )}
       >
+        {pathname === "/settings" ? (
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute left-1 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-foreground/35"
+          />
+        ) : null}
         <SettingsIcon className="size-4 shrink-0" />
         <span>Settings</span>
       </PopoverTrigger>
@@ -841,6 +847,19 @@ const PRIMARY_NAV_ITEMS: Array<{
   },
 ];
 
+const SIDEBAR_HEADER_ACTION_CLASS =
+  "inline-flex size-6 cursor-pointer items-center justify-center rounded-md text-muted-foreground/58 transition-colors duration-150 hover:bg-accent/55 hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring";
+
+const SIDEBAR_SECTION_TOGGLE_CLASS =
+  "flex min-w-0 items-center gap-1.5 rounded-md text-left transition-colors hover:text-foreground";
+
+const SIDEBAR_SUBSECTION_HEADING_CLASS =
+  "px-2.5 pb-2 pt-1 text-[11px] font-medium uppercase tracking-[0.12em] text-muted-foreground/54";
+
+const PROJECT_THREAD_RAIL_TOP_PX = 4;
+const PROJECT_THREAD_RAIL_ROW_STEP_PX = 34;
+const PROJECT_THREAD_RAIL_SELECTED_ROW_CENTER_PX = 16;
+
 function SidebarSectionHeading({
   children,
   actions,
@@ -849,9 +868,13 @@ function SidebarSectionHeading({
   actions?: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center gap-2 px-2.5 pb-3 text-[13px] text-muted-foreground/80">
+    <div className="flex items-center gap-2 px-2.5 pb-2 text-[11px] font-medium uppercase tracking-[0.12em] text-muted-foreground/58">
       <span className="flex-1">{children}</span>
-      {actions ? <div className="flex items-center gap-1">{actions}</div> : null}
+      {actions ? (
+        <div className="-mr-1 flex items-center gap-0.5 rounded-lg bg-background/25 p-0.5 ring-1 ring-border/30">
+          {actions}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -910,8 +933,7 @@ export default function Sidebar() {
   const removeWorktreeMutation = useMutation(gitRemoveWorktreeMutationOptions({ queryClient }));
   const [settingsPopoverOpen, setSettingsPopoverOpen] = useState(false);
   const [searchPaletteOpen, setSearchPaletteOpen] = useState(false);
-  const [searchPaletteMode, setSearchPaletteMode] =
-    useState<SidebarSearchPaletteMode>("search");
+  const [searchPaletteMode, setSearchPaletteMode] = useState<SidebarSearchPaletteMode>("search");
   const [isAddingProject, setIsAddingProject] = useState(false);
   const [projectsSectionExpanded, setProjectsSectionExpanded] = useState(true);
   const [chatsSectionExpanded, setChatsSectionExpanded] = useState(true);
@@ -1176,7 +1198,8 @@ export default function Sidebar() {
     [chatWorkspaceRoot, homeDirectory, projects],
   );
   const workspaceProjects = useMemo(
-    () => projects.filter((project) => !isChatsProject(project, chatWorkspaceRoot ?? homeDirectory)),
+    () =>
+      projects.filter((project) => !isChatsProject(project, chatWorkspaceRoot ?? homeDirectory)),
     [chatWorkspaceRoot, homeDirectory, projects],
   );
   const projectById = useMemo(
@@ -2657,7 +2680,7 @@ export default function Sidebar() {
       const secondaryMetaClass = isActive ? "text-foreground/65" : "text-muted-foreground/45";
       const RowWrapper =
         options?.variant === "flat" && depth === 0 ? SidebarMenuItem : SidebarMenuSubItem;
-      const leftPaddingPx = 32 + depth * 14;
+      const leftPaddingPx = 48 + depth * 14;
 
       return (
         <Fragment key={thread.id}>
@@ -2695,7 +2718,7 @@ export default function Sidebar() {
             {threadStatus ? (
               <span
                 className={cn(
-                  "pointer-events-none absolute left-3 top-1/2 z-10 h-1.5 w-1.5 -translate-y-1/2 rounded-full transition-opacity",
+                  "pointer-events-none absolute left-[9px] top-1/2 z-10 h-1.5 w-1.5 -translate-y-1/2 rounded-full transition-opacity",
                   threadStatus.dotClass,
                   threadStatus.pulse ? "animate-pulse" : "",
                   thread.isPinned
@@ -2710,10 +2733,10 @@ export default function Sidebar() {
               isActive={isActive}
               data-testid={`sidebar-thread-${thread.id}`}
               className={cn(
-                "h-8 w-full translate-x-0 cursor-pointer justify-start rounded-lg pr-2 text-left text-[13px] hover:bg-accent/55 hover:text-foreground",
+                "h-8 w-full translate-x-0 cursor-pointer justify-start rounded-lg pr-2 text-left text-[13px] transition-colors duration-150 hover:bg-accent/42 hover:text-foreground",
                 isActive
-                  ? "bg-accent/62 text-foreground/90 hover:bg-accent/72"
-                  : "text-foreground/78",
+                  ? "bg-accent/58 text-foreground/92 hover:bg-accent/68"
+                  : "text-foreground/76",
               )}
               style={{ paddingLeft: `${leftPaddingPx}px` }}
               onClick={() => {
@@ -2741,7 +2764,7 @@ export default function Sidebar() {
                 });
               }}
             >
-              <div className="flex min-w-0 flex-1 items-center gap-1.5">
+              <div className="flex min-w-0 flex-1 items-center gap-2">
                 {hasChildThreads ? (
                   <button
                     type="button"
@@ -3003,6 +3026,7 @@ export default function Sidebar() {
       const activeProjectThread = routeThreadId
         ? (projectThreads.find((thread) => thread.id === routeThreadId) ?? null)
         : null;
+      const isActiveProject = activeProjectThread !== null;
       const childThreadsByParentId = new Map<ThreadId, Thread[]>();
       const topLevelThreads: Thread[] = [];
       const visibleThreadIds = new Set(visibleThreads.map((thread) => thread.id));
@@ -3026,6 +3050,27 @@ export default function Sidebar() {
           ),
         ),
       );
+      const shouldShowProjectThreadRail = renderedThreads.length > 0 || hasHiddenThreads;
+      const renderedThreadRowsForRail: Thread[] = [];
+      const appendRenderedThreadRowsForRail = (rows: readonly Thread[]) => {
+        for (const row of rows) {
+          renderedThreadRowsForRail.push(row);
+          if (!expandedSubagentParentIds.has(row.id)) {
+            continue;
+          }
+          appendRenderedThreadRowsForRail(childThreadsByParentId.get(row.id) ?? []);
+        }
+      };
+      appendRenderedThreadRowsForRail(renderedThreads);
+      const selectedThreadRailIndex = routeThreadId
+        ? renderedThreadRowsForRail.findIndex((thread) => thread.id === routeThreadId)
+        : -1;
+      const selectedThreadRailHeight =
+        selectedThreadRailIndex >= 0
+          ? PROJECT_THREAD_RAIL_TOP_PX +
+            selectedThreadRailIndex * PROJECT_THREAD_RAIL_ROW_STEP_PX +
+            PROJECT_THREAD_RAIL_SELECTED_ROW_CENTER_PX
+          : 0;
 
       return (
         <Collapsible
@@ -3040,7 +3085,7 @@ export default function Sidebar() {
           <SidebarMenuItem className="w-full">
             <div
               className={cn(
-                "relative rounded-md",
+                "relative rounded-lg",
                 draggedProjectId === project.id && "bg-accent/55 opacity-70",
               )}
             >
@@ -3054,7 +3099,15 @@ export default function Sidebar() {
                 render={
                   <SidebarMenuButton
                     size="sm"
-                    className="h-7.5 gap-2 rounded-lg px-2 py-0.5 text-left text-[13px] font-normal text-foreground/84 hover:bg-accent/55"
+                    isActive={isActiveProject}
+                    className={cn(
+                      "h-8 cursor-pointer gap-2 rounded-lg px-2.5 py-0.5 text-left text-[13px] font-normal transition-colors duration-150 hover:bg-accent/45",
+                      isActiveProject
+                        ? "relative bg-accent/54 text-foreground hover:bg-accent/64"
+                        : project.expanded
+                          ? "bg-background/35 text-foreground/88"
+                          : "text-foreground/76",
+                    )}
                     data-testid={`sidebar-project-${project.id}`}
                     draggable={shouldShowProjectGroups}
                     aria-label={project.name}
@@ -3079,7 +3132,18 @@ export default function Sidebar() {
                   handleProjectDrop(project.id);
                 }}
               >
-                <span className="relative inline-flex size-4 shrink-0 items-center justify-center text-muted-foreground/72">
+                {isActiveProject ? (
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute left-1 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-foreground/35"
+                  />
+                ) : null}
+                <span
+                  className={cn(
+                    "relative inline-flex size-4 shrink-0 items-center justify-center",
+                    isActiveProject ? "text-foreground/78" : "text-muted-foreground/68",
+                  )}
+                >
                   <ProjectSidebarIcon cwd={project.cwd} expanded={project.expanded} />
                   {projectStatus ? (
                     <span
@@ -3093,7 +3157,7 @@ export default function Sidebar() {
                     />
                   ) : null}
                 </span>
-                <span className="flex-1 truncate font-system-ui text-[13px] font-normal text-foreground/84">
+                <span className="flex-1 truncate font-system-ui text-[13px] font-normal text-current">
                   {project.name}
                 </span>
               </CollapsibleTrigger>
@@ -3101,7 +3165,7 @@ export default function Sidebar() {
                 showOnHover
                 aria-label={`New disposable thread in ${project.name}`}
                 title={`New disposable thread in ${project.name}`}
-                className="right-7 top-1 size-5 rounded-md p-0 text-muted-foreground/60 hover:bg-white/8 hover:text-foreground"
+                className="right-7.5 top-1.5 size-5 rounded-md p-0 text-muted-foreground/58 hover:bg-accent/60 hover:text-foreground"
                 onClick={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
@@ -3115,7 +3179,7 @@ export default function Sidebar() {
                 aria-label={`New thread in ${project.name}`}
                 title={`New thread in ${project.name}`}
                 data-testid={`sidebar-project-new-thread-${project.id}`}
-                className="right-1 top-1 size-5 rounded-md p-0 text-muted-foreground/60 hover:bg-white/8 hover:text-foreground"
+                className="right-1.5 top-1.5 size-5 rounded-md p-0 text-muted-foreground/58 hover:bg-accent/60 hover:text-foreground"
                 onClick={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
@@ -3126,49 +3190,64 @@ export default function Sidebar() {
               </SidebarMenuAction>
             </div>
             <CollapsibleContent>
-              <SidebarMenuSub className="mx-0 my-0 w-full translate-x-0 gap-0.5 border-l-0 px-0 py-0">
-                {renderedThreads.length > 0 ? (
-                  renderedThreads.map((thread) =>
-                    renderThreadRow(thread, { childThreadsByParentId }),
-                  )
-                ) : (
-                  <SidebarMenuSubItem className="w-full">
-                    <div className="px-2.5 py-1.5 text-[11px] text-muted-foreground/55">
-                      No threads yet.
-                    </div>
-                  </SidebarMenuSubItem>
-                )}
-                {hasHiddenThreads && !isThreadListExpanded ? (
-                  <SidebarMenuSubItem className="w-full">
-                    <SidebarMenuSubButton
-                      render={<button type="button" />}
-                      size="sm"
-                      data-thread-selection-safe
-                      className="h-7 w-full translate-x-0 justify-start rounded-lg pr-2 pl-8 text-left text-[13px] text-muted-foreground/72 hover:bg-accent/55 hover:text-foreground"
-                      onClick={() => {
-                        expandThreadListForProject(project.id);
-                      }}
-                    >
-                      <span>Show more</span>
-                    </SidebarMenuSubButton>
-                  </SidebarMenuSubItem>
+              <div className="relative">
+                {shouldShowProjectThreadRail ? (
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute bottom-1 left-[6px] top-1 z-10 w-0.5 rounded-full bg-muted-foreground/26"
+                  />
                 ) : null}
-                {hasHiddenThreads && isThreadListExpanded ? (
-                  <SidebarMenuSubItem className="w-full">
-                    <SidebarMenuSubButton
-                      render={<button type="button" />}
-                      size="sm"
-                      data-thread-selection-safe
-                      className="h-7 w-full translate-x-0 justify-start rounded-lg pr-2 pl-8 text-left text-[13px] text-muted-foreground/72 hover:bg-accent/55 hover:text-foreground"
-                      onClick={() => {
-                        collapseThreadListForProject(project.id);
-                      }}
-                    >
-                      <span>Show less</span>
-                    </SidebarMenuSubButton>
-                  </SidebarMenuSubItem>
+                {selectedThreadRailHeight > 0 ? (
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute left-[6px] top-1 z-10 w-0.5 rounded-full bg-foreground/48"
+                    style={{ height: `${selectedThreadRailHeight}px` }}
+                  />
                 ) : null}
-              </SidebarMenuSub>
+                <SidebarMenuSub className="relative mx-0 my-0 w-full translate-x-0 gap-0.5 border-l-0 px-0 py-0">
+                  {renderedThreads.length > 0 ? (
+                    renderedThreads.map((thread) =>
+                      renderThreadRow(thread, { childThreadsByParentId }),
+                    )
+                  ) : (
+                    <SidebarMenuSubItem className="w-full">
+                      <div className="px-2.5 py-1.5 text-[11px] text-muted-foreground/55">
+                        No threads yet.
+                      </div>
+                    </SidebarMenuSubItem>
+                  )}
+                  {hasHiddenThreads && !isThreadListExpanded ? (
+                    <SidebarMenuSubItem className="w-full">
+                      <SidebarMenuSubButton
+                        render={<button type="button" />}
+                        size="sm"
+                        data-thread-selection-safe
+                        className="h-7 w-full translate-x-0 justify-start rounded-lg pr-2 pl-12 text-left text-[13px] text-muted-foreground/72 hover:bg-accent/55 hover:text-foreground"
+                        onClick={() => {
+                          expandThreadListForProject(project.id);
+                        }}
+                      >
+                        <span>Show more</span>
+                      </SidebarMenuSubButton>
+                    </SidebarMenuSubItem>
+                  ) : null}
+                  {hasHiddenThreads && isThreadListExpanded ? (
+                    <SidebarMenuSubItem className="w-full">
+                      <SidebarMenuSubButton
+                        render={<button type="button" />}
+                        size="sm"
+                        data-thread-selection-safe
+                        className="h-7 w-full translate-x-0 justify-start rounded-lg pr-2 pl-12 text-left text-[13px] text-muted-foreground/72 hover:bg-accent/55 hover:text-foreground"
+                        onClick={() => {
+                          collapseThreadListForProject(project.id);
+                        }}
+                      >
+                        <span>Show less</span>
+                      </SidebarMenuSubButton>
+                    </SidebarMenuSubItem>
+                  ) : null}
+                </SidebarMenuSub>
+              </div>
             </CollapsibleContent>
           </SidebarMenuItem>
         </Collapsible>
@@ -3180,6 +3259,7 @@ export default function Sidebar() {
       draggedProjectId,
       dropTargetPosition,
       dropTargetProjectId,
+      expandedSubagentParentIds,
       expandedThreadListsByProject,
       expandThreadListForProject,
       handleProjectContextMenu,
@@ -3219,7 +3299,7 @@ export default function Sidebar() {
         pendingUserInputByThreadId.get(thread.id) === true,
       );
       const statusDotClass = threadStatus?.dotClass ?? "bg-transparent";
-      const leftPaddingPx = 30 + depth * 14;
+      const leftPaddingPx = 48 + depth * 14;
 
       return (
         <Fragment key={`pinned:${thread.id}`}>
@@ -3257,7 +3337,7 @@ export default function Sidebar() {
             {threadStatus ? (
               <span
                 className={cn(
-                  "pointer-events-none absolute left-3 top-1/2 z-10 h-1.5 w-1.5 -translate-y-1/2 rounded-full transition-opacity",
+                  "pointer-events-none absolute left-[9px] top-1/2 z-10 h-1.5 w-1.5 -translate-y-1/2 rounded-full transition-opacity",
                   statusDotClass,
                   threadStatus.pulse ? "animate-pulse" : "",
                   "opacity-100 group-hover/pinned-thread:opacity-0 group-focus-within/pinned-thread:opacity-0",
@@ -3270,10 +3350,10 @@ export default function Sidebar() {
               isActive={isActive}
               data-testid={`sidebar-pinned-thread-${thread.id}`}
               className={cn(
-                "h-8 gap-2 rounded-lg pr-2 text-left text-[13px] hover:bg-accent/55 hover:text-foreground",
+                "h-8 cursor-pointer gap-2 rounded-lg pr-2 text-left text-[13px] transition-colors duration-150 hover:bg-accent/42 hover:text-foreground",
                 isActive
-                  ? "bg-accent/62 text-foreground/90 hover:bg-accent/72"
-                  : "text-foreground/78",
+                  ? "bg-accent/58 text-foreground/92 hover:bg-accent/68"
+                  : "text-foreground/76",
               )}
               style={{ paddingLeft: `${leftPaddingPx}px` }}
               onClick={() => {
@@ -3295,7 +3375,7 @@ export default function Sidebar() {
                 });
               }}
             >
-              <div className="flex min-w-0 flex-1 items-center gap-2.5">
+              <div className="flex min-w-0 flex-1 items-center gap-2">
                 {hasChildThreads ? (
                   <button
                     type="button"
@@ -3469,45 +3549,63 @@ export default function Sidebar() {
         data-sidebar="content"
         data-slot="sidebar-content"
       >
-        <SidebarGroup className="shrink-0 px-3 pb-2 pt-0">
+        <SidebarGroup className="shrink-0 px-3 pb-2 pt-2">
           <SidebarMenu className="gap-1.5">
-            {PRIMARY_NAV_ITEMS.map(({ icon: Icon, label, action, testId }) => (
-              <SidebarMenuItem key={label}>
-                <SidebarMenuButton
-                  render={<button type="button" data-testid={testId} />}
-                  size="default"
-                  isActive={
-                    (action === "orchestrate" && pathname === "/orchestrate") ||
-                    (action === "plugins" && pathname === "/plugins") ||
-                    (action === "skills" && pathname === "/skills")
-                  }
-                  className="h-9 gap-3 rounded-md px-3 text-[14px] font-normal text-foreground/85 hover:bg-accent/70 data-[active=true]:bg-accent/70 data-[active=true]:text-foreground"
-                  onClick={() => {
-                    if (action === "placeholder") {
-                      handlePlaceholderNavClick(label);
-                      return;
+            {PRIMARY_NAV_ITEMS.map(({ icon: Icon, label, action, testId }) => {
+              const isNewThreadAction = action === "new-thread";
+              const isActive =
+                (action === "orchestrate" && pathname === "/orchestrate") ||
+                (action === "plugins" && pathname === "/plugins") ||
+                (action === "skills" && pathname === "/skills");
+
+              return (
+                <SidebarMenuItem key={label}>
+                  <SidebarMenuButton
+                    render={<button type="button" data-testid={testId} />}
+                    size="default"
+                    isActive={isActive}
+                    className={cn(
+                      "h-9 cursor-pointer gap-2.5 rounded-lg px-3 text-[14px] font-normal transition-colors duration-150",
+                      isNewThreadAction
+                        ? "border border-border/35 bg-foreground/[0.055] text-foreground hover:bg-foreground/[0.085]"
+                        : isActive
+                          ? "bg-accent/62 text-foreground hover:bg-accent/72"
+                          : "text-muted-foreground/82 hover:bg-accent/45 hover:text-foreground",
+                    )}
+                    onClick={() => {
+                      if (action === "placeholder") {
+                        handlePlaceholderNavClick(label);
+                        return;
+                      }
+                      if (action === "orchestrate") {
+                        handleOpenOrchestrate();
+                        return;
+                      }
+                      if (action === "plugins" || action === "skills") {
+                        void navigate({ to: action === "plugins" ? "/plugins" : "/skills" });
+                        return;
+                      }
+                      handlePrimaryNewThread();
+                    }}
+                    title={
+                      label === "New chat" && newThreadShortcutLabel
+                        ? `New chat (${newThreadShortcutLabel})`
+                        : label
                     }
-                    if (action === "orchestrate") {
-                      handleOpenOrchestrate();
-                      return;
-                    }
-                    if (action === "plugins" || action === "skills") {
-                      void navigate({ to: action === "plugins" ? "/plugins" : "/skills" });
-                      return;
-                    }
-                    handlePrimaryNewThread();
-                  }}
-                  title={
-                    label === "New chat" && newThreadShortcutLabel
-                      ? `New chat (${newThreadShortcutLabel})`
-                      : label
-                  }
-                >
-                  <Icon className="size-4 shrink-0 text-muted-foreground/80" />
-                  <span>{label}</span>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
-            ))}
+                  >
+                    <Icon
+                      className={cn(
+                        "size-4 shrink-0",
+                        isNewThreadAction || isActive
+                          ? "text-foreground/78"
+                          : "text-muted-foreground/62",
+                      )}
+                    />
+                    <span>{label}</span>
+                  </SidebarMenuButton>
+                </SidebarMenuItem>
+              );
+            })}
           </SidebarMenu>
         </SidebarGroup>
 
@@ -3520,7 +3618,7 @@ export default function Sidebar() {
                     render={
                       <button
                         type="button"
-                        className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground/70 transition-colors duration-150 hover:bg-accent hover:text-foreground"
+                        className={SIDEBAR_HEADER_ACTION_CLASS}
                         aria-label="Search chats"
                         data-testid="sidebar-search-chats"
                         onClick={() => {
@@ -3541,7 +3639,7 @@ export default function Sidebar() {
                     render={
                       <button
                         type="button"
-                        className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground/70 transition-colors duration-150 hover:bg-accent hover:text-foreground"
+                        className={SIDEBAR_HEADER_ACTION_CLASS}
                         aria-label="Add project"
                         data-testid="sidebar-add-project"
                         onClick={() => {
@@ -3568,7 +3666,10 @@ export default function Sidebar() {
                                 : "Collapse all projects"
                               : "Expand all projects"
                           }
-                          className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground/70 transition-colors duration-150 hover:bg-accent hover:text-foreground disabled:cursor-default disabled:opacity-45"
+                          className={cn(
+                            SIDEBAR_HEADER_ACTION_CLASS,
+                            "disabled:cursor-default disabled:opacity-45",
+                          )}
                           onClick={handleToggleProjects}
                         >
                           {allProjectsExpanded ? (
@@ -3597,7 +3698,7 @@ export default function Sidebar() {
 
                 <Menu>
                   <MenuTrigger
-                    className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground/70 transition-colors duration-150 hover:bg-accent hover:text-foreground"
+                    className={SIDEBAR_HEADER_ACTION_CLASS}
                     aria-label="Filter threads"
                     data-testid="sidebar-filter-threads"
                   >
@@ -3696,7 +3797,7 @@ export default function Sidebar() {
           >
             <button
               type="button"
-              className="flex min-w-0 items-center gap-1.5 rounded-md text-left transition-colors hover:text-foreground"
+              className={SIDEBAR_SECTION_TOGGLE_CLASS}
               aria-expanded={projectsSectionExpanded}
               aria-label={projectsSectionExpanded ? "Collapse projects" : "Expand projects"}
               onClick={() => {
@@ -3719,9 +3820,7 @@ export default function Sidebar() {
             <div className="flex min-h-full flex-col pb-1">
               {pinnedThreadHierarchy.topLevelThreads.length > 0 ? (
                 <>
-                  <div className="px-2.5 pb-2 pt-1 text-[13px] font-medium text-muted-foreground/72">
-                    Pinned
-                  </div>
+                  <div className={SIDEBAR_SUBSECTION_HEADING_CLASS}>Pinned</div>
                   <SidebarMenu className="gap-1 pb-4">
                     {pinnedThreadHierarchy.topLevelThreads.map((thread) =>
                       renderPinnedThreadRow(thread, {
@@ -3741,10 +3840,12 @@ export default function Sidebar() {
                       )}
                     </SidebarMenu>
                   ) : null}
-                  <div className="flex items-center gap-2 px-2.5 pb-2 pt-5 text-[13px] font-medium text-muted-foreground/72">
+                  <div
+                    className={cn(SIDEBAR_SUBSECTION_HEADING_CLASS, "flex items-center gap-2 pt-5")}
+                  >
                     <button
                       type="button"
-                      className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md text-left transition-colors hover:text-foreground"
+                      className={SIDEBAR_SECTION_TOGGLE_CLASS}
                       aria-expanded={chatsSectionExpanded}
                       aria-label={chatsSectionExpanded ? "Collapse chats" : "Expand chats"}
                       onClick={() => {
@@ -3758,10 +3859,10 @@ export default function Sidebar() {
                         <ChevronRightIcon className="size-3.5 shrink-0" />
                       )}
                     </button>
-                    <div className="flex items-center gap-1">
+                    <div className="-mr-1 flex items-center gap-0.5 rounded-lg bg-background/25 p-0.5 ring-1 ring-border/30">
                       <Menu>
                         <MenuTrigger
-                          className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground/70 transition-colors duration-150 hover:bg-accent hover:text-foreground"
+                          className={SIDEBAR_HEADER_ACTION_CLASS}
                           aria-label="Sort chats"
                           data-testid="sidebar-sort-chats"
                         >
@@ -3833,7 +3934,7 @@ export default function Sidebar() {
                           render={
                             <button
                               type="button"
-                              className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground/70 transition-colors duration-150 hover:bg-accent hover:text-foreground"
+                              className={SIDEBAR_HEADER_ACTION_CLASS}
                               aria-label="New chat"
                               data-testid="sidebar-chats-new-chat"
                               onClick={handlePrimaryNewThread}
@@ -3912,7 +4013,7 @@ export default function Sidebar() {
         </SidebarGroup>
       </div>
 
-      <SidebarFooter className="gap-2 p-3">
+      <SidebarFooter className="gap-2 border-t border-border/35 bg-background/20 p-3">
         <SidebarSettingsPopover
           pathname={pathname}
           accountSummary={codexAccountSummary}
