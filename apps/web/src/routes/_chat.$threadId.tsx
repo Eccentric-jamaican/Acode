@@ -989,10 +989,14 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
       params: { threadId: nextThreadId },
       replace: true,
       search: () => {
-        if (focusedPanelState.lastOpenPanel) {
-          return { panel: focusedPanelState.lastOpenPanel };
+        const filesSearch = focusedPanelState.filesOpen ? { files: "1" as const } : {};
+        if (focusedPanelState.panel === "browser") {
+          return { ...filesSearch, panel: "browser" as const };
         }
-        return {};
+        if (focusedPanelState.panel === "diff") {
+          return { ...filesSearch, panel: "diff" as const, diff: "1" as const };
+        }
+        return filesSearch;
       },
     });
   }, [activeSplitView, focusedThreadId, navigate, removeSplitView]);
@@ -1066,8 +1070,19 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
 
     setFocusedPane(activeSplitView.id, pane);
     if (threadId !== currentPaneThreadId) {
+      const currentPaneProjectId =
+        currentPaneThreadId !== null
+          ? (threads.find((thread) => thread.id === currentPaneThreadId)?.projectId ?? null)
+          : null;
+      const nextPaneProjectId = threads.find((thread) => thread.id === threadId)?.projectId ?? null;
+      const projectChanged =
+        currentPaneProjectId !== null &&
+        nextPaneProjectId !== null &&
+        currentPaneProjectId !== nextPaneProjectId;
+      const shouldResetPanelState = projectChanged || currentPaneThreadId === null;
       replacePaneThread(activeSplitView.id, pane, threadId);
       setPanePanelState(activeSplitView.id, pane, {
+        ...(shouldResetPanelState ? { panel: null, filesOpen: false } : {}),
         diffTurnId: null,
         diffFilePath: null,
       });
@@ -1218,6 +1233,7 @@ function SingleChatSurface(props: {
     cwd: string | null;
   };
   onSplitSurface?: () => void;
+  onBrowserPanelClosed?: () => void;
 }) {
   const navigate = useNavigate();
   const shouldUseDiffSheet = useMediaQuery(DIFF_INLINE_LAYOUT_MEDIA_QUERY);
@@ -1227,18 +1243,23 @@ function SingleChatSurface(props: {
   const [hasOpenedPanel, setHasOpenedPanel] = useState(panelOpen);
   const [lastOpenPanel, setLastOpenPanel] = useState<ChatRightPanel>(activePanel ?? "browser");
   const [viewerExpanded, setViewerExpanded] = useState(false);
+  const onBrowserPanelClosed = props.onBrowserPanelClosed;
+  const threadId = props.threadId;
 
   const closePanel = useCallback(() => {
+    if (activePanel === "browser") {
+      onBrowserPanelClosed?.();
+    }
     void navigate({
       to: "/$threadId",
-      params: { threadId: props.threadId },
+      params: { threadId },
       search: (previous) => {
         const rest = stripDiffSearchParams(previous);
         const { panel: _, ...withoutPanel } = rest as Record<string, unknown>;
         return withoutPanel;
       },
     });
-  }, [navigate, props.threadId]);
+  }, [activePanel, navigate, onBrowserPanelClosed, threadId]);
 
   const openPanel = useCallback(() => {
     void navigate({
@@ -1418,6 +1439,7 @@ function SingleChatSurface(props: {
 
 function ChatThreadRouteView() {
   const threadsHydrated = useStore((store) => store.threadsHydrated);
+  const hydrationStatus = useStore((store) => store.hydrationStatus);
   const hydrationError = useStore((store) => store.hydrationError);
   const navigate = useNavigate();
   const threadId = Route.useParams({
@@ -1436,6 +1458,7 @@ function ChatThreadRouteView() {
   });
   const projects = useStore((store) => store.projects);
   const threads = useStore((store) => store.threads);
+  const syncServerReadModel = useStore((store) => store.syncServerReadModel);
   const draftThreadsByThreadId = useComposerDraftStore((store) => store.draftThreadsByThreadId);
   const previousProjectIdRef = useRef<ProjectId | null>(null);
   const previousThreadIdRef = useRef<ThreadId | null>(null);
@@ -1457,6 +1480,22 @@ function ChatThreadRouteView() {
   const splitView = useSplitViewStore(selectSplitView(search.splitViewId ?? null));
   const removeThreadFromSplitViews = useSplitViewStore((store) => store.removeThreadFromSplitViews);
   const activeProjectId = threadBrowserContext.projectId;
+  const focusedSnapshotThreadIds = useMemo(() => {
+    const threadIds =
+      search.splitViewId && splitView
+        ? [threadId, splitView.leftThreadId, splitView.rightThreadId]
+        : [threadId];
+    return [...new Set(threadIds.filter((candidate): candidate is ThreadId => candidate !== null))];
+  }, [search.splitViewId, splitView, threadId]);
+  const focusedSnapshotServerThreadIds = useMemo(
+    () => focusedSnapshotThreadIds.filter((candidate) => threads.some((entry) => entry.id === candidate)),
+    [focusedSnapshotThreadIds, threads],
+  );
+  const focusedSnapshotPrimaryThreadId = focusedSnapshotServerThreadIds[0] ?? null;
+  const focusedSnapshotNeedsThreadDetails = focusedSnapshotServerThreadIds.some((candidate) => {
+    const thread = threads.find((entry) => entry.id === candidate);
+    return thread !== undefined && thread.latestTurn !== null && thread.messages.length === 0;
+  });
 
   const hasExplicitPanelSearchIntent = useMemo(() => {
     const params = new URLSearchParams(locationSearch);
@@ -1566,6 +1605,50 @@ function ChatThreadRouteView() {
   ]);
 
   useEffect(() => {
+    if (
+      !threadsHydrated ||
+      focusedSnapshotPrimaryThreadId === null ||
+      hydrationStatus !== "ready" ||
+      !focusedSnapshotNeedsThreadDetails
+    ) {
+      return;
+    }
+
+    const api = readNativeApi();
+    if (!api) {
+      return;
+    }
+
+    let disposed = false;
+    void api.orchestration
+      .getSnapshot({
+        mode: "focused",
+        threadId: focusedSnapshotPrimaryThreadId,
+        threadIds: focusedSnapshotServerThreadIds,
+      })
+      .then((snapshot) => {
+        if (!disposed) {
+          syncServerReadModel(snapshot, {
+            authoritativeThreadDetailIds: new Set(focusedSnapshotServerThreadIds),
+            preserveThreadDetails: true,
+          });
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      disposed = true;
+    };
+  }, [
+    focusedSnapshotNeedsThreadDetails,
+    focusedSnapshotPrimaryThreadId,
+    focusedSnapshotServerThreadIds,
+    hydrationStatus,
+    syncServerReadModel,
+    threadsHydrated,
+  ]);
+
+  useEffect(() => {
     const previousThreadId = previousThreadIdRef.current;
     previousThreadIdRef.current = threadId;
     const previousProjectId = previousProjectIdRef.current;
@@ -1638,6 +1721,9 @@ function ChatThreadRouteView() {
       panelMode={panelMode}
       filesOpen={filesOpen}
       threadBrowserContext={threadBrowserContext}
+      onBrowserPanelClosed={() => {
+        suppressBrowserReopenRef.current = true;
+      }}
     />
   );
 }

@@ -317,6 +317,93 @@ describe("store read model sync", () => {
     expect(repeated).toBe(hydrated);
   });
 
+  it("preserves loaded thread messages during lightweight snapshot sync", () => {
+    const initialState = makeState(makeThread());
+    const loadedThread = makeReadModelThread({
+      messages: [
+        {
+          id: MessageId.makeUnsafe("message-1"),
+          turnId: null,
+          role: "assistant",
+          text: "Loaded message body",
+          streaming: false,
+          createdAt: "2026-02-27T00:00:00.000Z",
+          updatedAt: "2026-02-27T00:00:00.000Z",
+          attachments: [],
+        },
+      ],
+    });
+    const hydrated = syncServerReadModel(initialState, makeReadModel(loadedThread));
+    const lightweightThread = makeReadModelThread({
+      title: "Updated title",
+      updatedAt: "2026-02-27T00:01:00.000Z",
+      messages: [],
+    });
+
+    const next = syncServerReadModel(hydrated, makeReadModel(lightweightThread), {
+      preserveThreadDetails: true,
+    });
+
+    expect(next.threads[0]?.title).toBe("Updated title");
+    expect(next.threads[0]?.messages).toBe(hydrated.threads[0]?.messages);
+    expect(next.threads[0]?.messages[0]?.text).toBe("Loaded message body");
+  });
+
+  it("preserves omitted thread details while accepting empty authoritative focused details", () => {
+    const initialState = makeState(makeThread());
+    const firstThread = makeReadModelThread({
+      id: ThreadId.makeUnsafe("thread-1"),
+      messages: [
+        {
+          id: MessageId.makeUnsafe("message-1"),
+          turnId: null,
+          role: "assistant",
+          text: "Keep this already loaded body",
+          streaming: false,
+          createdAt: "2026-02-27T00:00:00.000Z",
+          updatedAt: "2026-02-27T00:00:00.000Z",
+          attachments: [],
+        },
+      ],
+    });
+    const secondThread = makeReadModelThread({
+      id: ThreadId.makeUnsafe("thread-2"),
+      title: "Focused thread",
+      messages: [
+        {
+          id: MessageId.makeUnsafe("message-2"),
+          turnId: null,
+          role: "assistant",
+          text: "Replace this with the focused snapshot result",
+          streaming: false,
+          createdAt: "2026-02-27T00:00:01.000Z",
+          updatedAt: "2026-02-27T00:00:01.000Z",
+          attachments: [],
+        },
+      ],
+    });
+    const hydrated = syncServerReadModel(initialState, {
+      ...makeReadModel(firstThread),
+      threads: [firstThread, secondThread],
+    });
+    const focusedSnapshot = {
+      ...makeReadModel(firstThread),
+      threads: [
+        { ...firstThread, messages: [] },
+        { ...secondThread, messages: [] },
+      ],
+    } satisfies OrchestrationReadModel;
+
+    const next = syncServerReadModel(hydrated, focusedSnapshot, {
+      authoritativeThreadDetailIds: new Set([ThreadId.makeUnsafe("thread-2")]),
+      preserveThreadDetails: true,
+    });
+
+    expect(next.threads[0]?.messages).toBe(hydrated.threads[0]?.messages);
+    expect(next.threads[0]?.messages[0]?.text).toBe("Keep this already loaded body");
+    expect(next.threads[1]?.messages).toEqual([]);
+  });
+
   it("reuses unchanged threads and messages when another thread changes", () => {
     const initialState = makeState(makeThread());
     const firstThread = makeReadModelThread({

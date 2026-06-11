@@ -341,6 +341,7 @@ const SCRIPT_TERMINAL_ROWS = 30;
 const WORKTREE_BRANCH_PREFIX = "t3code";
 const HEADER_COMPACT_BREAKPOINT = 480;
 const DESKTOP_APP_RESOLUTION_TIMEOUT_MS = 2_500;
+const POINTER_SCROLL_INTENT_THRESHOLD_PX = 6;
 
 function isTerminalUserInputSubmitFailure(error: unknown): boolean {
   const message =
@@ -1807,6 +1808,7 @@ export default function ChatView({
   const shouldAutoScrollRef = useRef(true);
   const lastKnownScrollTopRef = useRef(0);
   const isPointerScrollActiveRef = useRef(false);
+  const pointerScrollStartYRef = useRef<number | null>(null);
   const lastTouchClientYRef = useRef<number | null>(null);
   const pendingUserScrollUpIntentRef = useRef(false);
   const pendingAutoScrollFrameRef = useRef<number | null>(null);
@@ -1947,6 +1949,12 @@ export default function ChatView({
       activeThread.session !== null),
   );
   const shouldShowNewThreadLanding = isLocalDraftThread && !hasThreadStarted;
+  const shouldShowThreadBodyLoading =
+    activeThread !== undefined &&
+    isServerThread &&
+    activeThread.latestTurn !== null &&
+    activeThread.messages.length === 0 &&
+    optimisticUserMessages.length === 0;
   const isPromptEmpty =
     prompt.trim().length === 0 &&
     selectedComposerExtensions.length === 0 &&
@@ -3500,9 +3508,11 @@ export default function ChatView({
   const scrollMessagesToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     const scrollContainer = messagesScrollRef.current;
     if (!scrollContainer) return;
+    const bottomScrollTop = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
     scrollContainer.scrollTo({ top: scrollContainer.scrollHeight, behavior });
-    lastKnownScrollTopRef.current = scrollContainer.scrollTop;
+    lastKnownScrollTopRef.current = bottomScrollTop;
     shouldAutoScrollRef.current = true;
+    pendingUserScrollUpIntentRef.current = false;
     setShowScrollToBottomPill(false);
   }, []);
   const cancelPendingStickToBottom = useCallback(() => {
@@ -3572,42 +3582,52 @@ export default function ChatView({
     if (!shouldAutoScrollRef.current && isNearBottom) {
       shouldAutoScrollRef.current = true;
       pendingUserScrollUpIntentRef.current = false;
-    } else if (shouldAutoScrollRef.current && pendingUserScrollUpIntentRef.current) {
-      const scrolledUp = currentScrollTop < lastKnownScrollTopRef.current - 1;
-      if (scrolledUp) {
-        shouldAutoScrollRef.current = false;
-      }
+    } else if (
+      shouldAutoScrollRef.current &&
+      !isNearBottom &&
+      (pendingUserScrollUpIntentRef.current || isPointerScrollActiveRef.current)
+    ) {
+      shouldAutoScrollRef.current = false;
       pendingUserScrollUpIntentRef.current = false;
-    } else if (shouldAutoScrollRef.current && isPointerScrollActiveRef.current) {
-      const scrolledUp = currentScrollTop < lastKnownScrollTopRef.current - 1;
-      if (scrolledUp) {
-        shouldAutoScrollRef.current = false;
-      }
+      cancelPendingStickToBottom();
     } else if (shouldAutoScrollRef.current && !isNearBottom) {
       // Catch-all for keyboard/assistive scroll interactions.
       const scrolledUp = currentScrollTop < lastKnownScrollTopRef.current - 1;
       if (scrolledUp) {
         shouldAutoScrollRef.current = false;
+        cancelPendingStickToBottom();
       }
     }
 
     lastKnownScrollTopRef.current = currentScrollTop;
     setShowScrollToBottomPill((current) => (current === !isNearBottom ? current : !isNearBottom));
+  }, [cancelPendingStickToBottom]);
+  const onMessagesWheel = useCallback(
+    (event: React.WheelEvent<HTMLDivElement>) => {
+      if (event.deltaY < 0) {
+        pendingUserScrollUpIntentRef.current = true;
+        cancelPendingStickToBottom();
+      }
+    },
+    [cancelPendingStickToBottom],
+  );
+  const clearPointerScrollIntent = useCallback(() => {
+    pointerScrollStartYRef.current = null;
+    isPointerScrollActiveRef.current = false;
   }, []);
-  const onMessagesWheel = useCallback((event: React.WheelEvent<HTMLDivElement>) => {
-    if (event.deltaY < 0) {
-      pendingUserScrollUpIntentRef.current = true;
+  const onMessagesPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    pointerScrollStartYRef.current = event.clientY;
+    isPointerScrollActiveRef.current = false;
+  }, []);
+  const onMessagesPointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const startY = pointerScrollStartYRef.current;
+    if (startY === null) return;
+    if (Math.abs(event.clientY - startY) >= POINTER_SCROLL_INTENT_THRESHOLD_PX) {
+      isPointerScrollActiveRef.current = true;
     }
   }, []);
-  const onMessagesPointerDown = useCallback((_event: React.PointerEvent<HTMLDivElement>) => {
-    isPointerScrollActiveRef.current = true;
-  }, []);
-  const onMessagesPointerUp = useCallback((_event: React.PointerEvent<HTMLDivElement>) => {
-    isPointerScrollActiveRef.current = false;
-  }, []);
-  const onMessagesPointerCancel = useCallback((_event: React.PointerEvent<HTMLDivElement>) => {
-    isPointerScrollActiveRef.current = false;
-  }, []);
+  const onMessagesPointerUp = clearPointerScrollIntent;
+  const onMessagesPointerCancel = clearPointerScrollIntent;
   const onMessagesTouchStart = useCallback((event: React.TouchEvent<HTMLDivElement>) => {
     const touch = event.touches[0];
     if (!touch) return;
@@ -5249,7 +5269,10 @@ export default function ChatView({
       )
       .then(() => api.orchestration.getSnapshot({ mode: "focused", threadId: nextThreadId }))
       .then((snapshot) => {
-        syncServerReadModel(snapshot);
+        syncServerReadModel(snapshot, {
+          authoritativeThreadDetailIds: new Set([nextThreadId]),
+          preserveThreadDetails: true,
+        });
         return navigate({
           to: "/$threadId",
           params: { threadId: nextThreadId },
@@ -5266,7 +5289,7 @@ export default function ChatView({
         await api.orchestration
           .getSnapshot({ mode: "bootstrap" })
           .then((snapshot) => {
-            syncServerReadModel(snapshot);
+            syncServerReadModel(snapshot, { preserveThreadDetails: true });
           })
           .catch(() => undefined);
         toastManager.add({
@@ -5867,7 +5890,7 @@ export default function ChatView({
 
       const snapshot = await api.orchestration.getSnapshot({ mode: "bootstrap" }).catch(() => null);
       if (snapshot) {
-        syncServerReadModel(snapshot);
+        syncServerReadModel(snapshot, { preserveThreadDetails: true });
       }
 
       await onSelectNewThreadLandingProject(projectId);
@@ -6328,8 +6351,10 @@ export default function ChatView({
           onClickCapture={onMessagesClickCapture}
           onWheel={onMessagesWheel}
           onPointerDown={onMessagesPointerDown}
+          onPointerMove={onMessagesPointerMove}
           onPointerUp={onMessagesPointerUp}
           onPointerCancel={onMessagesPointerCancel}
+          onPointerLeave={onMessagesPointerCancel}
           onTouchStart={onMessagesTouchStart}
           onTouchMove={onMessagesTouchMove}
           onTouchEnd={onMessagesTouchEnd}
@@ -6392,6 +6417,13 @@ export default function ChatView({
                   </Menu>
                 ) : null}
               </div>
+            </div>
+          ) : shouldShowThreadBodyLoading ? (
+            <div
+              className="flex min-h-full items-center justify-center px-4 text-center text-sm text-muted-foreground/70"
+              data-testid="chat-thread-body-loading"
+            >
+              Loading conversation...
             </div>
           ) : (
             <MessagesTimeline

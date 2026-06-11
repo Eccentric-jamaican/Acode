@@ -39,6 +39,11 @@ export interface AppState {
   hydrationError: string | null;
 }
 
+export interface SyncServerReadModelOptions {
+  readonly preserveThreadDetails?: boolean;
+  readonly authoritativeThreadDetailIds?: ReadonlySet<ThreadId>;
+}
+
 const PERSISTED_STATE_KEY = "t3code:renderer-state:v8";
 const LEGACY_PERSISTED_STATE_KEYS = [
   "t3code:renderer-state:v6",
@@ -501,7 +506,11 @@ function sanitizeSubagentThreadTitle(title: string, parentThreadId: ThreadId | n
 
 // ── Pure state transition functions ────────────────────────────────────
 
-export function syncServerReadModel(state: AppState, readModel: OrchestrationReadModel): AppState {
+export function syncServerReadModel(
+  state: AppState,
+  readModel: OrchestrationReadModel,
+  options: SyncServerReadModelOptions = {},
+): AppState {
   const projects = reuseArrayByIndex(
     state.projects,
     mapProjectsFromReadModel(
@@ -549,62 +558,78 @@ export function syncServerReadModel(state: AppState, readModel: OrchestrationRea
       .map((thread) => {
         const existing = existingThreadById.get(thread.id);
         const parentThreadId = thread.parentThreadId ?? null;
-        const messages = reuseArrayByIndex(
-          existing?.messages ?? [],
-          thread.messages.map((message) => {
-            const attachments = message.attachments?.map((attachment) =>
-              toPreviewableChatAttachment(attachment),
-            );
-            const normalizedMessage: ChatMessage = {
-              id: message.id,
-              role: message.role,
-              text: message.text,
-              ...(message.turnId ? { turnId: message.turnId } : {}),
-              createdAt: message.createdAt,
-              streaming: message.streaming,
-              ...(message.streaming ? {} : { completedAt: message.updatedAt }),
-              ...(attachments && attachments.length > 0 ? { attachments } : {}),
-            };
-            return normalizedMessage;
-          }),
-          equalMessage,
-        );
-        const proposedPlans = reuseArrayByIndex(
-          existing?.proposedPlans ?? [],
-          thread.proposedPlans.map((proposedPlan) => ({
-            id: proposedPlan.id,
-            turnId: proposedPlan.turnId,
-            planMarkdown: proposedPlan.planMarkdown,
-            createdAt: proposedPlan.createdAt,
-            updatedAt: proposedPlan.updatedAt,
-          })),
-          equalProposedPlan,
-        );
+        const preserveThreadDetails =
+          options.preserveThreadDetails === true &&
+          existing !== undefined &&
+          options.authoritativeThreadDetailIds?.has(thread.id) !== true;
+        const messages =
+          preserveThreadDetails && thread.messages.length === 0
+            ? existing.messages
+            : reuseArrayByIndex(
+                existing?.messages ?? [],
+                thread.messages.map((message) => {
+                  const attachments = message.attachments?.map((attachment) =>
+                    toPreviewableChatAttachment(attachment),
+                  );
+                  const normalizedMessage: ChatMessage = {
+                    id: message.id,
+                    role: message.role,
+                    text: message.text,
+                    ...(message.turnId ? { turnId: message.turnId } : {}),
+                    createdAt: message.createdAt,
+                    streaming: message.streaming,
+                    ...(message.streaming ? {} : { completedAt: message.updatedAt }),
+                    ...(attachments && attachments.length > 0 ? { attachments } : {}),
+                  };
+                  return normalizedMessage;
+                }),
+                equalMessage,
+              );
+        const proposedPlans =
+          preserveThreadDetails && thread.proposedPlans.length === 0
+            ? existing.proposedPlans
+            : reuseArrayByIndex(
+                existing?.proposedPlans ?? [],
+                thread.proposedPlans.map((proposedPlan) => ({
+                  id: proposedPlan.id,
+                  turnId: proposedPlan.turnId,
+                  planMarkdown: proposedPlan.planMarkdown,
+                  createdAt: proposedPlan.createdAt,
+                  updatedAt: proposedPlan.updatedAt,
+                })),
+                equalProposedPlan,
+              );
         const existingTurnDiffSummariesByTurnId = new Map(
           existing?.turnDiffSummaries.map((summary) => [summary.turnId, summary] as const),
         );
-        const turnDiffSummaries = reuseArrayByIndex(
-          existing?.turnDiffSummaries ?? [],
-          thread.checkpoints.map((checkpoint) => ({
-            turnId: checkpoint.turnId,
-            completedAt: checkpoint.completedAt,
-            status: checkpoint.status,
-            assistantMessageId: checkpoint.assistantMessageId ?? undefined,
-            checkpointTurnCount: checkpoint.checkpointTurnCount,
-            checkpointRef: checkpoint.checkpointRef,
-            files: reuseArrayByIndex(
-              existingTurnDiffSummariesByTurnId.get(checkpoint.turnId)?.files ?? [],
-              checkpoint.files.map((file) => ({ ...file })),
-              equalTurnDiffFile,
-            ),
-          })),
-          equalTurnDiffSummary,
-        );
-        const activities = reuseArrayByIndex(
-          existing?.activities ?? [],
-          thread.activities.map((activity) => ({ ...activity })),
-          equalActivity,
-        );
+        const turnDiffSummaries =
+          preserveThreadDetails && thread.checkpoints.length === 0
+            ? existing.turnDiffSummaries
+            : reuseArrayByIndex(
+                existing?.turnDiffSummaries ?? [],
+                thread.checkpoints.map((checkpoint) => ({
+                  turnId: checkpoint.turnId,
+                  completedAt: checkpoint.completedAt,
+                  status: checkpoint.status,
+                  assistantMessageId: checkpoint.assistantMessageId ?? undefined,
+                  checkpointTurnCount: checkpoint.checkpointTurnCount,
+                  checkpointRef: checkpoint.checkpointRef,
+                  files: reuseArrayByIndex(
+                    existingTurnDiffSummariesByTurnId.get(checkpoint.turnId)?.files ?? [],
+                    checkpoint.files.map((file) => ({ ...file })),
+                    equalTurnDiffFile,
+                  ),
+                })),
+                equalTurnDiffSummary,
+              );
+        const activities =
+          preserveThreadDetails && thread.activities.length === 0
+            ? existing.activities
+            : reuseArrayByIndex(
+                existing?.activities ?? [],
+                thread.activities.map((activity) => ({ ...activity })),
+                equalActivity,
+              );
         const normalizedThread: Thread = {
           id: thread.id,
           codexThreadId: null,
@@ -834,7 +859,10 @@ export function setThreadBranch(
 // ── Zustand store ────────────────────────────────────────────────────
 
 interface AppStore extends AppState {
-  syncServerReadModel: (readModel: OrchestrationReadModel) => void;
+  syncServerReadModel: (
+    readModel: OrchestrationReadModel,
+    options?: SyncServerReadModelOptions,
+  ) => void;
   setHydrationStatus: (status: AppState["hydrationStatus"]) => void;
   setHydrationError: (error: string | null) => void;
   syncErrorInbox: (entries: ReadonlyArray<ErrorInboxEntry>) => void;
@@ -851,7 +879,8 @@ interface AppStore extends AppState {
 
 export const useStore = create<AppStore>((set) => ({
   ...readPersistedState(),
-  syncServerReadModel: (readModel) => set((state) => syncServerReadModel(state, readModel)),
+  syncServerReadModel: (readModel, options) =>
+    set((state) => syncServerReadModel(state, readModel, options)),
   setHydrationStatus: (status) => set((state) => setHydrationStatus(state, status)),
   setHydrationError: (error) => set((state) => setHydrationError(state, error)),
   syncErrorInbox: (entries) => set((state) => syncErrorInbox(state, entries)),

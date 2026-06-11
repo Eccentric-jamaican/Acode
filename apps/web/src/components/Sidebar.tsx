@@ -150,6 +150,7 @@ const PROVIDER_ICON_BY_PROVIDER: Record<ProviderKind, React.FC<React.SVGProps<SV
 
 const EMPTY_KEYBINDINGS: ResolvedKeybindingsConfig = [];
 const THREAD_PREVIEW_LIMIT = 6;
+const THREAD_DETAIL_PREFETCH_DELAY_MS = 160;
 
 function getErrorMessage(error: unknown, fallback: string): string {
   return error instanceof Error && error.message.trim().length > 0 ? error.message : fallback;
@@ -867,6 +868,7 @@ export default function Sidebar() {
   const threads = useStore((store) => store.threads);
   const threadsHydrated = useStore((store) => store.threadsHydrated);
   const hydrationError = useStore((store) => store.hydrationError);
+  const syncServerReadModel = useStore((store) => store.syncServerReadModel);
   const markThreadUnread = useStore((store) => store.markThreadUnread);
   const toggleProject = useStore((store) => store.toggleProject);
   const setAllProjectsExpanded = useStore((store) => store.setAllProjectsExpanded);
@@ -925,6 +927,99 @@ export default function Sidebar() {
   const [draggedProjectId, setDraggedProjectId] = useState<ProjectId | null>(null);
   const [dropTargetProjectId, setDropTargetProjectId] = useState<ProjectId | null>(null);
   const [dropTargetPosition, setDropTargetPosition] = useState<"before" | "after" | null>(null);
+  const threadDetailPrefetchTimeoutsRef = useRef(new Map<ThreadId, number>());
+  const threadDetailPrefetchInFlightRef = useRef(new Set<ThreadId>());
+  const threadDetailPrefetchKeyByThreadIdRef = useRef(new Map<ThreadId, string>());
+
+  const cancelThreadDetailPrefetch = useCallback((threadId: ThreadId) => {
+    const timeoutId = threadDetailPrefetchTimeoutsRef.current.get(threadId);
+    if (timeoutId === undefined) {
+      return;
+    }
+    window.clearTimeout(timeoutId);
+    threadDetailPrefetchTimeoutsRef.current.delete(threadId);
+  }, []);
+
+  const scheduleThreadDetailPrefetch = useCallback(
+    (thread: Thread) => {
+      if (
+        thread.id === routeThreadId ||
+        thread.archivedAt !== null ||
+        thread.latestTurn === null ||
+        thread.messages.length > 0
+      ) {
+        return;
+      }
+
+      const prefetchKey = [
+        thread.id,
+        thread.updatedAt,
+        thread.latestTurn.turnId,
+        thread.latestTurn.completedAt ?? "",
+      ].join("\u0000");
+      if (threadDetailPrefetchKeyByThreadIdRef.current.get(thread.id) === prefetchKey) {
+        return;
+      }
+      if (threadDetailPrefetchInFlightRef.current.has(thread.id)) {
+        return;
+      }
+      if (threadDetailPrefetchTimeoutsRef.current.has(thread.id)) {
+        return;
+      }
+
+      const timeoutId = window.setTimeout(() => {
+        threadDetailPrefetchTimeoutsRef.current.delete(thread.id);
+        const currentThread = useStore
+          .getState()
+          .threads.find((candidate) => candidate.id === thread.id);
+        if (
+          currentThread === undefined ||
+          currentThread.archivedAt !== null ||
+          currentThread.latestTurn === null ||
+          currentThread.messages.length > 0
+        ) {
+          return;
+        }
+
+        const api = readNativeApi();
+        if (!api) {
+          return;
+        }
+
+        threadDetailPrefetchInFlightRef.current.add(thread.id);
+        void api.orchestration
+          .getSnapshot({
+            mode: "focused",
+            threadId: thread.id,
+            threadIds: [thread.id],
+          })
+          .then((snapshot) => {
+            syncServerReadModel(snapshot, {
+              authoritativeThreadDetailIds: new Set([thread.id]),
+              preserveThreadDetails: true,
+            });
+            threadDetailPrefetchKeyByThreadIdRef.current.set(thread.id, prefetchKey);
+          })
+          .catch(() => undefined)
+          .finally(() => {
+            threadDetailPrefetchInFlightRef.current.delete(thread.id);
+          });
+      }, THREAD_DETAIL_PREFETCH_DELAY_MS);
+
+      threadDetailPrefetchTimeoutsRef.current.set(thread.id, timeoutId);
+    },
+    [routeThreadId, syncServerReadModel],
+  );
+
+  useEffect(
+    () => () => {
+      for (const timeoutId of threadDetailPrefetchTimeoutsRef.current.values()) {
+        window.clearTimeout(timeoutId);
+      }
+      threadDetailPrefetchTimeoutsRef.current.clear();
+    },
+    [],
+  );
 
   const openSearchPalette = useCallback((mode: SidebarSearchPaletteMode = "search") => {
     setSearchPaletteMode(mode);
@@ -2569,12 +2664,20 @@ export default function Sidebar() {
           <RowWrapper
             className="group/thread-row relative w-full"
             data-thread-item
-            onMouseLeave={() => clearArchiveConfirm(thread.id)}
+            onMouseEnter={() => scheduleThreadDetailPrefetch(thread)}
+            onMouseLeave={() => {
+              cancelThreadDetailPrefetch(thread.id);
+              clearArchiveConfirm(thread.id);
+            }}
+            onFocusCapture={() => {
+              scheduleThreadDetailPrefetch(thread);
+            }}
             onBlurCapture={(event: FocusEvent<HTMLElement>) => {
               const nextTarget = event.relatedTarget;
               if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
                 return;
               }
+              cancelThreadDetailPrefetch(thread.id);
               clearArchiveConfirm(thread.id);
             }}
           >
@@ -2860,6 +2963,7 @@ export default function Sidebar() {
     [
       archiveConfirmThreadId,
       cancelRename,
+      cancelThreadDetailPrefetch,
       clearArchiveConfirm,
       commitRename,
       handleInlineArchiveConfirm,
@@ -2873,6 +2977,7 @@ export default function Sidebar() {
       renamingThreadId,
       renamingTitle,
       routeThreadId,
+      scheduleThreadDetailPrefetch,
       sidebarPreferences.threadSort,
       expandedSubagentParentIds,
       draftThreadsByThreadId,
@@ -3121,12 +3226,20 @@ export default function Sidebar() {
           <SidebarMenuItem
             className="group/pinned-thread relative w-full"
             data-thread-item
-            onMouseLeave={() => clearArchiveConfirm(thread.id)}
+            onMouseEnter={() => scheduleThreadDetailPrefetch(thread)}
+            onMouseLeave={() => {
+              cancelThreadDetailPrefetch(thread.id);
+              clearArchiveConfirm(thread.id);
+            }}
+            onFocusCapture={() => {
+              scheduleThreadDetailPrefetch(thread);
+            }}
             onBlurCapture={(event: FocusEvent<HTMLElement>) => {
               const nextTarget = event.relatedTarget;
               if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
                 return;
               }
+              cancelThreadDetailPrefetch(thread.id);
               clearArchiveConfirm(thread.id);
             }}
           >
@@ -3283,6 +3396,7 @@ export default function Sidebar() {
     },
     [
       archiveConfirmThreadId,
+      cancelThreadDetailPrefetch,
       clearArchiveConfirm,
       handleInlineArchiveConfirm,
       expandedSubagentParentIds,
@@ -3292,6 +3406,7 @@ export default function Sidebar() {
       pendingApprovalByThreadId,
       pendingUserInputByThreadId,
       routeThreadId,
+      scheduleThreadDetailPrefetch,
       toggleSubagentParent,
     ],
   );

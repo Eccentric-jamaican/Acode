@@ -276,6 +276,7 @@ export const useSplitViewStore = create<SplitViewStore>()(
             };
             if (
               splitView[key].panel === nextPanel.panel &&
+              splitView[key].filesOpen === nextPanel.filesOpen &&
               splitView[key].diffTurnId === nextPanel.diffTurnId &&
               splitView[key].diffFilePath === nextPanel.diffFilePath &&
               splitView[key].hasOpenedPanel === nextPanel.hasOpenedPanel &&

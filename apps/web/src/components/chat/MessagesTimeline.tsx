@@ -3691,11 +3691,19 @@ export const MessagesTimeline = memo(function MessagesTimeline(props: MessagesTi
   }, [rowVirtualizer, timelineWidthPx]);
 
   useEffect(() => {
-    rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = (_item, _delta, instance) => {
+    rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, delta, instance) => {
       const viewportHeight = instance.scrollRect?.height ?? 0;
       const scrollOffset = instance.scrollOffset ?? 0;
-      const remainingDistance = instance.getTotalSize() - (scrollOffset + viewportHeight);
-      return remainingDistance > AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
+      const previousTotalSize = instance.getTotalSize() - delta;
+      const remainingDistance = previousTotalSize - (scrollOffset + viewportHeight);
+      const isReadingOlderHistory = remainingDistance > AUTO_SCROLL_BOTTOM_THRESHOLD_PX;
+      const changedItemIsAboveViewport = item.start < scrollOffset;
+
+      return (
+        isReadingOlderHistory &&
+        changedItemIsAboveViewport &&
+        instance.scrollDirection !== "backward"
+      );
     };
     return () => {
       rowVirtualizer.shouldAdjustScrollPositionOnItemSizeChange = undefined;
