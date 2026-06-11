@@ -14,12 +14,14 @@ function AutocompleteInput({
   showTrigger = false,
   showClear = false,
   startAddon,
+  endAddon,
   size,
   ...props
 }: Omit<AutocompletePrimitive.Input.Props, "size"> & {
   showTrigger?: boolean;
   showClear?: boolean;
   startAddon?: React.ReactNode;
+  endAddon?: React.ReactNode;
   size?: "sm" | "default" | "lg" | number;
   ref?: React.Ref<HTMLInputElement>;
 }) {
@@ -40,6 +42,7 @@ function AutocompleteInput({
         className={cn(
           startAddon &&
             "data-[size=sm]:*:data-[slot=autocomplete-input]:ps-[calc(--spacing(7.5)-1px)] *:data-[slot=autocomplete-input]:ps-[calc(--spacing(8.5)-1px)] sm:data-[size=sm]:*:data-[slot=autocomplete-input]:ps-[calc(--spacing(7)-1px)] sm:*:data-[slot=autocomplete-input]:ps-[calc(--spacing(8)-1px)]",
+          endAddon && "*:data-[slot=autocomplete-input]:pe-28 sm:*:data-[slot=autocomplete-input]:pe-24",
           sizeValue === "sm"
             ? "has-[+[data-slot=autocomplete-trigger],+[data-slot=autocomplete-clear]]:*:data-[slot=autocomplete-input]:pe-6.5"
             : "has-[+[data-slot=autocomplete-trigger],+[data-slot=autocomplete-clear]]:*:data-[slot=autocomplete-input]:pe-7",
@@ -49,6 +52,14 @@ function AutocompleteInput({
         render={<Input nativeInput size={sizeValue} />}
         {...props}
       />
+      {endAddon && (
+        <div
+          className="-translate-y-1/2 absolute top-1/2 end-2 z-10 flex items-center"
+          data-slot="autocomplete-end-addon"
+        >
+          {endAddon}
+        </div>
+      )}
       {showTrigger && (
         <AutocompleteTrigger
           className={cn(
