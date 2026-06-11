@@ -35,6 +35,7 @@ import {
 import {
   TerminalClearInput,
   TerminalCloseInput,
+  TerminalListInput,
   TerminalOpenInput,
   TerminalResizeInput,
   TerminalRestartInput,
@@ -122,6 +123,7 @@ export const WS_METHODS = {
   terminalClear: "terminal.clear",
   terminalRestart: "terminal.restart",
   terminalClose: "terminal.close",
+  terminalList: "terminal.list",
 
   // Server meta
   serverGetConfig: "server.getConfig",
@@ -237,6 +239,7 @@ const makeWebSocketRequestBody = () =>
     tagRequestBody(WS_METHODS.terminalClear, TerminalClearInput),
     tagRequestBody(WS_METHODS.terminalRestart, TerminalRestartInput),
     tagRequestBody(WS_METHODS.terminalClose, TerminalCloseInput),
+    tagRequestBody(WS_METHODS.terminalList, TerminalListInput),
 
     // Server meta
     tagRequestBody(WS_METHODS.serverGetConfig, Schema.Struct({})),

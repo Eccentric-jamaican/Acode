@@ -310,6 +310,7 @@ export function createWsNativeApi(options?: {
       clear: (input) => transport.request(WS_METHODS.terminalClear, input),
       restart: (input) => transport.request(WS_METHODS.terminalRestart, input),
       close: (input) => transport.request(WS_METHODS.terminalClose, input),
+      list: (input) => transport.request(WS_METHODS.terminalList, input),
       onEvent: (callback) =>
         transport.subscribe(WS_CHANNELS.terminalEvent, (data) => {
           const payload = decodeAndWarnOnFailure(TerminalEvent, data);

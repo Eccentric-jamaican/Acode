@@ -35,6 +35,7 @@ interface DispatchCommandReceipt {
 }
 
 const REQUEST_TIMEOUT_MS = 60_000;
+const TERMINAL_LIST_TIMEOUT_MS = 5_000;
 const GIT_CLONE_TIMEOUT_MS = 10 * 60_000;
 const ORCHESTRATION_DISPATCH_TIMEOUT_MS = 180_000;
 const ORCHESTRATION_DISPATCH_THREAD_CREATE_TIMEOUT_MS = 300_000;
@@ -67,6 +68,9 @@ function readDispatchCommandId(params: unknown): string | null {
 }
 
 function requestTimeoutMs(method: string, params: unknown): number {
+  if (method === WS_METHODS.terminalList) {
+    return TERMINAL_LIST_TIMEOUT_MS;
+  }
   if (method === WS_METHODS.gitClone) {
     return GIT_CLONE_TIMEOUT_MS;
   }

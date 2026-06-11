@@ -172,6 +172,20 @@ describe("TerminalManager", () => {
     options: {
       shellResolver?: () => string;
       subprocessChecker?: (terminalPid: number) => Promise<boolean>;
+      externalServerDiscoverer?: (
+        filter: { projectRoot?: string; cwd?: string },
+      ) => Promise<
+        Array<{
+          pid: number;
+          port: number;
+          address: string;
+          name: string | null;
+          commandLine: string | null;
+          parentPid: number | null;
+          createdAt: string | null;
+        }>
+      >;
+      externalProcessKiller?: (pid: number) => Promise<void>;
       subprocessPollIntervalMs?: number;
       processKillGraceMs?: number;
       maxRetainedInactiveSessions?: number;
@@ -187,6 +201,10 @@ describe("TerminalManager", () => {
       historyLineLimit,
       shellResolver: options.shellResolver ?? (() => "/bin/bash"),
       ...(options.subprocessChecker ? { subprocessChecker: options.subprocessChecker } : {}),
+      ...(options.externalServerDiscoverer
+        ? { externalServerDiscoverer: options.externalServerDiscoverer }
+        : {}),
+      ...(options.externalProcessKiller ? { externalProcessKiller: options.externalProcessKiller } : {}),
       ...(options.subprocessPollIntervalMs
         ? { subprocessPollIntervalMs: options.subprocessPollIntervalMs }
         : {}),

@@ -12,6 +12,7 @@ import {
   type ProjectId,
   type ProjectEntry,
   type ProjectScript,
+  type ProjectScriptIcon,
   type ModelSlug,
   PROVIDER_DISPLAY_NAMES,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
@@ -21,6 +22,7 @@ import {
   type ProviderApprovalDecision,
   type ProviderModelOptions,
   type ServerProviderStatus,
+  type TerminalSessionSummary,
   type ProviderKind,
   type ProviderNativeCommandDescriptor,
   type ProviderPluginDescriptor,
@@ -49,6 +51,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type FormEvent,
   type ReactNode,
 } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -119,6 +122,7 @@ import {
   type LocalServerArtifact,
 } from "../session-logic";
 import { isScrollContainerNearBottom } from "../chat-scroll";
+import { parseMarkdownGitHubLink } from "../markdown-links";
 import {
   buildPendingUserInputAnswers,
   derivePendingUserInputProgress,
@@ -171,12 +175,17 @@ import {
   ChevronRightIcon,
   CheckIcon,
   CircleAlertIcon,
+  CopyIcon,
   CloudIcon,
+  BugIcon,
+  ExternalLinkIcon,
   FileTextIcon,
   FilesIcon,
+  FlaskConicalIcon,
   FolderClosedIcon,
   GlobeIcon,
   KanbanSquareIcon,
+  HammerIcon,
   MessageSquareIcon,
   PanelLeftIcon,
   BoxIcon,
@@ -185,13 +194,19 @@ import {
   HardDriveIcon,
   ImageIcon,
   LaptopIcon,
+  ListChecksIcon,
   MousePointer2Icon,
   PlusIcon,
   Maximize2Icon,
   ArrowLeftRight,
+  PlayIcon,
+  ServerIcon,
+  SettingsIcon,
+  SquareIcon,
   TerminalIcon,
   Undo2Icon,
   Trash2Icon,
+  WrenchIcon,
   XIcon,
   ZapIcon,
   PinIcon,
@@ -229,6 +244,7 @@ import {
   ClaudeAI,
   CursorIcon,
   Gemini,
+  GitHubIcon,
   Icon,
   OpenAI,
   OpenCodeIcon,
@@ -239,6 +255,7 @@ import { cn, isMacPlatform, isWindowsPlatform } from "~/lib/utils";
 import { Badge } from "./ui/badge";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { toastManager } from "./ui/toast";
+import { Spinner } from "./ui/spinner";
 import {
   canCreateThreadHandoff,
   inferProviderFromModel,
@@ -441,6 +458,12 @@ const THREAD_CONTEXT_ARTIFACT_EXTENSIONS = new Set([
 const THREAD_CONTEXT_ARTIFACT_COLLECT_LIMIT = 30;
 const THREAD_CONTEXT_ARTIFACT_PAGE_SIZE = 5;
 const THREAD_CONTEXT_MARKDOWN_ARTIFACT_EXTENSIONS = new Set(["md", "mdown", "mdx", "mkd"]);
+const LOCAL_SERVER_REFRESH_MS = 2_000;
+const LOCAL_SERVER_COPY_LINE_LIMIT = 160;
+const ANSI_ESCAPE_PATTERN = new RegExp(
+  `${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`,
+  "g",
+);
 const THREAD_CONTEXT_LOW_VALUE_ARTIFACT_FILENAMES = new Set([
   "agents.md",
   "authors.md",
@@ -504,6 +527,238 @@ interface ThreadContextProgressItem {
   label: string;
   status: "pending" | "inProgress" | "completed" | "failed";
   createdAt: string;
+}
+
+interface LocalServerSessionView {
+  session: TerminalSessionSummary;
+  artifacts: LocalServerArtifact[];
+  title: string;
+  detail: string;
+}
+
+interface ThreadContextRepositoryLink {
+  href: string;
+  label: string;
+  icon: "github" | "git";
+}
+
+function projectScriptIconNode(icon: ProjectScriptIcon, className = "size-3.5"): ReactNode {
+  if (icon === "test") return <FlaskConicalIcon className={className} />;
+  if (icon === "lint") return <ListChecksIcon className={className} />;
+  if (icon === "configure") return <WrenchIcon className={className} />;
+  if (icon === "build") return <HammerIcon className={className} />;
+  if (icon === "debug") return <BugIcon className={className} />;
+  return <PlayIcon className={className} />;
+}
+
+function normalizeLocalServerPath(pathValue: string | null | undefined): string | null {
+  const normalized = pathValue?.replaceAll("\\", "/").replace(/\/+$/g, "").trim();
+  return normalized && normalized.length > 0 ? normalized.toLowerCase() : null;
+}
+
+function localServerPathMatches(root: string | null | undefined, candidate: string): boolean {
+  const normalizedRoot = normalizeLocalServerPath(root);
+  const normalizedCandidate = normalizeLocalServerPath(candidate);
+  if (!normalizedRoot || !normalizedCandidate) {
+    return false;
+  }
+  return (
+    normalizedCandidate === normalizedRoot ||
+    normalizedCandidate.startsWith(`${normalizedRoot}/`)
+  );
+}
+
+function terminalSessionBelongsToProject(
+  session: TerminalSessionSummary,
+  input: {
+    activeThreadId: ThreadId;
+    projectId?: ProjectId | undefined;
+    projectCwd?: string | null | undefined;
+    workspaceCwd?: string | null | undefined;
+  },
+): boolean {
+  if (input.projectId && session.metadata?.projectId === input.projectId) {
+    return true;
+  }
+  if (input.projectCwd && session.metadata?.projectRoot) {
+    return localServerPathMatches(input.projectCwd, session.metadata.projectRoot);
+  }
+  if (input.workspaceCwd && localServerPathMatches(input.workspaceCwd, session.cwd)) {
+    return true;
+  }
+  if (input.projectCwd && localServerPathMatches(input.projectCwd, session.cwd)) {
+    return true;
+  }
+  return session.threadId === input.activeThreadId;
+}
+
+function stripAnsiSequences(value: string): string {
+  return value.replace(ANSI_ESCAPE_PATTERN, "");
+}
+
+function recentOutputForCopy(value: string): string {
+  const clean = stripAnsiSequences(value).trim();
+  if (clean.length === 0) {
+    return "";
+  }
+  return clean.split(/\r?\n/g).slice(-LOCAL_SERVER_COPY_LINE_LIMIT).join("\n").trim();
+}
+
+function compactCommandLabel(command: string): string {
+  const normalized = command.replace(/\s+/g, " ").trim();
+  if (normalized.length <= 64) {
+    return normalized;
+  }
+  return `${normalized.slice(0, 61)}...`;
+}
+
+function tokenizeCommand(command: string): string[] {
+  const tokens = command.match(/"[^"]+"|'[^']+'|\S+/g) ?? [];
+  return tokens.map((token) => token.replace(/^['"]|['"]$/g, ""));
+}
+
+function friendlyCommandSummary(command: string): string {
+  const tokens = tokenizeCommand(command);
+  if (tokens.length === 0) {
+    return compactCommandLabel(command);
+  }
+
+  const first = basenameOfPath(tokens[0] ?? "");
+  const second = tokens[1];
+  if (
+    second &&
+    (first === "node" ||
+      first === "bun" ||
+      first === "python" ||
+      first === "python3" ||
+      first === "deno")
+  ) {
+    const secondBase = basenameOfPath(second);
+    if (secondBase.length > 0 && secondBase !== second) {
+      return secondBase;
+    }
+    if (secondBase.length > 0) {
+      return secondBase;
+    }
+  }
+
+  if (first === "npm" || first === "pnpm" || first === "yarn" || first === "bun") {
+    const task = tokens.find((token, index) => index > 0 && token !== "run" && token !== "--");
+    if (task && task !== first) {
+      return `${first} ${task}`;
+    }
+  }
+
+  if (first.length > 0) {
+    return first;
+  }
+
+  return compactCommandLabel(command);
+}
+
+function isExternalLocalServerSession(session: TerminalSessionSummary): boolean {
+  return session.terminalId.startsWith("external:");
+}
+
+function resolveLocalServerSessionTitle(
+  session: TerminalSessionSummary,
+  scripts: ReadonlyArray<ProjectScript>,
+): string {
+  const scriptId = session.metadata?.scriptId ?? null;
+  const configuredScript = scriptId ? scripts.find((script) => script.id === scriptId) : null;
+  if (configuredScript) {
+    return configuredScript.name;
+  }
+  if (session.metadata?.title) {
+    return session.metadata.title;
+  }
+  if (session.metadata?.command) {
+    return friendlyCommandSummary(session.metadata.command);
+  }
+  return `Terminal ${session.terminalId}`;
+}
+
+function buildLocalServerSessionView(
+  session: TerminalSessionSummary,
+  scripts: ReadonlyArray<ProjectScript>,
+): LocalServerSessionView {
+  const artifacts = extractLocalServerArtifactsFromText(session.recentOutput);
+  const latestArtifact = artifacts.at(-1) ?? null;
+  return {
+    session,
+    artifacts,
+    title: resolveLocalServerSessionTitle(session, scripts),
+    detail:
+      latestArtifact?.label ??
+      (session.metadata?.command
+        ? friendlyCommandSummary(session.metadata.command)
+        : session.cwd),
+  };
+}
+
+function normalizeRepositoryUrl(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const sshLikeMatch = /^(?:git@|ssh:\/\/git@)([^/:]+)[:/]([^?#]+?)(?:\.git)?\/?$/.exec(trimmed);
+  if (sshLikeMatch?.[1] && sshLikeMatch[2]) {
+    return `https://${sshLikeMatch[1]}/${sshLikeMatch[2].replace(/\.git$/i, "")}`;
+  }
+
+  const gitProtocolMatch = /^git:\/\/([^/]+)\/(.+?)(?:\.git)?\/?$/.exec(trimmed);
+  if (gitProtocolMatch?.[1] && gitProtocolMatch[2]) {
+    return `https://${gitProtocolMatch[1]}/${gitProtocolMatch[2].replace(/\.git$/i, "")}`;
+  }
+
+  try {
+    const url = new URL(trimmed);
+    if (url.protocol === "http:" || url.protocol === "https:") {
+      url.pathname = url.pathname.replace(/\.git$/i, "");
+      url.search = "";
+      url.hash = "";
+      return url.toString();
+    }
+    if (url.protocol === "ssh:" && url.hostname) {
+      const normalizedPath = url.pathname.replace(/^\/+/, "").replace(/\.git$/i, "");
+      return `https://${url.hostname}/${normalizedPath}`;
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function resolveThreadContextRepositoryLink(
+  repositoryUrl: string | null | undefined,
+): ThreadContextRepositoryLink | null {
+  const href = normalizeRepositoryUrl(repositoryUrl);
+  if (!href) {
+    return null;
+  }
+
+  const githubLink = parseMarkdownGitHubLink(href);
+  if (githubLink) {
+    return {
+      href: githubLink.href,
+      label: githubLink.label,
+      icon: "github",
+    };
+  }
+
+  try {
+    const url = new URL(href);
+    const path = url.pathname.replace(/^\/+/, "").replace(/\.git$/i, "");
+    return {
+      href,
+      label: path.length > 0 ? `${url.hostname}/${path}` : url.hostname,
+      icon: "git",
+    };
+  } catch {
+    return null;
+  }
 }
 
 function extensionOf(pathValue: string): string {
@@ -3441,12 +3696,20 @@ export default function ChatView({
         worktreePath: options?.worktreePath ?? activeThread.worktreePath ?? null,
         ...(options?.env ? { extraEnv: options.env } : {}),
       });
+      const terminalMetadata = {
+        projectId: activeProject.id,
+        projectRoot: activeProject.cwd,
+        scriptId: script.id,
+        title: script.name,
+        command: script.command,
+      };
       const openTerminalInput: Parameters<typeof api.terminal.open>[0] = shouldCreateNewTerminal
         ? {
             threadId: activeThreadId,
             terminalId: targetTerminalId,
             cwd: targetCwd,
             env: runtimeEnv,
+            metadata: terminalMetadata,
             cols: SCRIPT_TERMINAL_COLS,
             rows: SCRIPT_TERMINAL_ROWS,
           }
@@ -3455,6 +3718,7 @@ export default function ChatView({
             terminalId: targetTerminalId,
             cwd: targetCwd,
             env: runtimeEnv,
+            metadata: terminalMetadata,
           };
 
       try {
@@ -3599,6 +3863,25 @@ export default function ChatView({
         previousScripts: activeProject.scripts,
         nextScripts,
         keybinding: input.keybinding,
+        keybindingCommand: commandForProjectScript(scriptId),
+      });
+    },
+    [activeProject, persistProjectScripts],
+  );
+  const deleteProjectScript = useCallback(
+    async (scriptId: string) => {
+      if (!activeProject) return;
+      const nextScripts = activeProject.scripts.filter((script) => script.id !== scriptId);
+      if (nextScripts.length === activeProject.scripts.length) {
+        return;
+      }
+
+      await persistProjectScripts({
+        projectId: activeProject.id,
+        projectCwd: activeProject.cwd,
+        previousScripts: activeProject.scripts,
+        nextScripts,
+        keybinding: null,
         keybindingCommand: commandForProjectScript(scriptId),
       });
     },
@@ -6538,10 +6821,19 @@ export default function ChatView({
           workspaceCwd={threadWorkspaceCwd}
           homeDirectory={homeDirectory ?? undefined}
           activeThreadId={activeThread.id}
+          activeProjectId={activeProject?.id}
+          activeProjectCwd={activeProject?.cwd}
+          activeProjectScripts={activeProject?.scripts ?? []}
           accountSummary={getCodexAccountSummary(serverConfigQuery.data?.providerAccounts)}
           envLocked={envLocked}
           handoffBusy={handoffBusy}
           isServerThread={isServerThread}
+          onRunProjectScript={(script) => {
+            void runProjectScript(script);
+          }}
+          onAddProjectScript={saveProjectScript}
+          onUpdateProjectScript={updateProjectScript}
+          onDeleteProjectScript={deleteProjectScript}
           onEnvModeChange={onEnvModeChange}
           onHandoffToLocal={onHandoffToLocal}
           onHandoffToWorktree={onHandoffToWorktree}
@@ -7612,10 +7904,17 @@ interface ThreadContextPanelProps {
   workspaceCwd: string | null;
   homeDirectory: string | undefined;
   activeThreadId: ThreadId;
+  activeProjectId: ProjectId | undefined;
+  activeProjectCwd: string | undefined;
+  activeProjectScripts: ProjectScript[];
   accountSummary: ServerProviderAccountSummary | null;
   envLocked: boolean;
   handoffBusy: boolean;
   isServerThread: boolean;
+  onRunProjectScript: (script: ProjectScript) => void;
+  onAddProjectScript: (input: NewProjectScriptInput) => Promise<void>;
+  onUpdateProjectScript: (scriptId: string, input: NewProjectScriptInput) => Promise<void>;
+  onDeleteProjectScript: (scriptId: string) => Promise<void>;
   onEnvModeChange: (mode: DraftThreadEnvMode) => void;
   onHandoffToLocal: () => void;
   onHandoffToWorktree: () => void;
@@ -7647,6 +7946,522 @@ function persistThreadContextPanelPreference(key: string, value: boolean): void 
     return;
   }
   localStorage.setItem(key, value ? "true" : "false");
+}
+
+interface LocalServersPopoverControlProps {
+  activeThreadId: ThreadId;
+  activeProjectId: ProjectId | undefined;
+  activeProjectCwd: string | undefined;
+  workspaceCwd: string | null;
+  scripts: ProjectScript[];
+  action?: ReactNode;
+  onRunProjectScript: (script: ProjectScript) => void;
+  onAddProjectScript: (input: NewProjectScriptInput) => Promise<void>;
+  onUpdateProjectScript: (scriptId: string, input: NewProjectScriptInput) => Promise<void>;
+  onDeleteProjectScript: (scriptId: string) => Promise<void>;
+}
+
+function LocalServersPopoverControl({
+  activeThreadId,
+  activeProjectId,
+  activeProjectCwd,
+  workspaceCwd,
+  scripts,
+  action,
+  onRunProjectScript,
+  onAddProjectScript,
+  onUpdateProjectScript,
+  onDeleteProjectScript,
+}: LocalServersPopoverControlProps) {
+  const [actionsExpanded, setActionsExpanded] = useState(false);
+  const [editingScriptId, setEditingScriptId] = useState<string | null>(null);
+  const [formOpen, setFormOpen] = useState(false);
+  const [popoverOpen, setPopoverOpen] = useState(false);
+  const [actionName, setActionName] = useState("");
+  const [actionCommand, setActionCommand] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
+  const [savingAction, setSavingAction] = useState(false);
+  const [stoppingTerminalKey, setStoppingTerminalKey] = useState<string | null>(null);
+
+  const quickActions = useMemo(
+    () => scripts.filter((script) => !script.runOnWorktreeCreate),
+    [scripts],
+  );
+  const terminalSessionsQuery = useQuery({
+    queryKey: [
+      "terminal",
+      "local-server-sessions",
+      activeThreadId,
+      activeProjectId ?? null,
+      activeProjectCwd ?? null,
+      workspaceCwd ?? null,
+    ],
+    queryFn: async () => {
+      const api = readNativeApi();
+      if (!api) {
+        return { sessions: [] };
+      }
+      return api.terminal.list({
+        includeInactive: false,
+        threadId: activeThreadId,
+        ...(activeProjectCwd ? { projectRoot: activeProjectCwd } : {}),
+        ...(workspaceCwd ? { cwd: workspaceCwd } : {}),
+      });
+    },
+    enabled: Boolean(activeThreadId),
+    refetchInterval: LOCAL_SERVER_REFRESH_MS,
+    retry: false,
+  });
+  const {
+    data: terminalSessionsData,
+    isError: terminalSessionsError,
+    isLoading: terminalSessionsLoading,
+    refetch: refetchTerminalSessions,
+  } = terminalSessionsQuery;
+  const isInitialServerCheckPending = terminalSessionsLoading && terminalSessionsData === undefined;
+  const hasServerCheckError = terminalSessionsError && terminalSessionsData === undefined;
+
+  useEffect(() => {
+    if (!popoverOpen) {
+      return;
+    }
+    void refetchTerminalSessions();
+  }, [popoverOpen, refetchTerminalSessions]);
+
+  const localServerSessions = useMemo(() => {
+    const sessions = terminalSessionsData?.sessions ?? [];
+    return sessions
+      .filter((session) =>
+        terminalSessionBelongsToProject(session, {
+          activeThreadId,
+          projectId: activeProjectId,
+          projectCwd: activeProjectCwd,
+          workspaceCwd,
+        }),
+      )
+      .filter((session) => session.status === "running")
+      .map((session) => buildLocalServerSessionView(session, scripts))
+      .filter((view) => view.session.hasRunningSubprocess || view.artifacts.length > 0);
+  }, [
+    activeProjectCwd,
+    activeProjectId,
+    activeThreadId,
+    scripts,
+    terminalSessionsData?.sessions,
+    workspaceCwd,
+  ]);
+
+  const resetForm = useCallback(() => {
+    setEditingScriptId(null);
+    setActionName("");
+    setActionCommand("");
+    setFormError(null);
+    setSavingAction(false);
+    setFormOpen(false);
+  }, []);
+
+  const openAddForm = useCallback(() => {
+    setEditingScriptId(null);
+    setActionName("");
+    setActionCommand("");
+    setFormError(null);
+    setFormOpen(true);
+  }, []);
+
+  const openEditForm = useCallback((script: ProjectScript) => {
+    setEditingScriptId(script.id);
+    setActionName(script.name);
+    setActionCommand(script.command);
+    setFormError(null);
+    setFormOpen(true);
+    setActionsExpanded(true);
+  }, []);
+
+  const submitQuickAction = useCallback(
+    async (event: FormEvent) => {
+      event.preventDefault();
+      const trimmedName = actionName.trim();
+      const trimmedCommand = actionCommand.trim();
+      if (trimmedName.length === 0) {
+        setFormError("Name is required.");
+        return;
+      }
+      if (trimmedCommand.length === 0) {
+        setFormError("Command is required.");
+        return;
+      }
+
+      setSavingAction(true);
+      setFormError(null);
+      const existingScript = editingScriptId
+        ? scripts.find((script) => script.id === editingScriptId)
+        : null;
+      const payload: NewProjectScriptInput = {
+        name: trimmedName,
+        command: trimmedCommand,
+        icon: existingScript?.icon ?? "play",
+        runOnWorktreeCreate: false,
+        keybinding: null,
+      };
+      try {
+        if (editingScriptId) {
+          await onUpdateProjectScript(editingScriptId, payload);
+        } else {
+          await onAddProjectScript(payload);
+        }
+        resetForm();
+        setActionsExpanded(true);
+      } catch (error) {
+        setFormError(error instanceof Error ? error.message : "Failed to save action.");
+      } finally {
+        setSavingAction(false);
+      }
+    },
+    [
+      actionCommand,
+      actionName,
+      editingScriptId,
+      onAddProjectScript,
+      onUpdateProjectScript,
+      resetForm,
+      scripts,
+    ],
+  );
+
+  const copyOutput = useCallback(async (view: LocalServerSessionView) => {
+    const output = recentOutputForCopy(view.session.recentOutput);
+    if (output.length === 0) {
+      toastManager.add({
+        type: "info",
+        title: "No output to copy",
+        description: "This server has not written useful output yet.",
+      });
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(output);
+      toastManager.add({
+        type: "success",
+        title: "Output copied",
+        description: "Copied the most recent terminal output.",
+      });
+    } catch (error) {
+      toastManager.add({
+        type: "error",
+        title: "Copy failed",
+        description: error instanceof Error ? error.message : "Unable to copy output.",
+      });
+    }
+  }, []);
+
+  const stopSession = useCallback(
+    async (view: LocalServerSessionView) => {
+      const api = readNativeApi();
+      if (!api) {
+        return;
+      }
+      const terminalKey = `${view.session.threadId}:${view.session.terminalId}`;
+      setStoppingTerminalKey(terminalKey);
+      try {
+        await api.terminal.close({
+          threadId: view.session.threadId,
+          terminalId: view.session.terminalId,
+        });
+        useTerminalStateStore
+          .getState()
+          .setTerminalActivity(
+            view.session.threadId as ThreadId,
+            view.session.terminalId,
+            false,
+          );
+        await refetchTerminalSessions();
+        toastManager.add({
+          type: "success",
+          title: "Server stopped",
+          description: view.title,
+        });
+      } catch (error) {
+        toastManager.add({
+          type: "error",
+          title: "Stop failed",
+          description: error instanceof Error ? error.message : "Unable to stop that server.",
+        });
+      } finally {
+        setStoppingTerminalKey(null);
+      }
+    },
+    [refetchTerminalSessions],
+  );
+
+  const deleteQuickAction = useCallback(
+    async (script: ProjectScript) => {
+      const confirmed = window.confirm(`Delete quick action "${script.name}"?`);
+      if (!confirmed) {
+        return;
+      }
+      try {
+        await onDeleteProjectScript(script.id);
+      } catch (error) {
+        toastManager.add({
+          type: "error",
+          title: "Delete failed",
+          description: error instanceof Error ? error.message : "Unable to delete that action.",
+        });
+      }
+    },
+    [onDeleteProjectScript],
+  );
+
+  const runQuickAction = useCallback(
+    (script: ProjectScript) => {
+      onRunProjectScript(script);
+      window.setTimeout(() => {
+        void refetchTerminalSessions();
+      }, 800);
+    },
+    [onRunProjectScript, refetchTerminalSessions],
+  );
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center gap-1">
+        <Popover open={popoverOpen} onOpenChange={setPopoverOpen}>
+          <PopoverTrigger
+            render={
+              <button
+                type="button"
+                className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-lg px-2 text-left transition-colors hover:bg-muted/60"
+              />
+            }
+          >
+            <ServerIcon className="size-4 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 text-foreground/92">Local servers</span>
+            {isInitialServerCheckPending ? null : (
+              <span className="shrink-0 font-mono text-xs text-muted-foreground/65">
+                {localServerSessions.length}
+              </span>
+            )}
+            <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground" />
+          </PopoverTrigger>
+          <PopoverPopup
+            align="start"
+            side="left"
+            className="w-72 max-w-[calc(100vw-2rem)] p-0"
+          >
+            <div className="max-h-[min(28rem,calc(100vh-7rem))] overflow-y-auto p-1.5">
+              <div className="flex items-center gap-2 px-1.5 pb-1">
+                <p className="min-w-0 flex-1 text-xs font-medium text-muted-foreground">
+                  Running servers
+                </p>
+                {isInitialServerCheckPending ? null : (
+                  <span className="font-mono text-[11px] text-muted-foreground/55">
+                    {localServerSessions.length}
+                  </span>
+                )}
+              </div>
+
+              <div className="max-h-44 space-y-1 overflow-y-auto pr-0.5">
+                {isInitialServerCheckPending ? (
+                  <div className="flex h-14 items-center justify-center rounded-lg border border-dashed border-border/70">
+                    <Spinner className="size-4 text-muted-foreground/70" />
+                  </div>
+                ) : hasServerCheckError ? (
+                  <p className="rounded-lg border border-dashed border-border/70 px-3 py-2.5 text-xs text-muted-foreground">
+                    Could not check local servers.
+                  </p>
+                ) : localServerSessions.length > 0 ? (
+                  localServerSessions.map((view) => {
+                    const terminalKey = `${view.session.threadId}:${view.session.terminalId}`;
+                    const stopping = stoppingTerminalKey === terminalKey;
+                    const externalSession = isExternalLocalServerSession(view.session);
+                    return (
+                      <div
+                        key={terminalKey}
+                        className="rounded-lg border border-border/60 bg-background/55 px-2.5 py-2.5"
+                      >
+                        <div className="flex min-w-0 items-start">
+                          <span className="min-w-0 flex-1">
+                            <span className="flex min-w-0 items-start gap-2">
+                              <span className="min-w-0 flex-1">
+                                <span className="flex min-w-0 items-center gap-2">
+                                  <span className="truncate text-sm font-medium text-foreground/92">
+                                    {view.title}
+                                  </span>
+                                  {externalSession ? (
+                                    <span
+                                      className="inline-flex h-4.5 shrink-0 items-center justify-center rounded-[4px] border border-border/70 bg-muted/40 px-1.5 text-[9px] font-semibold text-muted-foreground/80"
+                                      aria-label="External server"
+                                      title="External server"
+                                    >
+                                      E
+                                    </span>
+                                  ) : null}
+                                </span>
+                                <span className="mt-0.5 block truncate text-xs text-muted-foreground/78">
+                                  {view.detail}
+                                </span>
+                              </span>
+                              <span className="flex shrink-0 items-center gap-1">
+                                <Button
+                                  type="button"
+                                  size="icon-xs"
+                                  variant="ghost"
+                                  className="size-7 rounded-md text-muted-foreground hover:text-foreground"
+                                  aria-label={`Copy output for ${view.title}`}
+                                  title="Copy output"
+                                  onClick={() => void copyOutput(view)}
+                                >
+                                  <CopyIcon className="size-3.5" />
+                                </Button>
+                                <Button
+                                  type="button"
+                                  size="icon-xs"
+                                  variant="ghost"
+                                  className="size-7 rounded-md text-destructive hover:text-destructive"
+                                  aria-label={`Stop ${view.title}`}
+                                  title="Stop"
+                                  disabled={stopping}
+                                  onClick={() => void stopSession(view)}
+                                >
+                                  {stopping ? (
+                                    <Spinner className="size-3.5" />
+                                  ) : (
+                                    <SquareIcon className="size-3.5" />
+                                  )}
+                                </Button>
+                              </span>
+                            </span>
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <p className="rounded-lg border border-dashed border-border/70 px-3 py-2.5 text-xs text-muted-foreground">
+                    No running local servers.
+                  </p>
+                )}
+              </div>
+
+              <div className="mt-1.5 border-t border-border/70 pt-1.5">
+                {formOpen ? (
+                  <form className="space-y-2" onSubmit={submitQuickAction}>
+                    <input
+                      className="h-8 w-full rounded-md border border-border bg-background px-2 text-sm outline-none transition-colors placeholder:text-muted-foreground/55 focus:border-ring"
+                      placeholder="Action name"
+                      value={actionName}
+                      onChange={(event) => setActionName(event.target.value)}
+                    />
+                    <textarea
+                      className="min-h-[4rem] w-full resize-none rounded-md border border-border bg-background px-2 py-1.5 text-sm outline-none transition-colors placeholder:text-muted-foreground/55 focus:border-ring"
+                      placeholder="bun run dev"
+                      value={actionCommand}
+                      onChange={(event) => setActionCommand(event.target.value)}
+                    />
+                    {formError ? <p className="text-xs text-destructive">{formError}</p> : null}
+                    <div className="flex items-center justify-end gap-1">
+                      <Button type="button" size="xs" variant="ghost" onClick={resetForm}>
+                        Cancel
+                      </Button>
+                      <Button type="submit" size="xs" disabled={savingAction}>
+                        {editingScriptId ? "Save" : "Add"}
+                      </Button>
+                    </div>
+                  </form>
+                ) : quickActions.length === 0 ? (
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="outline"
+                    className="w-full justify-center"
+                    onClick={openAddForm}
+                  >
+                    <PlusIcon className="size-3.5" />
+                    Add quick action
+                  </Button>
+                ) : (
+                  <div className="space-y-1">
+                    <button
+                      type="button"
+                      className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left transition-colors hover:bg-muted/60"
+                      aria-expanded={actionsExpanded}
+                      onClick={() => setActionsExpanded((current) => !current)}
+                    >
+                      <PlayIcon className="size-4 shrink-0 text-muted-foreground" />
+                      <span className="min-w-0 flex-1 text-sm font-medium">Run action</span>
+                      <span className="font-mono text-xs text-muted-foreground/60">
+                        {quickActions.length}
+                      </span>
+                      <ChevronDownIcon
+                        className={cn(
+                          "size-4 shrink-0 text-muted-foreground transition-transform",
+                          actionsExpanded ? "rotate-0" : "-rotate-90",
+                        )}
+                      />
+                    </button>
+                    {actionsExpanded ? (
+                      <div className="space-y-1">
+                        {quickActions.map((script) => (
+                          <div
+                            key={script.id}
+                            className="flex min-w-0 items-center gap-1 rounded-md px-1.5 py-1"
+                          >
+                            <button
+                              type="button"
+                              className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 text-left transition-colors hover:bg-muted/55"
+                              onClick={() => runQuickAction(script)}
+                            >
+                              <span className="shrink-0 text-muted-foreground">
+                                {projectScriptIconNode(script.icon)}
+                              </span>
+                              <span className="min-w-0 flex-1 truncate text-sm">
+                                {script.name}
+                              </span>
+                            </button>
+                            <Button
+                              type="button"
+                              size="icon-xs"
+                              variant="ghost"
+                              className="size-7 text-muted-foreground"
+                              aria-label={`Edit ${script.name}`}
+                              onClick={() => openEditForm(script)}
+                            >
+                              <SettingsIcon className="size-3.5" />
+                            </Button>
+                            <Button
+                              type="button"
+                              size="icon-xs"
+                              variant="ghost"
+                              className="size-7 text-muted-foreground hover:text-destructive"
+                              aria-label={`Delete ${script.name}`}
+                              onClick={() => void deleteQuickAction(script)}
+                            >
+                              <Trash2Icon className="size-3.5" />
+                            </Button>
+                          </div>
+                        ))}
+                        <Button
+                          type="button"
+                          size="xs"
+                          variant="ghost"
+                          className="w-full justify-center text-muted-foreground"
+                          onClick={openAddForm}
+                        >
+                          <PlusIcon className="size-3.5" />
+                          Add quick action
+                        </Button>
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+            </div>
+          </PopoverPopup>
+        </Popover>
+        {action ? <div className="shrink-0">{action}</div> : null}
+      </div>
+    </div>
+  );
 }
 
 function ThreadContextCollapsibleSection(props: {
@@ -7777,10 +8592,17 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
   workspaceCwd,
   homeDirectory,
   activeThreadId,
+  activeProjectId,
+  activeProjectCwd,
+  activeProjectScripts,
   accountSummary,
   envLocked,
   handoffBusy,
   isServerThread,
+  onRunProjectScript,
+  onAddProjectScript,
+  onUpdateProjectScript,
+  onDeleteProjectScript,
   onEnvModeChange,
   onHandoffToLocal,
   onHandoffToWorktree,
@@ -7830,9 +8652,14 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
     setVisibleArtifactCount(THREAD_CONTEXT_ARTIFACT_PAGE_SIZE);
   }, [activeThreadId]);
   const hasGitContext = gitCwd !== null;
+  const repositoryLink = useMemo(
+    () => resolveThreadContextRepositoryLink(gitStatus?.repositoryUrl ?? null),
+    [gitStatus?.repositoryUrl],
+  );
   const hasProgress = progressItems.length > 0;
   const hasArtifacts = artifacts.length > 0;
   const hasSources = sources.length > 0;
+  const hasLocalServersContext = Boolean(activeProjectCwd || workspaceCwd);
   const displayedArtifacts = artifacts.slice(0, visibleArtifactCount);
   const remainingArtifactCount = Math.max(0, artifacts.length - displayedArtifacts.length);
   const showMoreArtifactCount = Math.min(THREAD_CONTEXT_ARTIFACT_PAGE_SIZE, remainingArtifactCount);
@@ -7976,10 +8803,18 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
   );
   const showPinWithProgress = hasProgress;
   const showPinWithEnvironment = !showPinWithProgress && hasGitContext;
-  const showPinWithArtifacts = !showPinWithProgress && !hasGitContext && hasArtifacts;
-  const showPinWithSources = !showPinWithProgress && !hasGitContext && !hasArtifacts && hasSources;
+  const showPinWithLocalServers =
+    !showPinWithProgress && !showPinWithEnvironment && hasLocalServersContext;
+  const showPinWithArtifacts =
+    !showPinWithProgress && !showPinWithEnvironment && !hasLocalServersContext && hasArtifacts;
+  const showPinWithSources =
+    !showPinWithProgress &&
+    !showPinWithEnvironment &&
+    !hasLocalServersContext &&
+    !hasArtifacts &&
+    hasSources;
 
-  if (!hasProgress && !hasGitContext && !hasArtifacts && !hasSources) {
+  if (!hasProgress && !hasGitContext && !hasLocalServersContext && !hasArtifacts && !hasSources) {
     return null;
   }
 
@@ -8336,7 +9171,50 @@ const ThreadContextPanel = memo(function ThreadContextPanel({
               <span className="min-w-0 flex-1 text-foreground/88">Git actions</span>
               <GitActionsControl gitCwd={gitCwd} activeThreadId={activeThreadId} />
             </div>
+
+            {repositoryLink ? (
+              <div className="pt-1">
+                <div className="px-2 pb-1 text-xs font-medium text-muted-foreground/72">
+                  Repository
+                </div>
+                <button
+                  type="button"
+                  className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left transition-colors hover:bg-muted/60"
+                  title={repositoryLink.href}
+                  onClick={() => {
+                    onOpenBrowserUrl(repositoryLink.href);
+                  }}
+                >
+                  <span className="flex size-4 shrink-0 items-center justify-center text-muted-foreground/85">
+                    {repositoryLink.icon === "github" ? (
+                      <GitHubIcon className="size-4" />
+                    ) : (
+                      <GitBranchIcon className="size-4" />
+                    )}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-foreground/90">
+                    {repositoryLink.label}
+                  </span>
+                  <ExternalLinkIcon className="size-4 shrink-0 text-muted-foreground/65" />
+                </button>
+              </div>
+            ) : null}
           </ThreadContextCollapsibleSection>
+        ) : null}
+
+        {hasLocalServersContext ? (
+          <LocalServersPopoverControl
+            activeThreadId={activeThreadId}
+            activeProjectId={activeProjectId}
+            activeProjectCwd={activeProjectCwd}
+            workspaceCwd={workspaceCwd}
+            scripts={activeProjectScripts}
+            action={showPinWithLocalServers ? pinControl : undefined}
+            onRunProjectScript={onRunProjectScript}
+            onAddProjectScript={onAddProjectScript}
+            onUpdateProjectScript={onUpdateProjectScript}
+            onDeleteProjectScript={onDeleteProjectScript}
+          />
         ) : null}
 
         {hasArtifacts ? (

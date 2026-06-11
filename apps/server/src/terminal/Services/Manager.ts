@@ -10,8 +10,11 @@ import {
   TerminalClearInput,
   TerminalCloseInput,
   TerminalEvent,
+  TerminalListInput,
+  TerminalListResult,
   TerminalOpenInput,
   TerminalResizeInput,
+  TerminalSessionMetadata,
   TerminalSessionSnapshot,
   TerminalSessionStatus,
   TerminalWriteInput,
@@ -41,6 +44,7 @@ export interface TerminalSessionState {
   unsubscribeExit: (() => void) | null;
   hasRunningSubprocess: boolean;
   runtimeEnv: Record<string, string> | null;
+  metadata: TerminalSessionMetadata | null;
 }
 
 export interface ShellCandidate {
@@ -97,6 +101,11 @@ export interface TerminalManagerShape {
    * When `terminalId` is omitted, closes all sessions for the thread.
    */
   readonly close: (input: TerminalCloseInput) => Effect.Effect<void, TerminalError>;
+
+  /**
+   * List live terminal sessions for lightweight UI surfaces.
+   */
+  readonly list: (input: TerminalListInput) => Effect.Effect<TerminalListResult, TerminalError>;
 
   /**
    * Subscribe to terminal runtime events.

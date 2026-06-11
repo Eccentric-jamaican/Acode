@@ -2596,6 +2596,11 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
         return yield* terminalManager.close(body);
       }
 
+      case WS_METHODS.terminalList: {
+        const body = stripRequestTag(request.body);
+        return yield* terminalManager.list(body);
+      }
+
       case WS_METHODS.serverGetConfig:
         yield* fileSystem.makeDirectory(chatWorkspaceRoot, { recursive: true }).pipe(Effect.ignore);
         const keybindingsConfig = yield* keybindingsManager.loadConfigState;

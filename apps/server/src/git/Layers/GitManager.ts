@@ -425,6 +425,9 @@ export const makeGitManager = Effect.gen(function* () {
 
   const status: GitManagerShape["status"] = Effect.fnUntraced(function* (input) {
     const details = yield* gitCore.statusDetails(input.cwd);
+    const repositoryUrl = yield* gitCore
+      .readConfigValue(input.cwd, "remote.origin.url")
+      .pipe(Effect.catch(() => Effect.succeed(null)));
 
     const pr =
       details.branch !== null
@@ -436,6 +439,7 @@ export const makeGitManager = Effect.gen(function* () {
 
     return {
       branch: details.branch,
+      ...(repositoryUrl ? { repositoryUrl } : {}),
       hasWorkingTreeChanges: details.hasWorkingTreeChanges,
       workingTree: details.workingTree,
       hasUpstream: details.hasUpstream,
