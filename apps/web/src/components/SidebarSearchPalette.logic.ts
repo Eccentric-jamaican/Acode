@@ -20,6 +20,18 @@ export interface SidebarSearchProjectMatch {
   project: SidebarSearchProject;
 }
 
+export interface SidebarFolderRoot {
+  id: string;
+  label: string;
+  path: string;
+}
+
+export interface SidebarFolderEntry {
+  path: string;
+  name: string;
+  kind: "file" | "directory";
+}
+
 export interface SidebarSearchThread {
   id: string;
   title: string;
@@ -43,6 +55,10 @@ export interface SidebarSearchThreadMatch {
 
 function normalizeText(value: string): string {
   return value.trim().replaceAll(/\s+/g, " ").toLowerCase();
+}
+
+function normalizePathKey(value: string): string {
+  return value.trim().replaceAll("/", "\\").replaceAll(/\\+/g, "\\").toLowerCase();
 }
 
 function normalizeDisplayText(value: string): string {
@@ -186,6 +202,162 @@ function scoreProject(project: SidebarSearchProject, query: string): number | nu
   if (folder.includes(query)) return 95;
   if (cwd.includes(query)) return 70;
   return null;
+}
+
+export function isLikelyAbsoluteFolderPath(value: string): boolean {
+  const trimmed = value.trim();
+  return (
+    trimmed.startsWith("/") ||
+    trimmed.startsWith("\\\\") ||
+    /^[a-zA-Z]:[\\/]/.test(trimmed)
+  );
+}
+
+export function joinClientPath(parentPath: string, childName: string): string {
+  const trimmedChild = childName.replaceAll(/^[\\/]+|[\\/]+$/g, "");
+  const usesWindowsSeparators = parentPath.includes("\\") || /^[a-zA-Z]:/.test(parentPath);
+  const separator = usesWindowsSeparators ? "\\" : "/";
+  const windowsDriveRootMatch = parentPath.match(/^([a-zA-Z]:)[\\/]?$/);
+  if (windowsDriveRootMatch) {
+    return `${windowsDriveRootMatch[1]}\\${trimmedChild}`;
+  }
+  if (parentPath === "/" || parentPath === "\\") {
+    return `${separator}${trimmedChild}`;
+  }
+  return `${parentPath.replaceAll(/[\\/]+$/g, "")}${separator}${trimmedChild}`;
+}
+
+export function parentClientPath(inputPath: string): string | null {
+  const trimmed = inputPath.trim().replaceAll(/[\\/]+$/g, "");
+  if (!trimmed) return null;
+  if (/^[a-zA-Z]:$/.test(trimmed)) return null;
+
+  const separatorIndex = Math.max(trimmed.lastIndexOf("\\"), trimmed.lastIndexOf("/"));
+  if (separatorIndex < 0) return null;
+  if (separatorIndex === 0) return "/";
+  if (separatorIndex === 2 && /^[a-zA-Z]:/.test(trimmed)) {
+    return `${trimmed.slice(0, 2)}\\`;
+  }
+  return trimmed.slice(0, separatorIndex);
+}
+
+function driveRootOf(inputPath: string): string | null {
+  const driveMatch = inputPath.trim().match(/^([a-zA-Z]:)[\\/]/);
+  if (driveMatch) {
+    return `${driveMatch[1]}\\`;
+  }
+  if (inputPath.trim().startsWith("/")) {
+    return "/";
+  }
+  return null;
+}
+
+function pushUniqueFolderRoot(
+  roots: SidebarFolderRoot[],
+  seenPaths: Set<string>,
+  root: SidebarFolderRoot | null,
+): void {
+  if (!root || root.path.trim().length === 0) return;
+  const key = normalizePathKey(root.path);
+  if (seenPaths.has(key)) return;
+  seenPaths.add(key);
+  roots.push(root);
+}
+
+function sidebarRootLabelExists(roots: readonly SidebarFolderRoot[], label: string): boolean {
+  const normalizedLabel = normalizeText(label);
+  return roots.some((root) => normalizeText(root.label) === normalizedLabel);
+}
+
+function uniqueProjectRootLabel(
+  roots: readonly SidebarFolderRoot[],
+  label: string,
+): string {
+  if (!sidebarRootLabelExists(roots, label)) {
+    return label;
+  }
+
+  const prefixedLabel = `Project: ${label}`;
+  if (!sidebarRootLabelExists(roots, prefixedLabel)) {
+    return prefixedLabel;
+  }
+
+  let index = 2;
+  let candidate = `${prefixedLabel} ${index}`;
+  while (sidebarRootLabelExists(roots, candidate)) {
+    index += 1;
+    candidate = `${prefixedLabel} ${index}`;
+  }
+  return candidate;
+}
+
+export function buildSidebarFolderRoots(input: {
+  homeDirectory: string | null;
+  projects: readonly SidebarSearchProject[];
+}): SidebarFolderRoot[] {
+  const roots: SidebarFolderRoot[] = [];
+  const seenPaths = new Set<string>();
+  const homeDirectory = input.homeDirectory?.trim() || null;
+
+  pushUniqueFolderRoot(
+    roots,
+    seenPaths,
+    homeDirectory ? { id: "home", label: "Home", path: homeDirectory } : null,
+  );
+  pushUniqueFolderRoot(
+    roots,
+    seenPaths,
+    homeDirectory
+      ? {
+          id: "source-repos",
+          label: "Repos",
+          path: joinClientPath(joinClientPath(homeDirectory, "source"), "repos"),
+        }
+      : null,
+  );
+
+  for (const project of input.projects) {
+    const projectLabel = project.name || basenameOfPath(project.cwd) || "Project";
+    pushUniqueFolderRoot(roots, seenPaths, {
+      id: `project:${project.id}`,
+      label: uniqueProjectRootLabel(roots, projectLabel),
+      path: project.cwd,
+    });
+  }
+
+  pushUniqueFolderRoot(
+    roots,
+    seenPaths,
+    homeDirectory ? { id: "drive-root", label: "Drive", path: driveRootOf(homeDirectory) ?? "" } : null,
+  );
+
+  return roots;
+}
+
+export function filterSidebarFolderEntries(
+  entries: readonly SidebarFolderEntry[],
+  query: string,
+  limit = 80,
+): SidebarFolderEntry[] {
+  const normalizedQuery = normalizeText(query);
+  const shouldFilter = normalizedQuery.length > 0 && !isLikelyAbsoluteFolderPath(query);
+
+  return entries
+    .filter((entry) => entry.kind === "directory")
+    .filter((entry) => {
+      if (!shouldFilter) return true;
+      return (
+        normalizeText(entry.name).includes(normalizedQuery) ||
+        normalizeText(entry.path).includes(normalizedQuery)
+      );
+    })
+    .toSorted((left, right) =>
+      left.name.localeCompare(right.name, undefined, {
+        numeric: true,
+        sensitivity: "base",
+      }),
+    )
+    .slice(0, limit);
 }
 
 export function matchSidebarSearchActions(

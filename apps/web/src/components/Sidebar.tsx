@@ -121,8 +121,9 @@ import type { ProviderKind } from "@t3tools/contracts";
 import { useThreadHandoff } from "../hooks/useThreadHandoff";
 import { ProjectSidebarIcon } from "./ProjectSidebarIcon";
 import { ThreadPinToggleButton } from "./ThreadPinToggleButton";
-import { SidebarSearchPalette } from "./SidebarSearchPalette";
+import { SidebarSearchPalette, type SidebarSearchPaletteMode } from "./SidebarSearchPalette";
 import {
+  buildSidebarFolderRoots,
   type SidebarSearchAction,
   type SidebarSearchProject,
   type SidebarSearchThread,
@@ -907,9 +908,8 @@ export default function Sidebar() {
   const removeWorktreeMutation = useMutation(gitRemoveWorktreeMutationOptions({ queryClient }));
   const [settingsPopoverOpen, setSettingsPopoverOpen] = useState(false);
   const [searchPaletteOpen, setSearchPaletteOpen] = useState(false);
-  const [addingProject, setAddingProject] = useState(false);
-  const [newCwd, setNewCwd] = useState("");
-  const [isPickingFolder, setIsPickingFolder] = useState(false);
+  const [searchPaletteMode, setSearchPaletteMode] =
+    useState<SidebarSearchPaletteMode>("search");
   const [isAddingProject, setIsAddingProject] = useState(false);
   const [projectsSectionExpanded, setProjectsSectionExpanded] = useState(true);
   const [chatsSectionExpanded, setChatsSectionExpanded] = useState(true);
@@ -925,6 +925,18 @@ export default function Sidebar() {
   const [draggedProjectId, setDraggedProjectId] = useState<ProjectId | null>(null);
   const [dropTargetProjectId, setDropTargetProjectId] = useState<ProjectId | null>(null);
   const [dropTargetPosition, setDropTargetPosition] = useState<"before" | "after" | null>(null);
+
+  const openSearchPalette = useCallback((mode: SidebarSearchPaletteMode = "search") => {
+    setSearchPaletteMode(mode);
+    setSearchPaletteOpen(true);
+  }, []);
+
+  const handleSearchPaletteOpenChange = useCallback((open: boolean) => {
+    setSearchPaletteOpen(open);
+    if (!open) {
+      setSearchPaletteMode("search");
+    }
+  }, []);
   const renamingCommittedRef = useRef(false);
   const renamingInputRef = useRef<HTMLInputElement | null>(null);
   const [desktopUpdateState, setDesktopUpdateState] = useState<DesktopUpdateState | null>(null);
@@ -1228,7 +1240,13 @@ export default function Sidebar() {
 
   useEffect(() => {
     return onToggleSidebarSearchPalette(() => {
-      setSearchPaletteOpen((existing) => !existing);
+      setSearchPaletteOpen((existing) => {
+        const nextOpen = !existing;
+        if (nextOpen) {
+          setSearchPaletteMode("search");
+        }
+        return nextOpen;
+      });
     });
   }, []);
 
@@ -1414,12 +1432,8 @@ export default function Sidebar() {
       }
 
       setIsAddingProject(true);
-      const finishAddingProject = (options?: { closeComposer?: boolean }) => {
+      const finishAddingProject = () => {
         setIsAddingProject(false);
-        if (options?.closeComposer ?? true) {
-          setNewCwd("");
-          setAddingProject(false);
-        }
       };
 
       const existing = projects.find((project) => project.cwd === cwd);
@@ -1462,32 +1476,12 @@ export default function Sidebar() {
             "The project could not be created. Check that the app is connected and try again.",
           ),
         });
-        finishAddingProject({ closeComposer: false });
+        finishAddingProject();
         return false;
       }
     },
     [focusMostRecentThreadForProject, handleNewThread, isAddingProject, projects],
   );
-
-  const handleAddProject = () => {
-    void addProjectFromPath(newCwd);
-  };
-
-  const handlePickFolder = useCallback(async () => {
-    const api = readNativeApi();
-    if (!api || isPickingFolder) return;
-    setIsPickingFolder(true);
-    let pickedPath: string | null = null;
-    try {
-      pickedPath = await api.dialogs.pickFolder();
-    } catch {
-      // Ignore picker failures and leave the current thread selection unchanged.
-    }
-    if (pickedPath) {
-      await addProjectFromPath(pickedPath);
-    }
-    setIsPickingFolder(false);
-  }, [addProjectFromPath, isPickingFolder]);
 
   const getOrCreateHomeProjectId = useCallback(async (): Promise<ProjectId | null> => {
     const workspaceRoot = chatWorkspaceRoot ?? homeDirectory;
@@ -1535,7 +1529,7 @@ export default function Sidebar() {
       const fallbackProjectId =
         activeThread?.projectId ?? activeDraftThread?.projectId ?? firstVisibleProjectId;
       if (!fallbackProjectId) {
-        setAddingProject(true);
+        openSearchPalette("folder");
         return;
       }
 
@@ -1553,6 +1547,7 @@ export default function Sidebar() {
     firstVisibleProjectId,
     getOrCreateHomeProjectId,
     handleNewThread,
+    openSearchPalette,
   ]);
 
   const handleOpenOrchestrate = useCallback(() => {
@@ -2406,6 +2401,14 @@ export default function Sidebar() {
         cwd: project.cwd,
       })),
     [workspaceProjects],
+  );
+  const searchPaletteFolderRoots = useMemo(
+    () =>
+      buildSidebarFolderRoots({
+        homeDirectory,
+        projects: searchPaletteProjects,
+      }),
+    [homeDirectory, searchPaletteProjects],
   );
   const searchPaletteThreads = useMemo<SidebarSearchThread[]>(() => {
     if (!searchPaletteOpen) {
@@ -3406,7 +3409,7 @@ export default function Sidebar() {
                         aria-label="Search chats"
                         data-testid="sidebar-search-chats"
                         onClick={() => {
-                          setSearchPaletteOpen(true);
+                          openSearchPalette("search");
                         }}
                       >
                         <SearchIcon className="size-4" />
@@ -3418,63 +3421,24 @@ export default function Sidebar() {
                   </TooltipPopup>
                 </Tooltip>
 
-                <Popover onOpenChange={setAddingProject} open={addingProject}>
-                  <PopoverTrigger
-                    className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground/70 transition-colors duration-150 hover:bg-accent hover:text-foreground"
-                    aria-label="Add project"
-                    data-testid="sidebar-add-project"
-                  >
-                    <TbFolderPlus className="size-4" />
-                  </PopoverTrigger>
-                  <PopoverPopup
-                    side="bottom"
-                    align="end"
-                    sideOffset={8}
-                    className="w-[280px] rounded-[14px] border border-border/70 bg-popover/98 p-0 shadow-[0_16px_40px_rgba(0,0,0,0.14)] backdrop-blur-sm"
-                  >
-                    <div className="-mx-4 -my-4 px-4 py-4">
-                      <p className="mb-3 text-[12px] text-muted-foreground/80">Add project</p>
-                      <input
-                        autoFocus
-                        className="mb-2 w-full rounded-md border border-border bg-background px-3 py-2 font-mono text-xs text-foreground placeholder:text-muted-foreground/40 focus:border-ring focus:outline-none"
-                        placeholder="/path/to/project"
-                        value={newCwd}
-                        onChange={(event) => setNewCwd(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") handleAddProject();
-                          if (event.key === "Escape") setAddingProject(false);
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <button
+                        type="button"
+                        className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground/70 transition-colors duration-150 hover:bg-accent hover:text-foreground"
+                        aria-label="Add project"
+                        data-testid="sidebar-add-project"
+                        onClick={() => {
+                          openSearchPalette("folder");
                         }}
-                      />
-                      {isElectron ? (
-                        <button
-                          type="button"
-                          className="mb-2 flex w-full items-center justify-center rounded-md border border-border px-3 py-2 text-xs text-muted-foreground transition-colors duration-150 hover:bg-accent/60 disabled:cursor-not-allowed disabled:opacity-60"
-                          onClick={() => void handlePickFolder()}
-                          disabled={isPickingFolder || isAddingProject}
-                        >
-                          {isPickingFolder ? "Picking folder..." : "Browse for folder"}
-                        </button>
-                      ) : null}
-                      <div className="flex gap-2">
-                        <button
-                          type="button"
-                          className="flex-1 rounded-md bg-foreground px-3 py-2 text-xs font-medium text-background transition-opacity duration-150 hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
-                          onClick={handleAddProject}
-                          disabled={isAddingProject}
-                        >
-                          {isAddingProject ? "Adding..." : "Add"}
-                        </button>
-                        <button
-                          type="button"
-                          className="flex-1 rounded-md border border-border px-3 py-2 text-xs text-muted-foreground transition-colors duration-150 hover:bg-accent/60"
-                          onClick={() => setAddingProject(false)}
-                        >
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  </PopoverPopup>
-                </Popover>
+                      >
+                        <TbFolderPlus className="size-4" />
+                      </button>
+                    }
+                  />
+                  <TooltipPopup side="bottom">Add project</TooltipPopup>
+                </Tooltip>
 
                 {shouldShowProjectGroups && workspaceProjects.length > 0 ? (
                   <Tooltip>
@@ -3852,23 +3816,21 @@ export default function Sidebar() {
 
       <SidebarSearchPalette
         open={searchPaletteOpen}
-        onOpenChange={setSearchPaletteOpen}
+        onOpenChange={handleSearchPaletteOpenChange}
+        mode={searchPaletteMode}
+        onModeChange={setSearchPaletteMode}
         actions={searchPaletteActions}
         projects={searchPaletteProjects}
         threads={searchPaletteThreads}
+        folderRoots={searchPaletteFolderRoots}
         onCreateThread={handlePrimaryNewThread}
         onAddProject={() => {
-          setAddingProject(true);
+          openSearchPalette("folder");
         }}
-        onCloneRepository={async ({ repositoryUrl, directoryName }) => {
+        onCloneRepository={async ({ repositoryUrl, directoryName, parentDirectory }) => {
           const api = readNativeApi();
           if (!api) {
             throw new Error("Native API is unavailable.");
-          }
-
-          const parentDirectory = await api.dialogs.pickFolder();
-          if (!parentDirectory) {
-            return null;
           }
 
           return api.git.clone({
@@ -3878,6 +3840,16 @@ export default function Sidebar() {
           });
         }}
         onAddProjectFromPath={addProjectFromPath}
+        onListDirectory={async (cwd) => {
+          const api = readNativeApi();
+          if (!api) {
+            throw new Error("Native API is unavailable.");
+          }
+          return api.projects.listDirectory({
+            cwd,
+            relativePath: null,
+          });
+        }}
         onOpenSettings={() => {
           void navigate({
             to: "/settings",

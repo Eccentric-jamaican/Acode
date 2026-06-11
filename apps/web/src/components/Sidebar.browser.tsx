@@ -8,6 +8,7 @@ import {
   type ClientOrchestrationCommand,
   type DesktopBridge,
   type OrchestrationReadModel,
+  type ProjectDirectoryEntry,
   type ProjectId,
   type ServerConfig,
   type ThreadId,
@@ -51,6 +52,13 @@ interface TestFixture {
 
 let fixture: TestFixture;
 let nextSequence = 1;
+let directoryEntriesByCwd: Record<string, ProjectDirectoryEntry[]> = {};
+let dispatchedCommands: ClientOrchestrationCommand[] = [];
+let gitCloneRequests: Array<{
+  repositoryUrl: string;
+  parentDirectory: string;
+  directoryName: string;
+}> = [];
 const wsLink = ws.link(/ws(s)?:\/\/.*/);
 
 function createFixture(): TestFixture {
@@ -117,7 +125,23 @@ function createFixture(): TestFixture {
     serverConfig: {
       cwd: "C:\\Users\\Addis\\source\\repos\\t3code-main",
       keybindingsConfigPath: "C:\\Users\\Addis\\.t3\\userdata\\keybindings.json",
-      keybindings: [],
+      keybindings: [
+        {
+          command: "sidebar.search",
+          shortcut: {
+            key: "k",
+            metaKey: false,
+            ctrlKey: false,
+            shiftKey: false,
+            altKey: false,
+            modKey: true,
+          },
+          whenAst: {
+            type: "not",
+            node: { type: "identifier", name: "terminalFocus" },
+          },
+        },
+      ],
       issues: [],
       providers: [
         {
@@ -174,6 +198,7 @@ function createFixture(): TestFixture {
       availableEditors: [],
       serverPort: 0,
       serverAuthEnabled: false,
+      homeDirectory: "C:\\Users\\Addis",
     },
     welcome: {
       cwd: "C:\\Users\\Addis\\source\\repos\\t3code-main",
@@ -233,7 +258,8 @@ function makeThreadEntry(
   };
 }
 
-function resolveWsRpc(tag: string): unknown {
+function resolveWsRpc(body: WsRequestEnvelope["body"]): unknown {
+  const tag = body._tag;
   if (tag === ORCHESTRATION_WS_METHODS.getSnapshot) {
     return fixture.snapshot;
   }
@@ -272,6 +298,24 @@ function resolveWsRpc(tag: string): unknown {
     return {
       entries: [],
       truncated: false,
+    };
+  }
+  if (tag === WS_METHODS.projectsListDirectory) {
+    const cwd = typeof body.cwd === "string" ? body.cwd : "";
+    return {
+      relativePath: null,
+      entries: directoryEntriesByCwd[cwd] ?? [],
+    };
+  }
+  if (tag === WS_METHODS.gitClone) {
+    const repositoryUrl = typeof body.repositoryUrl === "string" ? body.repositoryUrl : "";
+    const parentDirectory = typeof body.parentDirectory === "string" ? body.parentDirectory : "";
+    const directoryName = typeof body.directoryName === "string" ? body.directoryName : "";
+    gitCloneRequests.push({ repositoryUrl, parentDirectory, directoryName });
+    return {
+      cwd: `${parentDirectory}\\${directoryName}`,
+      repositoryUrl,
+      directoryName,
     };
   }
   return {};
@@ -348,6 +392,7 @@ const worker = setupWorker(
       if (method === ORCHESTRATION_WS_METHODS.dispatchCommand) {
         const command = request.body.command as ClientOrchestrationCommand | undefined;
         if (command) {
+          dispatchedCommands.push(command);
           const result = applyDispatchCommand(command);
           client.send(
             JSON.stringify({
@@ -421,7 +466,7 @@ const worker = setupWorker(
       client.send(
         JSON.stringify({
           id: request.id,
-          result: resolveWsRpc(method),
+          result: resolveWsRpc(request.body),
         }),
       );
     });
@@ -466,6 +511,17 @@ function projectOrderLabels(): string[] {
       "[data-testid^='sidebar-project-']:not([data-testid^='sidebar-project-new-thread-'])",
     ),
   ].map((element) => element.getAttribute("aria-label") ?? "");
+}
+
+function dispatchCtrlK(): void {
+  window.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "k",
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
 }
 
 function elementOpacityByTestId(testId: string): number | null {
@@ -955,6 +1011,20 @@ afterAll(async () => {
 beforeEach(() => {
   fixture = createFixture();
   nextSequence = fixture.snapshot.snapshotSequence + 1;
+  directoryEntriesByCwd = {
+    "C:\\Users\\Addis": [
+      { path: "source", name: "source", kind: "directory" },
+      { path: "Downloads", name: "Downloads", kind: "directory" },
+      { path: "notes.txt", name: "notes.txt", kind: "file" },
+    ],
+    "C:\\Users\\Addis\\source": [{ path: "repos", name: "repos", kind: "directory" }],
+    "C:\\Users\\Addis\\source\\repos": [
+      { path: "Acode", name: "Acode", kind: "directory" },
+      { path: "t3code-main", name: "t3code-main", kind: "directory" },
+    ],
+  };
+  dispatchedCommands = [];
+  gitCloneRequests = [];
   window.desktopBridge = {
     getWsUrl: () => `ws://${window.location.host}`,
     getWindowChromeMetrics: () => ({
@@ -965,7 +1035,7 @@ beforeEach(() => {
       captionButtonLaneWidthPx: 104,
     }),
     openExternal: async () => true,
-    pickFolder: async () => null,
+    pickFolder: vi.fn(async () => null),
     confirm: async () => true,
   } as unknown as DesktopBridge;
   window.localStorage.clear();
@@ -1058,6 +1128,84 @@ describe("Sidebar browser", () => {
 
     await expect.element(page.getByRole("button", { name: "Add project" })).toBeVisible();
     await expect.element(page.getByRole("button", { name: "Filter threads" })).toBeVisible();
+
+    await mounted.cleanup();
+  });
+
+  it("opens the command palette with Ctrl+K", async () => {
+    const mounted = await mountSidebarApp();
+
+    dispatchCtrlK();
+
+    await expect.element(page.getByTestId("sidebar-search-palette")).toBeVisible();
+    await expect.element(page.getByText("Suggested", { exact: true })).toBeVisible();
+
+    await mounted.cleanup();
+  });
+
+  it("opens folder mode from the command palette Open folder action", async () => {
+    const mounted = await mountSidebarApp();
+
+    dispatchCtrlK();
+    await page.getByText("Open folder", { exact: true }).click();
+
+    await expect.element(page.getByText("Quick roots", { exact: true })).toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Use folder" })).toBeVisible();
+
+    await mounted.cleanup();
+  });
+
+  it("opens the same folder picker from the sidebar Add project button", async () => {
+    const mounted = await mountSidebarApp();
+
+    await page.getByRole("button", { name: "Add project" }).click();
+
+    await expect.element(page.getByText("Open folder", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Quick roots", { exact: true })).toBeVisible();
+
+    await mounted.cleanup();
+  });
+
+  it("adds a project from the in-app folder picker", async () => {
+    const mounted = await mountSidebarApp();
+
+    await page.getByRole("button", { name: "Add project" }).click();
+    await page.getByRole("button", { name: "Repos" }).click();
+    await page.getByText("Acode", { exact: true }).first().click();
+    await page.getByRole("button", { name: "Use folder" }).click();
+
+    await expect
+      .poll(() =>
+        dispatchedCommands.some(
+          (command) =>
+            command.type === "project.create" &&
+            command.workspaceRoot === "C:\\Users\\Addis\\source\\repos\\Acode",
+        ),
+      )
+      .toBe(true);
+
+    await mounted.cleanup();
+  });
+
+  it("chooses clone destination in-app without opening the native folder picker", async () => {
+    const mounted = await mountSidebarApp();
+
+    dispatchCtrlK();
+    await page.getByText("Clone git Repository", { exact: true }).click();
+    await page.getByPlaceholder("Enter URL").fill("https://github.com/openai/codex");
+    document
+      .querySelector<HTMLInputElement>('input[placeholder="Enter URL"]')
+      ?.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await page.getByRole("button", { name: "Repos" }).click();
+    await page.getByRole("button", { name: "Clone here" }).click();
+
+    await expect.poll(() => gitCloneRequests.length).toBe(1);
+    expect(gitCloneRequests[0]).toMatchObject({
+      repositoryUrl: "https://github.com/openai/codex",
+      parentDirectory: "C:\\Users\\Addis\\source\\repos",
+      directoryName: "codex",
+    });
+    expect(window.desktopBridge?.pickFolder).not.toHaveBeenCalled();
 
     await mounted.cleanup();
   });
