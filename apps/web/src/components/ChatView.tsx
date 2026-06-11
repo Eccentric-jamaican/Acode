@@ -341,6 +341,7 @@ const SCRIPT_TERMINAL_ROWS = 30;
 const WORKTREE_BRANCH_PREFIX = "t3code";
 const HEADER_COMPACT_BREAKPOINT = 480;
 const DESKTOP_APP_RESOLUTION_TIMEOUT_MS = 2_500;
+const POINTER_SCROLL_INTENT_THRESHOLD_PX = 6;
 
 function isTerminalUserInputSubmitFailure(error: unknown): boolean {
   const message =
@@ -1807,6 +1808,7 @@ export default function ChatView({
   const shouldAutoScrollRef = useRef(true);
   const lastKnownScrollTopRef = useRef(0);
   const isPointerScrollActiveRef = useRef(false);
+  const pointerScrollStartYRef = useRef<number | null>(null);
   const lastTouchClientYRef = useRef<number | null>(null);
   const pendingUserScrollUpIntentRef = useRef(false);
   const pendingAutoScrollFrameRef = useRef<number | null>(null);
@@ -3609,15 +3611,23 @@ export default function ChatView({
     },
     [cancelPendingStickToBottom],
   );
-  const onMessagesPointerDown = useCallback((_event: React.PointerEvent<HTMLDivElement>) => {
-    isPointerScrollActiveRef.current = true;
-  }, []);
-  const onMessagesPointerUp = useCallback((_event: React.PointerEvent<HTMLDivElement>) => {
+  const clearPointerScrollIntent = useCallback(() => {
+    pointerScrollStartYRef.current = null;
     isPointerScrollActiveRef.current = false;
   }, []);
-  const onMessagesPointerCancel = useCallback((_event: React.PointerEvent<HTMLDivElement>) => {
+  const onMessagesPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    pointerScrollStartYRef.current = event.clientY;
     isPointerScrollActiveRef.current = false;
   }, []);
+  const onMessagesPointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const startY = pointerScrollStartYRef.current;
+    if (startY === null) return;
+    if (Math.abs(event.clientY - startY) >= POINTER_SCROLL_INTENT_THRESHOLD_PX) {
+      isPointerScrollActiveRef.current = true;
+    }
+  }, []);
+  const onMessagesPointerUp = clearPointerScrollIntent;
+  const onMessagesPointerCancel = clearPointerScrollIntent;
   const onMessagesTouchStart = useCallback((event: React.TouchEvent<HTMLDivElement>) => {
     const touch = event.touches[0];
     if (!touch) return;
@@ -5259,7 +5269,10 @@ export default function ChatView({
       )
       .then(() => api.orchestration.getSnapshot({ mode: "focused", threadId: nextThreadId }))
       .then((snapshot) => {
-        syncServerReadModel(snapshot);
+        syncServerReadModel(snapshot, {
+          authoritativeThreadDetailIds: new Set([nextThreadId]),
+          preserveThreadDetails: true,
+        });
         return navigate({
           to: "/$threadId",
           params: { threadId: nextThreadId },
@@ -6338,8 +6351,10 @@ export default function ChatView({
           onClickCapture={onMessagesClickCapture}
           onWheel={onMessagesWheel}
           onPointerDown={onMessagesPointerDown}
+          onPointerMove={onMessagesPointerMove}
           onPointerUp={onMessagesPointerUp}
           onPointerCancel={onMessagesPointerCancel}
+          onPointerLeave={onMessagesPointerCancel}
           onTouchStart={onMessagesTouchStart}
           onTouchMove={onMessagesTouchMove}
           onTouchEnd={onMessagesTouchEnd}

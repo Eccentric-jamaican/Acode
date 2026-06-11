@@ -1,7 +1,7 @@
 import { ProjectId, ThreadId } from "@t3tools/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-function createMemoryStorage(): Storage {
+function createMemoryStorage() {
   const values = new Map<string, string>();
 
   return {
@@ -23,7 +23,7 @@ function createMemoryStorage(): Storage {
     setItem(key: string, value: string) {
       values.set(key, value);
     },
-  };
+  } satisfies Storage;
 }
 
 describe("useSplitViewStore", () => {

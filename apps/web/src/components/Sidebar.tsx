@@ -3226,12 +3226,20 @@ export default function Sidebar() {
           <SidebarMenuItem
             className="group/pinned-thread relative w-full"
             data-thread-item
-            onMouseLeave={() => clearArchiveConfirm(thread.id)}
+            onMouseEnter={() => scheduleThreadDetailPrefetch(thread)}
+            onMouseLeave={() => {
+              cancelThreadDetailPrefetch(thread.id);
+              clearArchiveConfirm(thread.id);
+            }}
+            onFocusCapture={() => {
+              scheduleThreadDetailPrefetch(thread);
+            }}
             onBlurCapture={(event: FocusEvent<HTMLElement>) => {
               const nextTarget = event.relatedTarget;
               if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
                 return;
               }
+              cancelThreadDetailPrefetch(thread.id);
               clearArchiveConfirm(thread.id);
             }}
           >
@@ -3388,6 +3396,7 @@ export default function Sidebar() {
     },
     [
       archiveConfirmThreadId,
+      cancelThreadDetailPrefetch,
       clearArchiveConfirm,
       handleInlineArchiveConfirm,
       expandedSubagentParentIds,
@@ -3397,6 +3406,7 @@ export default function Sidebar() {
       pendingApprovalByThreadId,
       pendingUserInputByThreadId,
       routeThreadId,
+      scheduleThreadDetailPrefetch,
       toggleSubagentParent,
     ],
   );
