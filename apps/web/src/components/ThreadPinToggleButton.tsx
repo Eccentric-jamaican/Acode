@@ -21,7 +21,7 @@ export function ThreadPinToggleButton(props: {
         props.toneClassName ?? "text-muted-foreground/34",
         props.presentation === "overlay"
           ? cn(
-              "absolute left-1.5 top-1/2 z-30 -translate-y-1/2",
+              "absolute left-[18px] top-1/2 z-30 -translate-y-1/2",
               props.pinned
                 ? "opacity-100"
                 : "opacity-0 group-hover/thread-row:opacity-100 group-focus-within/thread-row:opacity-100",
