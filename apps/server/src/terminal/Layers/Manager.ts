@@ -322,6 +322,19 @@ function normalizeTerminalMetadata(
   return decodeTerminalSessionMetadata(candidate);
 }
 
+function encodePowershellCommand(script: string): string {
+  return Buffer.from(script, "utf16le").toString("base64");
+}
+
+function normalizeProjectRootForMatch(value: string): string {
+  return value
+    .trim()
+    .replaceAll("\\", "/")
+    .replace(/\/+/g, "/")
+    .replace(/\/+$/g, "")
+    .toLowerCase();
+}
+
 function parseJsonArrayOrObject<T>(value: string): T[] {
   const trimmed = value.trim();
   if (trimmed.length === 0) {
@@ -353,8 +366,10 @@ function commandMatchesProjectRoot(
   if (!commandLine) {
     return false;
   }
-  const normalizedCommandLine = commandLine.replaceAll("\\", "/").toLowerCase();
-  return projectRoots.some((root) => normalizedCommandLine.includes(root));
+  const normalizedCommandLine = normalizeProjectRootForMatch(commandLine).replaceAll('"', "");
+  return projectRoots.some((root) =>
+    normalizedCommandLine.includes(normalizeProjectRootForMatch(root)),
+  );
 }
 
 function extractRecentOutputPorts(value: string): Set<number> {
@@ -373,24 +388,23 @@ async function discoverWindowsExternalServers(
 ): Promise<ExternalServerDescriptor[]> {
   const projectRoots = [filter.projectRoot, filter.cwd]
     .filter((value): value is string => Boolean(value))
-    .map((value) => value.replaceAll("\\", "/").toLowerCase());
+    .map(normalizeProjectRootForMatch);
   if (projectRoots.length === 0) {
     return [];
   }
 
   const command = [
     "$connections = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |",
-    "  Where-Object { $_.OwningProcess -gt 0 -and $_.LocalPort -gt 0 }",
+    "  Where-Object { $_.OwningProcess -gt 0 -and $_.LocalPort -gt 0 -and $_.LocalAddress -in @('127.0.0.1','::1','0.0.0.0','::') }",
     "if (-not $connections) { '[]'; exit 0 }",
-    "$pids = $connections | Select-Object -ExpandProperty OwningProcess -Unique",
-    "$processes = @{}",
-    "foreach ($pid in $pids) {",
-    '  $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $pid" -ErrorAction SilentlyContinue',
-    "  if ($null -eq $proc) { continue }",
-    "  $processes[$pid] = $proc",
+    "$processIds = $connections | Select-Object -ExpandProperty OwningProcess -Unique",
+    "$processMap = @{}",
+    "$processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $processIds -contains $_.ProcessId }",
+    "foreach ($proc in $processes) {",
+    "  $processMap[$proc.ProcessId] = $proc",
     "}",
     "$result = foreach ($connection in $connections) {",
-    "  $proc = $processes[$connection.OwningProcess]",
+    "  $proc = $processMap[$connection.OwningProcess]",
     "  if ($null -eq $proc) { continue }",
     "  [pscustomobject]@{",
     "    pid = [int]$proc.ProcessId",
@@ -403,11 +417,11 @@ async function discoverWindowsExternalServers(
     "  }",
     "}",
     "$result | ConvertTo-Json -Compress",
-  ].join("; ");
+  ].join("\n");
 
   const result = await runProcess(
     "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", command],
+    ["-NoProfile", "-NonInteractive", "-EncodedCommand", encodePowershellCommand(command)],
     {
       timeoutMs: DEFAULT_EXTERNAL_SERVER_SCAN_TIMEOUT_MS,
       allowNonZeroExit: true,
@@ -423,6 +437,10 @@ async function discoverWindowsExternalServers(
     commandMatchesProjectRoot(server.commandLine, projectRoots),
   );
 }
+
+export const __terminalManagerInternals = {
+  commandMatchesProjectRoot,
+};
 
 async function discoverPosixExternalServers(
   filter: ExternalServerFilter,

@@ -16,7 +16,7 @@ import {
   type PtyProcess,
   type PtySpawnInput,
 } from "../Services/PTY";
-import { TerminalManagerRuntime } from "./Manager";
+import { __terminalManagerInternals, TerminalManagerRuntime } from "./Manager";
 import { Effect, Encoding } from "effect";
 
 class FakePtyProcess implements PtyProcess {
@@ -215,6 +215,16 @@ describe("TerminalManager", () => {
     });
     return { logsDir, ptyAdapter, manager };
   }
+
+  it("matches command lines for project roots that contain spaces", () => {
+    const commandLine =
+      'node "C:\\Users\\First Last\\source\\repos\\t3code-main\\apps\\web\\node_modules\\vite\\bin\\vite.js"';
+    const result = __terminalManagerInternals.commandMatchesProjectRoot(commandLine, [
+      "C:\\Users\\First Last\\source\\repos\\t3code-main",
+    ]);
+
+    expect(result).toBe(true);
+  });
 
   it("spawns lazily and reuses running terminal per thread", async () => {
     const { manager, ptyAdapter } = makeManager();
