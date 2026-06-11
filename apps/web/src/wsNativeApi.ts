@@ -2,6 +2,8 @@ import {
   type ClientOrchestrationCommand,
   OrchestrationEvent,
   type OrchestrationCommandReceiptResult,
+  type OrchestrationGetSnapshotInput,
+  type OrchestrationReadModel,
   ORCHESTRATION_WS_CHANNELS,
   ORCHESTRATION_WS_METHODS,
   type ContextMenuItem,
@@ -113,6 +115,21 @@ async function dispatchCommandWithReceiptRecovery(
   }
 }
 
+function snapshotRequestKey(input?: OrchestrationGetSnapshotInput): string {
+  if (input?.mode !== "focused") {
+    return JSON.stringify(input ?? {});
+  }
+
+  const threadIds = [
+    ...new Set(
+      [input.threadId, ...(input.threadIds ?? [])].filter(
+        (threadId): threadId is NonNullable<typeof threadId> => threadId !== undefined,
+      ),
+    ),
+  ].toSorted();
+  return JSON.stringify({ mode: "focused", threadIds });
+}
+
 /**
  * Subscribe to the server welcome message. If a welcome was already received
  * before this call, the listener fires synchronously with the cached payload.
@@ -201,6 +218,27 @@ export function createWsNativeApi(options?: {
   if (instance) return instance.api;
 
   const transport = new WsTransport(options?.url, options?.authProvider);
+  const inFlightSnapshotRequests = new Map<string, Promise<OrchestrationReadModel>>();
+
+  const getOrchestrationSnapshot = (
+    input?: OrchestrationGetSnapshotInput,
+  ): Promise<OrchestrationReadModel> => {
+    const key = snapshotRequestKey(input);
+    const existing = inFlightSnapshotRequests.get(key);
+    if (existing) {
+      return existing;
+    }
+
+    const request = transport
+      .request<OrchestrationReadModel>(ORCHESTRATION_WS_METHODS.getSnapshot, input)
+      .finally(() => {
+        if (inFlightSnapshotRequests.get(key) === request) {
+          inFlightSnapshotRequests.delete(key);
+        }
+      });
+    inFlightSnapshotRequests.set(key, request);
+    return request;
+  };
 
   // Listen for server welcome and forward to registered listeners.
   // Also cache it so late subscribers (React effects) get it immediately.
@@ -383,7 +421,7 @@ export function createWsNativeApi(options?: {
       prewarmSession: (input) => transport.request(WS_METHODS.providerPrewarmSession, input),
     },
     orchestration: {
-      getSnapshot: (input) => transport.request(ORCHESTRATION_WS_METHODS.getSnapshot, input),
+      getSnapshot: getOrchestrationSnapshot,
       dispatchCommand: (command) => dispatchCommandWithReceiptRecovery(transport, command),
       getTurnDiff: (input) => transport.request(ORCHESTRATION_WS_METHODS.getTurnDiff, input),
       getFullThreadDiff: (input) =>

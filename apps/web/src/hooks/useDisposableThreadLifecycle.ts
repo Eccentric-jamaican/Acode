@@ -91,7 +91,7 @@ export function useDisposableThreadLifecycle(activeThreadId: ThreadId | null): v
               .getSnapshot({ mode: "bootstrap" })
               .catch(() => null);
             if (snapshot) {
-              syncServerReadModel(snapshot);
+              syncServerReadModel(snapshot, { preserveThreadDetails: true });
             }
           }
         }

@@ -192,6 +192,20 @@ function describeSnapshotInput(input: OrchestrationGetSnapshotInput): string {
   return input.mode ?? "bootstrap";
 }
 
+function authoritativeThreadDetailIdsForSnapshotInput(
+  input: OrchestrationGetSnapshotInput,
+): ReadonlySet<ThreadId> | undefined {
+  if (input.mode !== "focused") {
+    return undefined;
+  }
+
+  return new Set(
+    [input.threadId, ...(input.threadIds ?? [])].filter(
+      (threadId): threadId is ThreadId => threadId !== undefined,
+    ),
+  );
+}
+
 function EventRouter() {
   const syncServerReadModel = useStore((store) => store.syncServerReadModel);
   const setHydrationStatus = useStore((store) => store.setHydrationStatus);
@@ -225,11 +239,16 @@ function EventRouter() {
 
     const flushSnapshotSync = async (): Promise<void> => {
       const requestedSnapshotInput = snapshotInputForLocation(pathnameRef.current);
+      const snapshotInput = useStore.getState().threadsHydrated
+        ? requestedSnapshotInput
+        : ({ mode: "bootstrap" } satisfies OrchestrationGetSnapshotInput);
+      let preserveThreadDetails = snapshotInput.mode !== "full";
+      let authoritativeThreadDetailIds = authoritativeThreadDetailIdsForSnapshotInput(snapshotInput);
       let snapshot;
       try {
-        snapshot = await api.orchestration.getSnapshot(requestedSnapshotInput);
+        snapshot = await api.orchestration.getSnapshot(snapshotInput);
       } catch (error) {
-        if (requestedSnapshotInput.mode === "bootstrap") {
+        if (snapshotInput.mode === "bootstrap") {
           throw error;
         }
 
@@ -244,15 +263,20 @@ function EventRouter() {
               : "Focused snapshot failed before bootstrap fallback.",
           context: {
             route: pathnameRef.current,
-            requestedMode: describeSnapshotInput(requestedSnapshotInput),
+            requestedMode: describeSnapshotInput(snapshotInput),
             fallbackMode: "bootstrap",
           },
         });
         snapshot = await api.orchestration.getSnapshot({ mode: "bootstrap" });
+        preserveThreadDetails = true;
+        authoritativeThreadDetailIds = undefined;
       }
       if (disposed) return;
       latestSequence = Math.max(latestSequence, snapshot.snapshotSequence);
-      syncServerReadModel(snapshot);
+      syncServerReadModel(snapshot, {
+        ...(authoritativeThreadDetailIds ? { authoritativeThreadDetailIds } : {}),
+        preserveThreadDetails,
+      });
       const draftThreadIds = Object.keys(
         useComposerDraftStore.getState().draftThreadsByThreadId,
       ) as ThreadId[];

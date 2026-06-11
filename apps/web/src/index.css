@@ -418,11 +418,16 @@ label:has(> select#reasoning-effort) select {
 }
 
 .chat-markdown pre code {
+  display: block;
+  min-width: max-content;
   border: none;
   background: transparent;
   padding: 0;
   line-height: 1.5;
   font-size: 0.875rem;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 .chat-markdown .chat-markdown-codeblock {
@@ -469,6 +474,27 @@ label:has(> select#reasoning-effort) select {
 
 .chat-markdown .chat-markdown-shiki .shiki {
   background: color-mix(in srgb, var(--muted) 78%, var(--background)) !important;
+}
+
+.chat-markdown .chat-markdown-shiki {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.chat-markdown .chat-markdown-shiki code {
+  display: block;
+  min-width: max-content;
+  white-space: pre;
+}
+
+.chat-markdown .chat-markdown-shiki .line {
+  display: block;
+  min-height: 1.5em;
+}
+
+.chat-markdown .chat-markdown-shiki span {
+  line-height: inherit;
 }
 
 .file-viewer-shiki .shiki {
