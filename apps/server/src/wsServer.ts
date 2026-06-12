@@ -1311,6 +1311,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     }
     if (
       method === WS_METHODS.terminalOpen ||
+      method === WS_METHODS.terminalList ||
       method === WS_METHODS.terminalWrite ||
       method === WS_METHODS.terminalResize ||
       method === WS_METHODS.terminalClose

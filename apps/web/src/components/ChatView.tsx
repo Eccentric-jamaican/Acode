@@ -22,6 +22,7 @@ import {
   type ProviderApprovalDecision,
   type ProviderModelOptions,
   type ServerProviderStatus,
+  type TerminalListResult,
   type TerminalSessionSummary,
   type ProviderKind,
   type ProviderNativeCommandDescriptor,
@@ -553,7 +554,7 @@ function projectScriptIconNode(icon: ProjectScriptIcon, className = "size-3.5"):
 
 function normalizeLocalServerPath(pathValue: string | null | undefined): string | null {
   const normalized = pathValue?.replaceAll("\\", "/").replace(/\/+$/g, "").trim();
-  return normalized && normalized.length > 0 ? normalized.toLowerCase() : null;
+  return normalized && normalized.length > 0 ? normalized : null;
 }
 
 function localServerPathMatches(root: string | null | undefined, candidate: string): boolean {
@@ -702,7 +703,7 @@ function normalizeRepositoryUrl(value: string | null | undefined): string | null
     return null;
   }
 
-  const sshLikeMatch = /^(?:git@|ssh:\/\/git@)([^/:]+)[:/]([^?#]+?)(?:\.git)?\/?$/.exec(trimmed);
+  const sshLikeMatch = /^git@([^/:]+):([^?#]+?)(?:\.git)?\/?$/.exec(trimmed);
   if (sshLikeMatch?.[1] && sshLikeMatch[2]) {
     return `https://${sshLikeMatch[1]}/${sshLikeMatch[2].replace(/\.git$/i, "")}`;
   }
@@ -7984,6 +7985,9 @@ function LocalServersPopoverControl({
   const [formError, setFormError] = useState<string | null>(null);
   const [savingAction, setSavingAction] = useState(false);
   const [stoppingTerminalKey, setStoppingTerminalKey] = useState<string | null>(null);
+  const [cachedTerminalSessions, setCachedTerminalSessions] = useState<TerminalListResult | null>(
+    null,
+  );
 
   const quickActions = useMemo(
     () => scripts.filter((script) => !script.runOnWorktreeCreate),
@@ -7997,6 +8001,7 @@ function LocalServersPopoverControl({
       activeProjectId ?? null,
       activeProjectCwd ?? null,
       workspaceCwd ?? null,
+      popoverOpen,
     ],
     queryFn: async () => {
       const api = readNativeApi();
@@ -8010,8 +8015,8 @@ function LocalServersPopoverControl({
         ...(workspaceCwd ? { cwd: workspaceCwd } : {}),
       });
     },
-    enabled: Boolean(activeThreadId),
-    refetchInterval: LOCAL_SERVER_REFRESH_MS,
+    enabled: Boolean(activeThreadId && popoverOpen),
+    refetchInterval: popoverOpen ? LOCAL_SERVER_REFRESH_MS : false,
     retry: false,
   });
   const {
@@ -8020,18 +8025,22 @@ function LocalServersPopoverControl({
     isLoading: terminalSessionsLoading,
     refetch: refetchTerminalSessions,
   } = terminalSessionsQuery;
-  const isInitialServerCheckPending = terminalSessionsLoading && terminalSessionsData === undefined;
-  const hasServerCheckError = terminalSessionsError && terminalSessionsData === undefined;
-
   useEffect(() => {
-    if (!popoverOpen) {
+    if (!terminalSessionsData) {
       return;
     }
-    void refetchTerminalSessions();
-  }, [popoverOpen, refetchTerminalSessions]);
+    setCachedTerminalSessions(terminalSessionsData);
+  }, [terminalSessionsData]);
+
+  const terminalSessionsSnapshot = terminalSessionsData ?? cachedTerminalSessions;
+  const hasLoadedTerminalSessions = terminalSessionsSnapshot !== null;
+  const isInitialServerCheckPending =
+    popoverOpen && terminalSessionsLoading && terminalSessionsData === undefined && !hasLoadedTerminalSessions;
+  const hasServerCheckError =
+    popoverOpen && terminalSessionsError && terminalSessionsData === undefined && !hasLoadedTerminalSessions;
 
   const localServerSessions = useMemo(() => {
-    const sessions = terminalSessionsData?.sessions ?? [];
+    const sessions = terminalSessionsSnapshot?.sessions ?? [];
     return sessions
       .filter((session) =>
         terminalSessionBelongsToProject(session, {
@@ -8049,7 +8058,7 @@ function LocalServersPopoverControl({
     activeProjectId,
     activeThreadId,
     scripts,
-    terminalSessionsData?.sessions,
+    terminalSessionsSnapshot?.sessions,
     workspaceCwd,
   ]);
 

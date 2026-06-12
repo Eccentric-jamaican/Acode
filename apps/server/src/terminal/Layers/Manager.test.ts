@@ -226,6 +226,35 @@ describe("TerminalManager", () => {
     expect(result).toBe(true);
   });
 
+  it("does not match project roots by substring collision", () => {
+    const commandLine =
+      'node "C:\\Users\\Addis\\source\\repos\\t3code-main-2\\apps\\web\\node_modules\\vite\\bin\\vite.js"';
+    const result = __terminalManagerInternals.commandMatchesProjectRoot(commandLine, [
+      "C:\\Users\\Addis\\source\\repos\\t3code-main",
+    ]);
+
+    expect(result).toBe(false);
+  });
+
+  it("rejects stopping external pids that were not registered for the thread", async () => {
+    const killedPids: number[] = [];
+    const { manager } = makeManager(5, {
+      externalProcessKiller: async (pid) => {
+        killedPids.push(pid);
+      },
+    });
+
+    await expect(
+      manager.close({
+        threadId: "thread-1",
+        terminalId: "external:51515",
+      }),
+    ).rejects.toThrow(/not registered for thread/i);
+    expect(killedPids).toEqual([]);
+
+    manager.dispose();
+  });
+
   it("spawns lazily and reuses running terminal per thread", async () => {
     const { manager, ptyAdapter } = makeManager();
     const [first, second] = await Promise.all([

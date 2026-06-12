@@ -326,6 +326,23 @@ function encodePowershellCommand(script: string): string {
   return Buffer.from(script, "utf16le").toString("base64");
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeProjectRootForMatch(value: string): string {
+  return value
+    .trim()
+    .replaceAll("\\", "/")
+    .replace(/\/+/g, "/")
+    .replace(/\/+$/g, "")
+    .toLowerCase();
+}
+
+function encodePowershellCommand(script: string): string {
+  return Buffer.from(script, "utf16le").toString("base64");
+}
+
 function normalizeProjectRootForMatch(value: string): string {
   return value
     .trim()
@@ -367,9 +384,18 @@ function commandMatchesProjectRoot(
     return false;
   }
   const normalizedCommandLine = normalizeProjectRootForMatch(commandLine).replaceAll('"', "");
-  return projectRoots.some((root) =>
-    normalizedCommandLine.includes(normalizeProjectRootForMatch(root)),
-  );
+  return projectRoots.some((root) => {
+    const normalizedRoot = normalizeProjectRootForMatch(root);
+    const boundaryPattern = new RegExp(
+      `(^|\\s)${escapeRegExp(normalizedRoot)}(?:/|\\s|$)`,
+      "i",
+    );
+    return (
+      normalizedCommandLine === normalizedRoot ||
+      normalizedCommandLine.includes(`${normalizedRoot}/`) ||
+      boundaryPattern.test(normalizedCommandLine)
+    );
+  });
 }
 
 function extractRecentOutputPorts(value: string): Set<number> {
@@ -447,7 +473,7 @@ async function discoverPosixExternalServers(
 ): Promise<ExternalServerDescriptor[]> {
   const projectRoots = [filter.projectRoot, filter.cwd]
     .filter((value): value is string => Boolean(value))
-    .map((value) => value.replaceAll("\\", "/").toLowerCase());
+    .map(normalizeProjectRootForMatch);
   if (projectRoots.length === 0) {
     return [];
   }
@@ -633,6 +659,7 @@ interface TerminalManagerOptions {
 
 export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> {
   private readonly sessions = new Map<string, TerminalSessionState>();
+  private readonly externalServerPidsByThread = new Map<string, Set<number>>();
   private readonly logsDir: string;
   private readonly historyLineLimit: number;
   private readonly ptyAdapter: PtyAdapterShape;
@@ -888,7 +915,17 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       if (input.terminalId) {
         const externalPid = this.externalPidFromTerminalId(input.terminalId);
         if (externalPid !== null) {
+          const allowedPids = this.externalServerPidsByThread.get(input.threadId);
+          if (!allowedPids?.has(externalPid)) {
+            throw new Error(
+              `External server is not registered for thread: ${input.threadId}, terminal: ${input.terminalId}`,
+            );
+          }
           await this.externalProcessKiller(externalPid);
+          allowedPids.delete(externalPid);
+          if (allowedPids.size === 0) {
+            this.externalServerPidsByThread.delete(input.threadId);
+          }
           return;
         }
         await this.closeSession(input.threadId, input.terminalId, input.deleteHistory === true);
@@ -928,6 +965,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       clearTimeout(timer);
     }
     this.killEscalationTimers.clear();
+    this.externalServerPidsByThread.clear();
     this.pendingPersistHistory.clear();
     this.threadLocks.clear();
     this.persistQueues.clear();
@@ -1531,11 +1569,17 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     const fallbackCwd = input.projectRoot ?? input.cwd ?? process.cwd();
     const threadId = input.threadId ?? "external-local-server";
     const seenPorts = new Set<number>();
-
-    return discovered
+    const sessions = discovered
       .filter((server) => !managedPorts.has(server.port))
       .filter((server) => !seenPorts.has(server.port) && seenPorts.add(server.port))
       .map((server) => this.externalSummary(server, threadId, fallbackCwd));
+
+    this.externalServerPidsByThread.set(
+      threadId,
+      new Set(sessions.map((session) => session.pid).filter((pid): pid is number => pid !== null)),
+    );
+
+    return sessions;
   }
 
   private summary(session: TerminalSessionState): TerminalSessionSummary {
