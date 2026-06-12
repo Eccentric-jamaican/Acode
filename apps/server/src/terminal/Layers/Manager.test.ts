@@ -7,7 +7,7 @@ import {
   type TerminalEvent,
   type TerminalOpenInput,
 } from "@t3tools/contracts";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   PtySpawnError,
@@ -124,6 +124,17 @@ function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
   });
 }
 
+function deferred<T = void>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolvePromise!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return { promise, resolve: resolvePromise };
+}
+
 function openInput(overrides: Partial<TerminalOpenInput> = {}): TerminalOpenInput {
   return {
     threadId: "thread-1",
@@ -162,6 +173,7 @@ describe("TerminalManager", () => {
   const tempDirs: string[] = [];
 
   afterEach(() => {
+    vi.restoreAllMocks();
     for (const dir of tempDirs.splice(0, tempDirs.length)) {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -172,9 +184,7 @@ describe("TerminalManager", () => {
     options: {
       shellResolver?: () => string;
       subprocessChecker?: (terminalPid: number) => Promise<boolean>;
-      externalServerDiscoverer?: (
-        filter: { projectRoot?: string; cwd?: string },
-      ) => Promise<
+      externalServerDiscoverer?: (filter: { projectRoot?: string; cwd?: string }) => Promise<
         Array<{
           pid: number;
           port: number;
@@ -204,7 +214,9 @@ describe("TerminalManager", () => {
       ...(options.externalServerDiscoverer
         ? { externalServerDiscoverer: options.externalServerDiscoverer }
         : {}),
-      ...(options.externalProcessKiller ? { externalProcessKiller: options.externalProcessKiller } : {}),
+      ...(options.externalProcessKiller
+        ? { externalProcessKiller: options.externalProcessKiller }
+        : {}),
       ...(options.subprocessPollIntervalMs
         ? { subprocessPollIntervalMs: options.subprocessPollIntervalMs }
         : {}),
@@ -234,6 +246,229 @@ describe("TerminalManager", () => {
     ]);
 
     expect(result).toBe(false);
+  });
+
+  it("matches external servers through parent process commands", () => {
+    const result = __terminalManagerInternals.externalServerMatchesProjectRoot(
+      {
+        pid: 42,
+        port: 5733,
+        address: "127.0.0.1",
+        name: "node.exe",
+        commandLine: '"C:\\Program Files\\nodejs\\node.exe" vite.js --host 127.0.0.1',
+        parentCommandLine: 'bun run dev --cwd "C:\\Users\\Addis\\source\\repos\\t3code-main"',
+        parentPid: 41,
+        createdAt: null,
+      },
+      ["C:\\Users\\Addis\\source\\repos\\t3code-main"],
+    );
+
+    expect(result).toBe(true);
+  });
+
+  it("expands nested project folders to the repository root for external discovery", () => {
+    const repoRoot = fs.mkdtempSync(path.join(os.tmpdir(), "t3-terminal-repo-"));
+    const nestedProject = path.join(repoRoot, "apps", "server");
+    try {
+      fs.mkdirSync(path.join(repoRoot, ".git"));
+      fs.mkdirSync(nestedProject, { recursive: true });
+
+      const result = __terminalManagerInternals.projectRootCandidatesForExternalDiscovery({
+        projectRoot: nestedProject,
+      });
+
+      expect(result).toContain(nestedProject.replaceAll("\\", "/").toLowerCase());
+      expect(result).toContain(repoRoot.replaceAll("\\", "/").toLowerCase());
+    } finally {
+      fs.rmSync(repoRoot, { force: true, recursive: true });
+    }
+  });
+
+  it("uses the current workspace as a fallback when no project root is provided", () => {
+    const result = __terminalManagerInternals.projectRootCandidatesForExternalDiscovery({});
+
+    expect(result).toContain(process.cwd().replaceAll("\\", "/").toLowerCase());
+  });
+
+  it("parses local TCP listeners from netstat output", () => {
+    const result = __terminalManagerInternals.parseNetstatTcpListeners(`
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    127.0.0.1:5733         0.0.0.0:0              LISTENING       123
+  TCP    [::1]:5733             [::]:0                 LISTENING       123
+  TCP    [::1]:5734             [::]:0                 LISTENING       124
+  TCP    192.168.1.12:9000      0.0.0.0:0              LISTENING       125
+`);
+
+    expect(result).toEqual([
+      { address: "127.0.0.1", port: 5733, pid: 123 },
+      { address: "::1", port: 5734, pid: 124 },
+    ]);
+  });
+
+  it("parses IPv6 loopback listeners from unfiltered netstat output", () => {
+    const result = __terminalManagerInternals.parseNetstatTcpListeners(`
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    [::1]:5733             [::]:0                 LISTENING       123
+  UDP    [::1]:1900             *:*                                    456
+  TCP    192.168.1.12:9000      0.0.0.0:0              LISTENING       789
+`);
+
+    expect(result).toEqual([{ address: "::1", port: 5733, pid: 123 }]);
+  });
+
+  it("does not block terminal listing on external server discovery", async () => {
+    let discoveryResolved = false;
+    const discoveryGate = deferred();
+    const { manager } = makeManager(5, {
+      externalServerDiscoverer: async () => {
+        await discoveryGate.promise;
+        discoveryResolved = true;
+        return [
+          {
+            pid: 51515,
+            port: 5733,
+            address: "127.0.0.1",
+            name: "node.exe",
+            commandLine: "node vite.js",
+            parentPid: null,
+            createdAt: null,
+          },
+        ];
+      },
+    });
+
+    const first = await manager.list({
+      threadId: "thread-1",
+      projectRoot: "/tmp/project",
+    });
+    expect(first.sessions).toEqual([]);
+    expect(discoveryResolved).toBe(false);
+
+    discoveryGate.resolve();
+    await waitFor(() => discoveryResolved);
+
+    const second = await manager.list({
+      threadId: "thread-1",
+      projectRoot: "/tmp/project",
+    });
+    expect(second.sessions).toHaveLength(1);
+    expect(second.sessions[0]?.terminalId).toBe("external:51515");
+
+    manager.dispose();
+  });
+
+  it("keeps external servers visible through transient empty discovery results", async () => {
+    let now = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    let discoveryCount = 0;
+    const server = {
+      pid: 51515,
+      port: 5733,
+      address: "127.0.0.1",
+      name: "node.exe",
+      commandLine: "node vite.js",
+      parentPid: null,
+      createdAt: null,
+    };
+    const { manager } = makeManager(5, {
+      externalServerDiscoverer: async () => {
+        discoveryCount += 1;
+        return discoveryCount === 1 ? [server] : [];
+      },
+    });
+
+    const initial = await manager.list({
+      threadId: "thread-1",
+      projectRoot: "/tmp/project",
+    });
+    expect(initial.sessions).toEqual([]);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const discovered = await manager.list({
+      threadId: "thread-1",
+      projectRoot: "/tmp/project",
+    });
+    expect(discovered.sessions).toHaveLength(1);
+
+    now += 5_001;
+    const staleWhileRefreshing = await manager.list({
+      threadId: "thread-1",
+      projectRoot: "/tmp/project",
+    });
+    expect(staleWhileRefreshing.sessions).toHaveLength(1);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const retainedAfterEmptyScan = await manager.list({
+      threadId: "thread-1",
+      projectRoot: "/tmp/project",
+    });
+    expect(retainedAfterEmptyScan.sessions).toHaveLength(1);
+
+    now += 35_001;
+    const retainedWhileGraceExpires = await manager.list({
+      threadId: "thread-1",
+      projectRoot: "/tmp/project",
+    });
+    expect(retainedWhileGraceExpires.sessions).toHaveLength(1);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const clearedAfterGrace = await manager.list({
+      threadId: "thread-1",
+      projectRoot: "/tmp/project",
+    });
+    expect(clearedAfterGrace.sessions).toEqual([]);
+
+    manager.dispose();
+  });
+
+  it("removes stopped external servers from the cache immediately", async () => {
+    const killedPids: number[] = [];
+    const { manager } = makeManager(5, {
+      externalServerDiscoverer: async () => [
+        {
+          pid: 51515,
+          port: 5733,
+          address: "127.0.0.1",
+          name: "node.exe",
+          commandLine: "node vite.js",
+          parentPid: null,
+          createdAt: null,
+        },
+      ],
+      externalProcessKiller: async (pid) => {
+        killedPids.push(pid);
+      },
+    });
+
+    await manager.list({
+      threadId: "thread-1",
+      projectRoot: "/tmp/project",
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const beforeStop = await manager.list({
+      threadId: "thread-1",
+      projectRoot: "/tmp/project",
+    });
+    expect(beforeStop.sessions).toHaveLength(1);
+
+    await manager.close({
+      threadId: "thread-1",
+      terminalId: "external:51515",
+    });
+
+    const afterStop = await manager.list({
+      threadId: "thread-1",
+      projectRoot: "/tmp/project",
+    });
+    expect(killedPids).toEqual([51515]);
+    expect(afterStop.sessions).toEqual([]);
+
+    manager.dispose();
   });
 
   it("rejects stopping external pids that were not registered for the thread", async () => {

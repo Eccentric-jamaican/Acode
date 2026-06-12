@@ -40,7 +40,11 @@ const DEFAULT_OPEN_COLS = 120;
 const DEFAULT_OPEN_ROWS = 30;
 const DEFAULT_RECENT_OUTPUT_LINE_LIMIT = 160;
 const DEFAULT_RECENT_OUTPUT_CHAR_LIMIT = 24_000;
-const DEFAULT_EXTERNAL_SERVER_SCAN_TIMEOUT_MS = 4_000;
+const DEFAULT_EXTERNAL_SERVER_SCAN_TIMEOUT_MS = 6_000;
+const DEFAULT_EXTERNAL_SERVER_METADATA_TIMEOUT_MS = 5_000;
+const DEFAULT_EXTERNAL_SERVER_SCAN_BUFFER_BYTES = 2_000_000;
+const EXTERNAL_SERVER_CACHE_TTL_MS = 5_000;
+const EXTERNAL_SERVER_MISSING_GRACE_MS = 30_000;
 const EXTERNAL_TERMINAL_ID_PREFIX = "external:";
 const TERMINAL_ENV_BLOCKLIST = new Set(["PORT", "ELECTRON_RENDERER_PORT", "ELECTRON_RUN_AS_NODE"]);
 
@@ -65,6 +69,7 @@ interface ExternalServerDescriptor {
   address: string;
   name: string | null;
   commandLine: string | null;
+  parentCommandLine?: string | null;
   parentPid: number | null;
   createdAt: string | null;
 }
@@ -73,6 +78,27 @@ type ExternalServerDiscoverer = (
   filter: ExternalServerFilter,
 ) => Promise<ExternalServerDescriptor[]>;
 type ExternalProcessKiller = (pid: number) => Promise<void>;
+
+interface ExternalServerCacheEntry {
+  servers: ExternalServerDescriptor[];
+  updatedAtMs: number;
+  refreshPromise: Promise<ExternalServerDescriptor[]> | null;
+  missingSinceByKey: Map<string, number>;
+}
+
+interface WindowsTcpListener {
+  pid: number;
+  port: number;
+  address: string;
+}
+
+interface WindowsProcessMetadata {
+  processId: number;
+  parentProcessId: number | null;
+  name: string | null;
+  commandLine: string | null;
+  createdAt: string | null;
+}
 
 function defaultShellResolver(): string {
   if (process.platform === "win32") {
@@ -359,6 +385,39 @@ function normalizeExternalServerAddress(address: string, port: number): string {
   return `${normalizedAddress}:${port}`;
 }
 
+function findNearestGitRoot(value: string): string | null {
+  let current = path.resolve(value);
+  for (;;) {
+    if (fs.existsSync(path.join(current, ".git"))) {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return null;
+    }
+    current = parent;
+  }
+}
+
+function projectRootCandidatesForExternalDiscovery(filter: ExternalServerFilter): string[] {
+  const candidates = new Set<string>();
+  const values = [filter.projectRoot, filter.cwd].filter((value): value is string =>
+    Boolean(value),
+  );
+  if (values.length === 0) {
+    values.push(process.cwd());
+  }
+
+  for (const value of values) {
+    candidates.add(normalizeProjectRootForMatch(value));
+    const gitRoot = findNearestGitRoot(value);
+    if (gitRoot) {
+      candidates.add(normalizeProjectRootForMatch(gitRoot));
+    }
+  }
+  return [...candidates];
+}
+
 function commandMatchesProjectRoot(
   commandLine: string | null,
   projectRoots: readonly string[],
@@ -378,6 +437,110 @@ function commandMatchesProjectRoot(
   });
 }
 
+function externalServerMatchesProjectRoot(
+  server: ExternalServerDescriptor,
+  projectRoots: readonly string[],
+): boolean {
+  return (
+    commandMatchesProjectRoot(server.commandLine, projectRoots) ||
+    commandMatchesProjectRoot(server.parentCommandLine ?? null, projectRoots)
+  );
+}
+
+function externalServerCacheEntryKey(server: ExternalServerDescriptor): string {
+  return `${String(server.pid)}:${String(server.port)}`;
+}
+
+function reconcileExternalServerCacheEntry(
+  entry: ExternalServerCacheEntry,
+  servers: ExternalServerDescriptor[],
+  now: number,
+): ExternalServerDescriptor[] {
+  if (entry.servers.length === 0) {
+    entry.missingSinceByKey.clear();
+    return servers;
+  }
+
+  const discoveredByKey = new Map(
+    servers.map((server) => [externalServerCacheEntryKey(server), server] as const),
+  );
+  for (const key of discoveredByKey.keys()) {
+    entry.missingSinceByKey.delete(key);
+  }
+
+  const retainedServers: ExternalServerDescriptor[] = [];
+  for (const server of entry.servers) {
+    const key = externalServerCacheEntryKey(server);
+    if (discoveredByKey.has(key)) {
+      continue;
+    }
+    const missingSince = entry.missingSinceByKey.get(key) ?? now;
+    entry.missingSinceByKey.set(key, missingSince);
+    if (now - missingSince < EXTERNAL_SERVER_MISSING_GRACE_MS) {
+      retainedServers.push(server);
+      continue;
+    }
+    entry.missingSinceByKey.delete(key);
+  }
+
+  return [...servers, ...retainedServers];
+}
+
+function parseNetstatLocalAddress(value: string): { address: string; port: number } | null {
+  const trimmed = value.trim();
+  const bracketMatch = /^\[([^\]]+)\]:(\d+)$/.exec(trimmed);
+  if (bracketMatch?.[1] && bracketMatch[2]) {
+    const port = Number(bracketMatch[2]);
+    return Number.isInteger(port) && port > 0 ? { address: bracketMatch[1], port } : null;
+  }
+
+  const separatorIndex = trimmed.lastIndexOf(":");
+  if (separatorIndex <= 0) {
+    return null;
+  }
+  const port = Number(trimmed.slice(separatorIndex + 1));
+  if (!Number.isInteger(port) || port <= 0) {
+    return null;
+  }
+  return { address: trimmed.slice(0, separatorIndex), port };
+}
+
+function isLocalListenAddress(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return (
+    normalized === "127.0.0.1" ||
+    normalized === "0.0.0.0" ||
+    normalized === "::1" ||
+    normalized === "::"
+  );
+}
+
+function parseNetstatTcpListeners(value: string): WindowsTcpListener[] {
+  const listeners: WindowsTcpListener[] = [];
+  const seenListeners = new Set<string>();
+  for (const line of value.split(/\r?\n/g)) {
+    const match = /^\s*TCP\s+(\S+)\s+\S+\s+LISTENING\s+(\d+)\s*$/i.exec(line);
+    if (!match?.[1] || !match[2]) {
+      continue;
+    }
+    const localAddress = parseNetstatLocalAddress(match[1]);
+    const pid = Number(match[2]);
+    if (!localAddress || !Number.isInteger(pid) || pid <= 0) {
+      continue;
+    }
+    if (!isLocalListenAddress(localAddress.address)) {
+      continue;
+    }
+    const listenerKey = `${String(pid)}:${String(localAddress.port)}`;
+    if (seenListeners.has(listenerKey)) {
+      continue;
+    }
+    seenListeners.add(listenerKey);
+    listeners.push({ pid, port: localAddress.port, address: localAddress.address });
+  }
+  return listeners;
+}
+
 function extractRecentOutputPorts(value: string): Set<number> {
   const ports = new Set<number>();
   for (const match of value.matchAll(
@@ -394,68 +557,139 @@ function extractRecentOutputPorts(value: string): Set<number> {
 async function discoverWindowsExternalServers(
   filter: ExternalServerFilter,
 ): Promise<ExternalServerDescriptor[]> {
-  const projectRoots = [filter.projectRoot, filter.cwd]
-    .filter((value): value is string => Boolean(value))
-    .map(normalizeProjectRootForMatch);
+  const projectRoots = projectRootCandidatesForExternalDiscovery(filter);
   if (projectRoots.length === 0) {
     return [];
   }
 
-  const command = [
-    "$connections = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |",
-    "  Where-Object { $_.OwningProcess -gt 0 -and $_.LocalPort -gt 0 -and $_.LocalAddress -in @('127.0.0.1','::1','0.0.0.0','::') }",
-    "if (-not $connections) { '[]'; exit 0 }",
-    "$processIds = $connections | Select-Object -ExpandProperty OwningProcess -Unique",
-    "$processMap = @{}",
-    "$processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $processIds -contains $_.ProcessId }",
-    "foreach ($proc in $processes) {",
-    "  $processMap[$proc.ProcessId] = $proc",
-    "}",
-    "$result = foreach ($connection in $connections) {",
-    "  $proc = $processMap[$connection.OwningProcess]",
-    "  if ($null -eq $proc) { continue }",
-    "  [pscustomobject]@{",
-    "    pid = [int]$proc.ProcessId",
-    "    port = [int]$connection.LocalPort",
-    "    address = [string]$connection.LocalAddress",
-    "    name = [string]$proc.Name",
-    "    commandLine = [string]$proc.CommandLine",
-    "    parentPid = if ($null -ne $proc.ParentProcessId) { [int]$proc.ParentProcessId } else { $null }",
-    "    createdAt = if ($null -ne $proc.CreationDate) { [string]$proc.CreationDate } else { $null }",
-    "  }",
-    "}",
-    "$result | ConvertTo-Json -Compress",
-  ].join("\n");
+  const listeners = await discoverWindowsNetstatListeners();
+  const processMetadata = await discoverWindowsProcessMetadata(
+    listeners.map((listener) => listener.pid),
+  );
+  const descriptors = listeners.map((listener) => {
+    const process = processMetadata.get(listener.pid) ?? null;
+    const parent = process?.parentProcessId
+      ? (processMetadata.get(process.parentProcessId) ?? null)
+      : null;
+    return {
+      pid: listener.pid,
+      port: listener.port,
+      address: listener.address,
+      name: process?.name ?? null,
+      commandLine: process?.commandLine ?? null,
+      parentCommandLine: parent?.commandLine ?? null,
+      parentPid: process?.parentProcessId ?? null,
+      createdAt: process?.createdAt ?? null,
+    } satisfies ExternalServerDescriptor;
+  });
 
+  return descriptors.filter((server) => {
+    if (server.commandLine || server.parentCommandLine) {
+      return externalServerMatchesProjectRoot(server, projectRoots);
+    }
+    return false;
+  });
+}
+
+async function discoverWindowsNetstatListeners(): Promise<WindowsTcpListener[]> {
+  const result = await runProcess("netstat", ["-ano"], {
+    timeoutMs: DEFAULT_EXTERNAL_SERVER_SCAN_TIMEOUT_MS,
+    allowNonZeroExit: true,
+    maxBufferBytes: DEFAULT_EXTERNAL_SERVER_SCAN_BUFFER_BYTES,
+    outputMode: "truncate",
+  }).catch(() => null);
+  if (!result) {
+    return [];
+  }
+  if (result.code !== 0) {
+    return [];
+  }
+  return parseNetstatTcpListeners(result.stdout);
+}
+
+async function discoverWindowsProcessMetadata(
+  processIds: readonly number[],
+): Promise<Map<number, WindowsProcessMetadata>> {
+  const filter = [...new Set(processIds)]
+    .filter((processId) => Number.isInteger(processId) && processId > 0)
+    .map((processId) => `ProcessId = ${String(processId)}`)
+    .join(" OR ");
+  if (filter.length === 0) {
+    return new Map();
+  }
+
+  const command = [
+    `$processes = @(Get-CimInstance Win32_Process -Filter '${filter}' -Property ProcessId,ParentProcessId,Name,CommandLine,CreationDate -ErrorAction SilentlyContinue)`,
+    "$parentIds = @($processes | Where-Object { $null -ne $_.ParentProcessId -and $_.ParentProcessId -gt 0 } | Select-Object -ExpandProperty ParentProcessId -Unique)",
+    "$parents = @()",
+    "if ($parentIds.Count -gt 0) {",
+    "  $parentFilter = ($parentIds | ForEach-Object { \"ProcessId = $_\" }) -join \" OR \"",
+    "  $parents = @(Get-CimInstance Win32_Process -Filter $parentFilter -Property ProcessId,ParentProcessId,Name,CommandLine,CreationDate -ErrorAction SilentlyContinue)",
+    "}",
+    "@($processes + $parents) |",
+    "  Select-Object ProcessId,ParentProcessId,Name,CommandLine,CreationDate |",
+    "  ConvertTo-Json -Compress",
+  ].join("\n");
   const result = await runProcess(
     "powershell.exe",
     ["-NoProfile", "-NonInteractive", "-EncodedCommand", encodePowershellCommand(command)],
     {
-      timeoutMs: DEFAULT_EXTERNAL_SERVER_SCAN_TIMEOUT_MS,
+      timeoutMs: DEFAULT_EXTERNAL_SERVER_METADATA_TIMEOUT_MS,
       allowNonZeroExit: true,
       maxBufferBytes: 512_000,
       outputMode: "truncate",
     },
-  );
+  ).catch(() => null);
+  if (!result) {
+    return new Map();
+  }
   if (result.code !== 0) {
-    return [];
+    return new Map();
   }
 
-  return parseJsonArrayOrObject<ExternalServerDescriptor>(result.stdout).filter((server) =>
-    commandMatchesProjectRoot(server.commandLine, projectRoots),
-  );
+  const metadata = new Map<number, WindowsProcessMetadata>();
+  for (const process of parseJsonArrayOrObject<{
+    ProcessId?: unknown;
+    ParentProcessId?: unknown;
+    Name?: unknown;
+    CommandLine?: unknown;
+    CreationDate?: unknown;
+  }>(result.stdout)) {
+    const processId = Number(process.ProcessId);
+    if (!Number.isInteger(processId) || processId <= 0) {
+      continue;
+    }
+    const parentProcessId = Number(process.ParentProcessId);
+    metadata.set(processId, {
+      processId,
+      parentProcessId:
+        Number.isInteger(parentProcessId) && parentProcessId > 0 ? parentProcessId : null,
+      name: typeof process.Name === "string" && process.Name.length > 0 ? process.Name : null,
+      commandLine:
+        typeof process.CommandLine === "string" && process.CommandLine.length > 0
+          ? process.CommandLine
+          : null,
+      createdAt:
+        typeof process.CreationDate === "string" && process.CreationDate.length > 0
+          ? process.CreationDate
+          : null,
+    });
+  }
+  return metadata;
 }
 
 export const __terminalManagerInternals = {
   commandMatchesProjectRoot,
+  discoverWindowsExternalServers,
+  externalServerMatchesProjectRoot,
+  parseNetstatTcpListeners,
+  projectRootCandidatesForExternalDiscovery,
 };
 
 async function discoverPosixExternalServers(
   filter: ExternalServerFilter,
 ): Promise<ExternalServerDescriptor[]> {
-  const projectRoots = [filter.projectRoot, filter.cwd]
-    .filter((value): value is string => Boolean(value))
-    .map(normalizeProjectRootForMatch);
+  const projectRoots = projectRootCandidatesForExternalDiscovery(filter);
   if (projectRoots.length === 0) {
     return [];
   }
@@ -640,6 +874,7 @@ interface TerminalManagerOptions {
 export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> {
   private readonly sessions = new Map<string, TerminalSessionState>();
   private readonly externalServerPidsByThread = new Map<string, Set<number>>();
+  private readonly externalServerCache = new Map<string, ExternalServerCacheEntry>();
   private readonly logsDir: string;
   private readonly historyLineLimit: number;
   private readonly ptyAdapter: PtyAdapterShape;
@@ -905,6 +1140,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
             );
           }
           await this.externalProcessKiller(externalPid);
+          this.removeExternalServerFromCache(externalPid);
           allowedPids.delete(externalPid);
           if (allowedPids.size === 0) {
             this.externalServerPidsByThread.delete(input.threadId);
@@ -949,6 +1185,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     }
     this.killEscalationTimers.clear();
     this.externalServerPidsByThread.clear();
+    this.externalServerCache.clear();
     this.pendingPersistHistory.clear();
     this.threadLocks.clear();
     this.persistQueues.clear();
@@ -1542,13 +1779,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       ...(input.projectRoot ? { projectRoot: input.projectRoot } : {}),
       ...(input.cwd ? { cwd: input.cwd } : {}),
     };
-    const discovered = await this.externalServerDiscoverer(filter).catch((error) => {
-      this.logger.warn("failed to discover external local servers", {
-        error: error instanceof Error ? error.message : String(error),
-        ...filter,
-      });
-      return [];
-    });
+    const discovered = await this.discoverExternalServersWithCache(filter);
 
     const fallbackCwd = input.projectRoot ?? input.cwd ?? process.cwd();
     const threadId = input.threadId ?? "external-local-server";
@@ -1564,6 +1795,68 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     );
 
     return sessions;
+  }
+
+  private externalServerCacheKey(filter: ExternalServerFilter): string {
+    return JSON.stringify({
+      projectRoot: filter.projectRoot ? normalizeProjectRootForMatch(filter.projectRoot) : null,
+      cwd: filter.cwd ? normalizeProjectRootForMatch(filter.cwd) : null,
+    });
+  }
+
+  private removeExternalServerFromCache(pid: number): void {
+    for (const entry of this.externalServerCache.values()) {
+      entry.servers = entry.servers.filter((server) => server.pid !== pid);
+      for (const key of entry.missingSinceByKey.keys()) {
+        if (key.startsWith(`${String(pid)}:`)) {
+          entry.missingSinceByKey.delete(key);
+        }
+      }
+    }
+  }
+
+  private discoverExternalServersWithCache(
+    filter: ExternalServerFilter,
+  ): Promise<ExternalServerDescriptor[]> {
+    const key = this.externalServerCacheKey(filter);
+    const now = Date.now();
+    const current = this.externalServerCache.get(key);
+    const isFresh = current && now - current.updatedAtMs < EXTERNAL_SERVER_CACHE_TTL_MS;
+    if (isFresh) {
+      return Promise.resolve(current.servers);
+    }
+
+    if (current?.refreshPromise) {
+      return Promise.resolve(current.servers);
+    }
+
+    const entry: ExternalServerCacheEntry = current ?? {
+      servers: [],
+      updatedAtMs: 0,
+      missingSinceByKey: new Map(),
+      refreshPromise: null,
+    };
+    const refreshPromise = this.externalServerDiscoverer(filter)
+      .then((servers) => {
+        const updatedAtMs = Date.now();
+        entry.servers = reconcileExternalServerCacheEntry(entry, servers, updatedAtMs);
+        entry.updatedAtMs = updatedAtMs;
+        return entry.servers;
+      })
+      .catch((error) => {
+        this.logger.warn("failed to discover external local servers", {
+          error: error instanceof Error ? error.message : String(error),
+          ...filter,
+        });
+        return entry.servers;
+      })
+      .finally(() => {
+        entry.refreshPromise = null;
+      });
+    entry.refreshPromise = refreshPromise;
+    this.externalServerCache.set(key, entry);
+
+    return Promise.resolve(entry.servers);
   }
 
   private summary(session: TerminalSessionState): TerminalSessionSummary {
