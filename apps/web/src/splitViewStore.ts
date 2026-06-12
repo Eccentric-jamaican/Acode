@@ -8,17 +8,19 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import { randomUUID } from "./lib/utils";
 import { removeThreadFromSplitView } from "./splitView.logic";
+import type { ChatRightPanel } from "./diffRouteSearch";
 
 export type SplitViewId = string;
 export type SplitViewPane = "left" | "right";
 
 export interface SplitViewPanePanelState {
-  panel: "browser" | "diff" | null;
+  panel: ChatRightPanel | null;
   filesOpen: boolean;
   diffTurnId: TurnId | null;
   diffFilePath: string | null;
   hasOpenedPanel: boolean;
-  lastOpenPanel: "browser" | "diff";
+  lastOpenPanel: Exclude<ChatRightPanel, "picker"> | null;
+  lastPanelClosedAt: number | null;
 }
 
 export interface SplitView {
@@ -77,7 +79,8 @@ function createDefaultPanePanelState(): SplitViewPanePanelState {
     diffTurnId: null,
     diffFilePath: null,
     hasOpenedPanel: false,
-    lastOpenPanel: "browser",
+    lastOpenPanel: null,
+    lastPanelClosedAt: null,
   };
 }
 

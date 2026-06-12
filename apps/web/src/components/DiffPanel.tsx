@@ -72,6 +72,7 @@ import { toastManager } from "./ui/toast";
 
 interface DiffPanelProps {
   mode?: "inline" | "sheet" | "sidebar";
+  hideReviewTabHeader?: boolean;
 }
 
 export { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
@@ -166,8 +167,9 @@ function createPdfAnnotationImageAttachment(dataUrl: string): ComposerImageAttac
   };
 }
 
-export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
+export default function DiffPanel({ mode = "inline", hideReviewTabHeader = false }: DiffPanelProps) {
   const usesDesktopAppChrome = isElectronRuntime();
+  const reviewOnly = hideReviewTabHeader;
   const { resolvedTheme } = useTheme();
   const routeThreadId = useParams({
     strict: false,
@@ -232,7 +234,7 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
   }, [activeThreadId, diffSearch.diffFilePath, openFile]);
 
   const activeFilePath =
-    filePanelState.activeTab.kind === "file" ? filePanelState.activeTab.path : null;
+    !reviewOnly && filePanelState.activeTab.kind === "file" ? filePanelState.activeTab.path : null;
   const activeFileCwd =
     activeFilePath !== null
       ? (filePanelState.cwdByFilePath[activeFilePath] ?? activeCwd)
@@ -336,6 +338,12 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
       ? "h-[var(--app-desktop-content-header-height)]"
       : "h-11",
   );
+  const showViewerTabHeader =
+    !reviewOnly &&
+    (!hideReviewTabHeader ||
+      filePanelState.activeTab.kind !== "review" ||
+      filePanelState.openFiles.length > 0);
+  const showReviewSurface = reviewOnly || filePanelState.activeTab.kind === "review";
 
   return (
     <div
@@ -346,121 +354,125 @@ export default function DiffPanel({ mode = "inline" }: DiffPanelProps) {
           : "w-full",
       )}
     >
-      <div className="shrink-0 border-b border-border/60 bg-background">
-        <div
-          className={headerRowClassName}
-          data-testid={
-            usesDesktopAppChrome && mode !== "sheet" ? "diff-panel-top-header" : undefined
-          }
-        >
-          <div className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden">
-            <div className="flex min-w-max items-end gap-0">
-              <ViewerTabButton
-                active={filePanelState.activeTab.kind === "review"}
-                onClick={() => {
-                  if (activeThreadId) {
-                    selectReview(activeThreadId);
-                  }
-                }}
-              >
-                Review
-              </ViewerTabButton>
-              {filePanelState.openFiles.map((filePath) => (
-                <ViewerFileTab
-                  key={filePath}
-                  filePath={filePath}
-                  displayName={filePanelState.displayNameByFilePath[filePath]}
-                  active={activeFilePath === filePath}
-                  onSelect={() => {
-                    if (activeThreadId) {
-                      openFile(activeThreadId, filePath);
-                    }
-                  }}
-                  onClose={() => {
-                    if (activeThreadId) {
-                      closeFile(activeThreadId, filePath);
-                    }
-                  }}
-                />
-              ))}
-            </div>
-          </div>
-        </div>
-        {filePanelState.activeTab.kind === "file" && showFileSubheader ? (
-          <div className="desktop-top-edge-actions-safe flex h-11 items-center justify-between gap-3 px-4 text-[12px] text-muted-foreground/72">
-            {activeFilePath ? (
-              <div className="min-w-0" data-testid="viewer-breadcrumbs">
-                <div className="truncate text-[13px] font-medium text-foreground/88">
-                  {activeFileDisplayName}
-                </div>
-                <div className="mt-0.5 flex min-w-0 items-center overflow-hidden whitespace-nowrap text-[11px]">
-                  {breadcrumbs.slice(0, -1).map((segment, index) => (
-                    <span key={breadcrumbs.slice(0, index + 1).join("/")} className="contents">
-                      {index > 0 ? (
-                        <ChevronRightIcon className="mx-0.5 size-3 shrink-0 opacity-45" />
-                      ) : null}
-                      <span className="truncate">{segment}</span>
-                    </span>
+      {showViewerTabHeader || (filePanelState.activeTab.kind === "file" && showFileSubheader) ? (
+        <div className="shrink-0 border-b border-border/60 bg-background">
+          {showViewerTabHeader ? (
+            <div
+              className={headerRowClassName}
+              data-testid={
+                usesDesktopAppChrome && mode !== "sheet" ? "diff-panel-top-header" : undefined
+              }
+            >
+              <div className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                <div className="flex min-w-max items-center gap-1">
+                  <ViewerTabButton
+                    active={filePanelState.activeTab.kind === "review"}
+                    onClick={() => {
+                      if (activeThreadId) {
+                        selectReview(activeThreadId);
+                      }
+                    }}
+                  >
+                    Review
+                  </ViewerTabButton>
+                  {filePanelState.openFiles.map((filePath) => (
+                    <ViewerFileTab
+                      key={filePath}
+                      filePath={filePath}
+                      displayName={filePanelState.displayNameByFilePath[filePath]}
+                      active={activeFilePath === filePath}
+                      onSelect={() => {
+                        if (activeThreadId) {
+                          openFile(activeThreadId, filePath);
+                        }
+                      }}
+                      onClose={() => {
+                        if (activeThreadId) {
+                          closeFile(activeThreadId, filePath);
+                        }
+                      }}
+                    />
                   ))}
                 </div>
               </div>
-            ) : (
-              <span className="truncate text-[13px] font-medium text-foreground/84">File</span>
-            )}
-            {activeFilePath ? (
-              <Menu>
-                <MenuTrigger
-                  render={
-                    <Button
-                      type="button"
-                      size="icon-xs"
-                      variant="ghost"
-                      aria-label="Viewer options"
-                      className="shrink-0"
-                    />
-                  }
-                >
-                  <EllipsisIcon className="size-3.5" />
-                </MenuTrigger>
-                <MenuPopup align="end">
-                  <MenuItem onClick={openActiveFileInEditor}>
-                    <ExternalLinkIcon className="size-3.5 text-muted-foreground" />
-                    Open in editor
-                  </MenuItem>
-                  {isMarkdownFile(activeFilePath) ? (
-                    <MenuItem
-                      onClick={() => {
-                        if (activeThreadId) {
-                          toggleMarkdownRichView(activeThreadId, activeFilePath);
-                        }
-                      }}
-                    >
-                      <span className="text-muted-foreground">{"{}"}</span>
-                      {markdownRichViewEnabled ? "Disable rich view" : "Enable rich view"}
+            </div>
+          ) : null}
+          {filePanelState.activeTab.kind === "file" && showFileSubheader ? (
+            <div className="desktop-top-edge-actions-safe flex h-11 items-center justify-between gap-3 px-4 text-[12px] text-muted-foreground/72">
+              {activeFilePath ? (
+                <div className="min-w-0" data-testid="viewer-breadcrumbs">
+                  <div className="truncate text-[13px] font-medium text-foreground/88">
+                    {activeFileDisplayName}
+                  </div>
+                  <div className="mt-0.5 flex min-w-0 items-center overflow-hidden whitespace-nowrap text-[11px]">
+                    {breadcrumbs.slice(0, -1).map((segment, index) => (
+                      <span key={breadcrumbs.slice(0, index + 1).join("/")} className="contents">
+                        {index > 0 ? (
+                          <ChevronRightIcon className="mx-0.5 size-3 shrink-0 opacity-45" />
+                        ) : null}
+                        <span className="truncate">{segment}</span>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <span className="truncate text-[13px] font-medium text-foreground/84">File</span>
+              )}
+              {activeFilePath ? (
+                <Menu>
+                  <MenuTrigger
+                    render={
+                      <Button
+                        type="button"
+                        size="icon-xs"
+                        variant="ghost"
+                        aria-label="Viewer options"
+                        className="shrink-0"
+                      />
+                    }
+                  >
+                    <EllipsisIcon className="size-3.5" />
+                  </MenuTrigger>
+                  <MenuPopup align="end">
+                    <MenuItem onClick={openActiveFileInEditor}>
+                      <ExternalLinkIcon className="size-3.5 text-muted-foreground" />
+                      Open in editor
                     </MenuItem>
-                  ) : (
-                    <MenuItem
-                      onClick={() => {
-                        if (activeThreadId) {
-                          toggleCodeWordWrap(activeThreadId, activeFilePath);
-                        }
-                      }}
-                    >
-                      <span className="text-muted-foreground">{"↩"}</span>
-                      {codeWordWrapEnabled ? "Disable word wrap" : "Enable word wrap"}
-                    </MenuItem>
-                  )}
-                </MenuPopup>
-              </Menu>
-            ) : null}
-          </div>
-        ) : null}
-      </div>
+                    {isMarkdownFile(activeFilePath) ? (
+                      <MenuItem
+                        onClick={() => {
+                          if (activeThreadId) {
+                            toggleMarkdownRichView(activeThreadId, activeFilePath);
+                          }
+                        }}
+                      >
+                        <span className="text-muted-foreground">{"{}"}</span>
+                        {markdownRichViewEnabled ? "Disable rich view" : "Enable rich view"}
+                      </MenuItem>
+                    ) : (
+                      <MenuItem
+                        onClick={() => {
+                          if (activeThreadId) {
+                            toggleCodeWordWrap(activeThreadId, activeFilePath);
+                          }
+                        }}
+                      >
+                        <span className="text-muted-foreground">{"↩"}</span>
+                        {codeWordWrapEnabled ? "Disable word wrap" : "Enable word wrap"}
+                      </MenuItem>
+                    )}
+                  </MenuPopup>
+                </Menu>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
         {!activeThread ? (
           <PanelEmptyState message="Select a thread to inspect files." />
-        ) : filePanelState.activeTab.kind === "review" ? (
+        ) : showReviewSurface ? (
           <ReviewSurface
             cwd={activeCwd}
             mode={mode}
@@ -555,15 +567,337 @@ function ViewerTabButton(props: { active: boolean; onClick: () => void; children
     <button
       type="button"
       className={cn(
-        "inline-flex h-9 items-center border-b-2 px-3 text-[12px] font-medium transition-colors",
+        "inline-flex h-7 items-center rounded-md border px-2.5 text-[12px] font-medium transition-colors",
         props.active
-          ? "border-primary/70 bg-background text-foreground shadow-[inset_0_1px_0_hsl(var(--border)/0.35)]"
-          : "border-transparent bg-transparent text-muted-foreground/74 hover:bg-background/55 hover:text-foreground",
+          ? "border-border/70 bg-muted/60 text-foreground shadow-[inset_0_1px_0_hsl(var(--background)/0.72)]"
+          : "border-transparent bg-transparent text-muted-foreground/74 hover:bg-muted/42 hover:text-foreground",
       )}
       onClick={props.onClick}
     >
       {props.children}
     </button>
+  );
+}
+
+export function ThreadFileViewerSurface(props: { threadId: ThreadId; cwd: string | null }) {
+  const { resolvedTheme } = useTheme();
+  const activeThread = useStore((store) =>
+    store.threads.find((thread) => thread.id === props.threadId),
+  );
+  const activeProjectId = activeThread?.projectId ?? null;
+  const activeProject = useStore((store) =>
+    activeProjectId ? store.projects.find((project) => project.id === activeProjectId) : undefined,
+  );
+  const activeCwd = props.cwd ?? activeThread?.worktreePath ?? activeProject?.cwd ?? null;
+  const filePanelState = useFilePanelStore((store) =>
+    getFilePanelThreadState(store, props.threadId),
+  );
+  const openFile = useFilePanelStore((store) => store.openFile);
+  const closeFile = useFilePanelStore((store) => store.closeFile);
+  const toggleMarkdownRichView = useFilePanelStore((store) => store.toggleMarkdownRichView);
+  const toggleCodeWordWrap = useFilePanelStore((store) => store.toggleCodeWordWrap);
+  const addComment = useFilePanelStore((store) => store.addComment);
+  const updateComment = useFilePanelStore((store) => store.updateComment);
+  const deleteComment = useFilePanelStore((store) => store.deleteComment);
+  const addComposerImage = useComposerDraftStore((store) => store.addImage);
+  const addComposerPdfAnnotation = useComposerDraftStore((store) => store.addPdfAnnotation);
+  const composerPdfAnnotations = useComposerDraftStore(
+    (store) =>
+      store.draftsByThreadId[props.threadId]?.pdfAnnotations ?? EMPTY_PDF_ANNOTATIONS_FOR_PANEL,
+  );
+  const activeFilePath =
+    filePanelState.activeTab.kind === "file"
+      ? filePanelState.activeTab.path
+      : (filePanelState.openFiles[0] ?? null);
+  const activeFileCwd =
+    activeFilePath !== null
+      ? (filePanelState.cwdByFilePath[activeFilePath] ?? activeCwd)
+      : activeCwd;
+  const markdownRichViewEnabled = Boolean(
+    activeFilePath && !filePanelState.plainViewMarkdownFiles.includes(activeFilePath),
+  );
+  const codeWordWrapEnabled = Boolean(
+    activeFilePath && filePanelState.noWrapCodeFiles.includes(activeFilePath),
+  );
+  const activeFileDocumentKind = activeFilePath ? previewFileKind(activeFilePath) : null;
+  const activeThreadSessionStatus = activeThread?.session?.status ?? null;
+  const liveDocumentMetadataRefreshInterval =
+    activeFileDocumentKind !== null && activeThreadSessionStatus === "running" ? 1_500 : false;
+  const activeFileQuery = useQuery(
+    projectReadFileQueryOptions({
+      cwd: activeFileCwd,
+      relativePath: activeFilePath,
+      enabled: activeFileCwd !== null && activeFilePath !== null,
+      ...(activeFileDocumentKind !== null ? { staleTime: 0 } : {}),
+    }),
+  );
+  const { refetch: refetchActiveFile } = activeFileQuery;
+  const activeFileMetadataQuery = useQuery(
+    projectFileMetadataQueryOptions({
+      cwd: activeFileCwd,
+      relativePath: activeFilePath,
+      enabled:
+        activeFileDocumentKind !== null &&
+        activeFileCwd !== null &&
+        activeFilePath !== null &&
+        activeThreadSessionStatus === "running",
+      refetchInterval: liveDocumentMetadataRefreshInterval,
+    }),
+  );
+  const activeDocumentMetadataSignatureRef = useRef<string | null>(null);
+  const breadcrumbs = useMemo(() => {
+    if (!activeFilePath) return [] as string[];
+    return activeFilePath.split("/").filter((segment) => segment.length > 0);
+  }, [activeFilePath]);
+  const activeFileName = breadcrumbs.at(-1) ?? null;
+  const activeFileDisplayName =
+    activeFilePath !== null
+      ? (filePanelState.displayNameByFilePath[activeFilePath] ?? activeFileName)
+      : activeFileName;
+  const showFileSubheader = activeFilePath !== null && activeFileDocumentKind === null;
+  const fileTabElementsRef = useRef<Map<string, HTMLDivElement>>(new Map());
+
+  const addPdfAnnotationToComposer = useCallback(
+    (capture: PdfAnnotationCapture) => {
+      const image = createPdfAnnotationImageAttachment(capture.screenshotDataUrl);
+      const annotationId =
+        typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+          ? crypto.randomUUID()
+          : `pdf-annotation-${Date.now()}`;
+      addComposerImage(props.threadId, image);
+      addComposerPdfAnnotation(props.threadId, {
+        id: annotationId,
+        label: pdfAnnotationLabel(capture),
+        capture,
+        imageId: image.id,
+      });
+    },
+    [addComposerImage, addComposerPdfAnnotation, props.threadId],
+  );
+
+  useEffect(() => {
+    if (activeFileDocumentKind === null || activeFileCwd === null || activeFilePath === null) {
+      return;
+    }
+    void refetchActiveFile();
+  }, [
+    activeFileCwd,
+    activeFileDocumentKind,
+    activeFilePath,
+    activeThreadSessionStatus,
+    refetchActiveFile,
+  ]);
+
+  useEffect(() => {
+    if (activeFileDocumentKind === null || activeFileCwd === null || activeFilePath === null) {
+      activeDocumentMetadataSignatureRef.current = null;
+      return;
+    }
+    const metadata = activeFileMetadataQuery.data;
+    if (!metadata || metadata.status !== "file") {
+      return;
+    }
+
+    const signature = `${activeFileCwd}:${activeFilePath}:${metadata.sizeBytes}:${metadata.modifiedAtMs}`;
+    if (activeDocumentMetadataSignatureRef.current === null) {
+      activeDocumentMetadataSignatureRef.current = signature;
+      return;
+    }
+    if (activeDocumentMetadataSignatureRef.current !== signature) {
+      activeDocumentMetadataSignatureRef.current = signature;
+      void refetchActiveFile();
+    }
+  }, [
+    activeFileCwd,
+    activeFileDocumentKind,
+    activeFileMetadataQuery.data,
+    activeFilePath,
+    refetchActiveFile,
+  ]);
+
+  const openActiveFileInEditor = () => {
+    if (!activeFileCwd || !activeFilePath) {
+      return;
+    }
+    const api = readNativeApi();
+    if (!api) {
+      return;
+    }
+    const targetPath = resolvePathLinkTarget(activeFilePath, activeFileCwd);
+    void api.shell.openInEditor(targetPath, preferredTerminalEditor());
+  };
+
+  useEffect(() => {
+    if (!activeFilePath) {
+      return;
+    }
+    fileTabElementsRef.current.get(activeFilePath)?.scrollIntoView({
+      block: "nearest",
+      inline: "nearest",
+    });
+  }, [activeFilePath, filePanelState.openFiles.length]);
+
+  return (
+    <div className="flex h-full min-w-0 flex-1 flex-col bg-background text-foreground">
+      <div className="shrink-0 border-b border-border/60 bg-background">
+        <div className="flex h-9 min-w-0 items-center gap-2 border-b border-border/45 bg-background/72 px-2">
+          <div className="min-w-0 flex-1 overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            <div className="flex min-w-max items-center gap-1">
+              {filePanelState.openFiles.length === 0 ? (
+                <ViewerTabButton active onClick={() => {}}>
+                  Open file
+                </ViewerTabButton>
+              ) : (
+                filePanelState.openFiles.map((filePath) => (
+                  <ViewerFileTab
+                    key={filePath}
+                    filePath={filePath}
+                    displayName={filePanelState.displayNameByFilePath[filePath]}
+                    active={activeFilePath === filePath}
+                    onSelect={() => openFile(props.threadId, filePath)}
+                    onClose={() => closeFile(props.threadId, filePath)}
+                    tabRef={(node) => {
+                      if (node) {
+                        fileTabElementsRef.current.set(filePath, node);
+                      } else {
+                        fileTabElementsRef.current.delete(filePath);
+                      }
+                    }}
+                  />
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+        {showFileSubheader ? (
+          <div className="flex h-11 items-center justify-between gap-3 px-4 text-[12px] text-muted-foreground/72">
+            {activeFilePath ? (
+              <div className="min-w-0" data-testid="file-viewer-breadcrumbs">
+                <div className="truncate text-[13px] font-medium text-foreground/88">
+                  {activeFileDisplayName}
+                </div>
+                <div className="mt-0.5 flex min-w-0 items-center overflow-hidden whitespace-nowrap text-[11px]">
+                  {breadcrumbs.slice(0, -1).map((segment, index) => (
+                    <span key={breadcrumbs.slice(0, index + 1).join("/")} className="contents">
+                      {index > 0 ? (
+                        <ChevronRightIcon className="mx-0.5 size-3 shrink-0 opacity-45" />
+                      ) : null}
+                      <span className="truncate">{segment}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <span className="truncate text-[13px] font-medium text-foreground/84">
+                Open file
+              </span>
+            )}
+            {activeFilePath ? (
+              <Menu>
+                <MenuTrigger
+                  render={
+                    <Button
+                      type="button"
+                      size="icon-xs"
+                      variant="ghost"
+                      aria-label="File viewer options"
+                      className="shrink-0"
+                    />
+                  }
+                >
+                  <EllipsisIcon className="size-3.5" />
+                </MenuTrigger>
+                <MenuPopup align="end">
+                  <MenuItem onClick={openActiveFileInEditor}>
+                    <ExternalLinkIcon className="size-3.5 text-muted-foreground" />
+                    Open in editor
+                  </MenuItem>
+                  {isMarkdownFile(activeFilePath) ? (
+                    <MenuItem
+                      onClick={() => toggleMarkdownRichView(props.threadId, activeFilePath)}
+                    >
+                      <span className="text-muted-foreground">{"{}"}</span>
+                      {markdownRichViewEnabled ? "Disable rich view" : "Enable rich view"}
+                    </MenuItem>
+                  ) : (
+                    <MenuItem onClick={() => toggleCodeWordWrap(props.threadId, activeFilePath)}>
+                      <span className="text-muted-foreground">{"↩"}</span>
+                      {codeWordWrapEnabled ? "Disable word wrap" : "Enable word wrap"}
+                    </MenuItem>
+                  )}
+                </MenuPopup>
+              </Menu>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
+      <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
+        {!activeThread ? (
+          <PanelEmptyState message="Select a thread to inspect files." />
+        ) : activeFilePath === null ? (
+          <div className="flex h-full items-center justify-center px-6 text-center">
+            <div className="space-y-2">
+              <FileIcon className="mx-auto size-7 text-muted-foreground/70" />
+              <div className="text-sm font-medium text-foreground">Open file</div>
+              <div className="text-xs text-muted-foreground">
+                Select a file from the workspace tree.
+              </div>
+            </div>
+          </div>
+        ) : activeFileQuery.isLoading ? (
+          <PanelEmptyState message="Loading file..." />
+        ) : activeFileQuery.data?.status === "document" ? (
+          <OfficeDocumentViewer
+            filePath={activeFilePath}
+            contentsBase64={activeFileQuery.data.contentsBase64}
+            mimeType={activeFileQuery.data.mimeType}
+            onAddPdfAnnotation={addPdfAnnotationToComposer}
+            pdfAnnotations={composerPdfAnnotations.filter(
+              (annotation) => annotation.capture.filePath === activeFilePath,
+            )}
+          />
+        ) : activeFileQuery.data && activeFileQuery.data.status !== "text" ? (
+          <PanelEmptyState
+            message={
+              activeFileQuery.data.status === "binary" && previewFileKind(activeFilePath) !== null
+                ? "Preview is available, but the running server returned the old binary-file response. Restart the T3 server and reopen this file."
+                : "message" in activeFileQuery.data
+                  ? activeFileQuery.data.message
+                  : "File unavailable."
+            }
+          />
+        ) : activeFileQuery.data?.status === "text" ? (
+          isMarkdownFile(activeFilePath) && markdownRichViewEnabled ? (
+            <MarkdownFileViewer
+              filePath={activeFilePath}
+              contents={activeFileQuery.data.contents}
+              cwd={activeFileCwd}
+            />
+          ) : (
+            <Suspense fallback={<PanelEmptyState message="Loading syntax highlighting..." />}>
+              <ReadOnlyFileViewer
+                filePath={activeFilePath}
+                contents={activeFileQuery.data.contents}
+                comments={filePanelState.commentsByFilePath[activeFilePath] ?? []}
+                theme={resolvedTheme}
+                wrapLines={codeWordWrapEnabled}
+                onAddComment={(line, text) => {
+                  addComment(props.threadId, activeFilePath, line, text);
+                }}
+                onUpdateComment={(commentId, text) => {
+                  updateComment(props.threadId, activeFilePath, commentId, text);
+                }}
+                onDeleteComment={(commentId) => {
+                  deleteComment(props.threadId, activeFilePath, commentId);
+                }}
+              />
+            </Suspense>
+          )
+        ) : (
+          <PanelEmptyState message="Select a file to view it here." />
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -573,24 +907,30 @@ function ViewerFileTab(props: {
   active: boolean;
   onSelect: () => void;
   onClose: () => void;
+  tabRef?: ((node: HTMLDivElement | null) => void) | undefined;
 }) {
   const label = props.displayName ?? props.filePath.split("/").at(-1) ?? props.filePath;
   return (
     <div
+      ref={props.tabRef}
+      title={props.filePath}
       className={cn(
-        "inline-flex h-9 max-w-56 items-center gap-1 border-b-2 px-3 text-[12px] transition-colors",
+        "group/file-tab inline-flex h-7 max-w-52 items-center gap-1.5 rounded-md border px-2 text-[12px] transition-colors",
         props.active
-          ? "border-primary/70 bg-background text-foreground shadow-[inset_0_1px_0_hsl(var(--border)/0.35)]"
-          : "border-transparent bg-transparent text-muted-foreground/74 hover:bg-background/55 hover:text-foreground",
+          ? "border-border/70 bg-muted/60 text-foreground shadow-[inset_0_1px_0_hsl(var(--background)/0.72)]"
+          : "border-transparent bg-transparent text-muted-foreground/74 hover:bg-muted/42 hover:text-foreground",
       )}
     >
-      <button type="button" className="flex min-w-0 items-center gap-1" onClick={props.onSelect}>
+      <button type="button" className="flex min-w-0 items-center gap-1.5" onClick={props.onSelect}>
         <FileIcon className="size-3 shrink-0" />
         <span className="truncate">{label}</span>
       </button>
       <button
         type="button"
-        className="rounded-sm text-muted-foreground/70 hover:text-foreground"
+        className={cn(
+          "rounded-sm text-muted-foreground/70 transition-opacity hover:text-foreground",
+          props.active ? "opacity-75" : "opacity-0 group-hover/file-tab:opacity-75",
+        )}
         onClick={props.onClose}
         aria-label={`Close ${label}`}
       >

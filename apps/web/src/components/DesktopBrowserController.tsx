@@ -142,6 +142,25 @@ export function DesktopBrowserController() {
   }, [navigate]);
 
   useEffect(() => {
+    let closeRequested = false;
+    const closeNativeBrowserPane = () => {
+      if (closeRequested) {
+        return;
+      }
+      closeRequested = true;
+      const api = readNativeApi();
+      void api?.browser?.closePane().catch(() => undefined);
+    };
+
+    window.addEventListener("pagehide", closeNativeBrowserPane);
+    window.addEventListener("beforeunload", closeNativeBrowserPane);
+    return () => {
+      window.removeEventListener("pagehide", closeNativeBrowserPane);
+      window.removeEventListener("beforeunload", closeNativeBrowserPane);
+    };
+  }, []);
+
+  useEffect(() => {
     if (browserRouteThreadIdFromPathname(pathname) !== null) {
       return;
     }

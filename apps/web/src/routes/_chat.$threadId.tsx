@@ -13,7 +13,12 @@ import {
 
 import ChatView from "../components/ChatView";
 import ChatHomeSurface, { resolveChatHomeSurfaceVariant } from "../components/ChatHomeSurface";
+import { ThreadFileViewerSurface } from "../components/DiffPanel";
 import IntegratedBrowserPane from "../components/IntegratedBrowserPane";
+import RightSidebarWorkspace, {
+  type RightSidebarWorkspaceTab,
+  type RightSidebarWorkspaceTabId,
+} from "../components/RightSidebarWorkspace";
 import { useComposerDraftStore } from "../composerDraftStore";
 import { useDisposableThreadLifecycle } from "../hooks/useDisposableThreadLifecycle";
 import {
@@ -26,6 +31,7 @@ import {
   stripDiffSearchParams,
   type ChatRightPanel,
 } from "../diffRouteSearch";
+import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
 import { useMediaQuery } from "../hooks/useMediaQuery";
 import { cn } from "../lib/utils";
 import { readNativeApi } from "../nativeApi";
@@ -42,8 +48,17 @@ import {
   DialogPopup,
   DialogTitle,
 } from "~/components/ui/dialog";
-import { ArrowLeftRight, Maximize2Icon, Minimize2Icon, PanelLeftIcon } from "lucide-react";
+import {
+  ArrowLeftRight,
+  FileTextIcon,
+  FilesIcon,
+  GlobeIcon,
+  Maximize2Icon,
+  MessageSquareIcon,
+  TerminalIcon,
+} from "lucide-react";
 import { WorkspaceFilesRail } from "../components/WorkspaceFilesRail";
+import ThreadTerminalDrawer from "../components/ThreadTerminalDrawer";
 import {
   useSplitViewStore,
   selectSplitView,
@@ -54,18 +69,53 @@ import {
   resolveSplitViewFocusedThreadId,
 } from "../splitViewStore";
 import { resolveActiveSplitView, isSplitRoute } from "../splitViewRoute";
+import {
+  DEFAULT_THREAD_TERMINAL_HEIGHT,
+  DEFAULT_THREAD_TERMINAL_ID,
+  MAX_THREAD_TERMINAL_COUNT,
+} from "../types";
 
 const DiffPanel = lazy(() => import("../components/DiffPanel"));
 const DIFF_INLINE_LAYOUT_MEDIA_QUERY = "(max-width: 1180px)";
 const DIFF_INLINE_DEFAULT_WIDTH = "clamp(28rem,48vw,44rem)";
 const FILES_RAIL_WIDTH = "22rem";
 const FILES_RAIL_WIDTH_PX = 22 * 16;
+const FILE_VIEWER_PANEL_MIN_WIDTH_PX = 30 * 16;
 const VIEWER_PANEL_MIN_WIDTH_PX = 24 * 16;
 const SPLIT_PANE_PANEL_DEFAULT_WIDTH_PX = 22 * 16;
 const SPLIT_PANE_CHAT_MIN_WIDTH = 20 * 16;
 const SINGLE_PANEL_MIN_WIDTH = 26 * 16;
+const RIGHT_PANEL_CHAT_READABLE_WIDTH_PX = 44 * 16;
+const RIGHT_PANEL_MAX_WIDTH_PX = 60 * 16;
 const COMPOSER_COMPACT_MIN_LEFT_CONTROLS_WIDTH_PX = 208;
 const RIGHT_PANEL_SIDEBAR_WIDTH_STORAGE_KEY = "chat_right_panel_width";
+const RIGHT_PANEL_GRACE_MS = 5 * 60 * 1000;
+
+const RIGHT_PANEL_TABS = [
+  { id: "diff", label: "Review", Icon: FileTextIcon },
+  { id: "terminal", label: "Terminal", Icon: TerminalIcon },
+  { id: "browser", label: "Browser", Icon: GlobeIcon },
+  { id: "files", label: "Open file", Icon: FilesIcon },
+  { id: "side-chat", label: "Side chat", Icon: MessageSquareIcon },
+] as const satisfies ReadonlyArray<Omit<RightSidebarWorkspaceTab, "render">>;
+
+function isToolTabPanel(panel: ChatRightPanel | null): panel is RightSidebarWorkspaceTabId {
+  return panel !== null && panel !== "picker";
+}
+
+function isRecentPanelClose(closedAt: number | null): boolean {
+  return closedAt !== null && Date.now() - closedAt < RIGHT_PANEL_GRACE_MS;
+}
+
+function rightPanelMinimumWidth(panel: ChatRightPanel | null | undefined, filesOpen: boolean): number {
+  if (panel === "files") {
+    return FILE_VIEWER_PANEL_MIN_WIDTH_PX;
+  }
+  if (panel === "diff" && filesOpen) {
+    return VIEWER_PANEL_MIN_WIDTH_PX + FILES_RAIL_WIDTH_PX;
+  }
+  return SINGLE_PANEL_MIN_WIDTH;
+}
 
 function resolveThreadBrowserContext(input: {
   threadId: ThreadId;
@@ -172,6 +222,124 @@ const DiffLoadingFallback = (props: { inline: boolean }) => {
   );
 };
 
+function ThreadTerminalPanelSurface(props: {
+  threadId: ThreadId;
+  cwd: string | null;
+}) {
+  const terminalState = useTerminalStateStore((state) =>
+    selectThreadTerminalState(state.terminalStateByThreadId, props.threadId),
+  );
+  const storeSplitTerminal = useTerminalStateStore((state) => state.splitTerminal);
+  const storeNewTerminal = useTerminalStateStore((state) => state.newTerminal);
+  const storeSetActiveTerminal = useTerminalStateStore((state) => state.setActiveTerminal);
+  const storeCloseTerminal = useTerminalStateStore((state) => state.closeTerminal);
+  const storeSetTerminalHeight = useTerminalStateStore((state) => state.setTerminalHeight);
+  const [focusRequestId, setFocusRequestId] = useState(0);
+  const hasReachedTerminalLimit = terminalState.terminalIds.length >= MAX_THREAD_TERMINAL_COUNT;
+
+  const splitTerminal = useCallback(() => {
+    if (hasReachedTerminalLimit) return;
+    const terminalId = `terminal-${crypto.randomUUID()}`;
+    storeSplitTerminal(props.threadId, terminalId);
+    setFocusRequestId((value) => value + 1);
+  }, [hasReachedTerminalLimit, props.threadId, storeSplitTerminal]);
+
+  const createNewTerminal = useCallback(() => {
+    if (hasReachedTerminalLimit) return;
+    const terminalId = `terminal-${crypto.randomUUID()}`;
+    storeNewTerminal(props.threadId, terminalId);
+    setFocusRequestId((value) => value + 1);
+  }, [hasReachedTerminalLimit, props.threadId, storeNewTerminal]);
+
+  const activateTerminal = useCallback(
+    (terminalId: string) => {
+      storeSetActiveTerminal(props.threadId, terminalId);
+      setFocusRequestId((value) => value + 1);
+    },
+    [props.threadId, storeSetActiveTerminal],
+  );
+
+  const closeTerminal = useCallback(
+    (terminalId: string) => {
+      const api = readNativeApi();
+      if (!api) return;
+      const isFinalTerminal = terminalState.terminalIds.length <= 1;
+      const fallbackExitWrite = () =>
+        api.terminal.write({ threadId: props.threadId, terminalId, data: "exit\n" }).catch(() => undefined);
+      if ("close" in api.terminal && typeof api.terminal.close === "function") {
+        void (async () => {
+          if (isFinalTerminal) {
+            await api.terminal
+              .clear({ threadId: props.threadId, terminalId })
+              .catch(() => undefined);
+          }
+          await api.terminal.close({ threadId: props.threadId, terminalId, deleteHistory: true });
+        })().catch(() => fallbackExitWrite());
+      } else {
+        void fallbackExitWrite();
+      }
+      storeCloseTerminal(props.threadId, terminalId);
+      setFocusRequestId((value) => value + 1);
+    },
+    [props.threadId, storeCloseTerminal, terminalState.terminalIds.length],
+  );
+
+  if (!props.cwd) {
+    return (
+      <div className="flex h-full items-center justify-center px-4 text-center text-xs text-muted-foreground/70">
+        Terminal unavailable.
+      </div>
+    );
+  }
+
+  return (
+    <ThreadTerminalDrawer
+      threadId={props.threadId}
+      cwd={props.cwd}
+      layout="panel"
+      height={terminalState.terminalHeight || DEFAULT_THREAD_TERMINAL_HEIGHT}
+      terminalIds={terminalState.terminalIds}
+      activeTerminalId={terminalState.activeTerminalId || DEFAULT_THREAD_TERMINAL_ID}
+      terminalGroups={terminalState.terminalGroups}
+      activeTerminalGroupId={terminalState.activeTerminalGroupId}
+      focusRequestId={focusRequestId}
+      onSplitTerminal={splitTerminal}
+      onNewTerminal={createNewTerminal}
+      onActiveTerminalChange={activateTerminal}
+      onCloseTerminal={closeTerminal}
+      onHeightChange={(height) => storeSetTerminalHeight(props.threadId, height)}
+    />
+  );
+}
+
+function SideChatPanelSurface(props: {
+  surfaceMode: "single" | "split";
+  isFocusedPane: boolean;
+  onSplitSurface?: (() => void) | undefined;
+  onMaximizeSurface?: (() => void) | undefined;
+}) {
+  const action =
+    props.surfaceMode === "single" && props.onSplitSurface
+      ? { label: "Split chat", onClick: props.onSplitSurface, Icon: ArrowLeftRight }
+      : props.surfaceMode === "split" && props.isFocusedPane && props.onMaximizeSurface
+        ? { label: "Expand this chat", onClick: props.onMaximizeSurface, Icon: Maximize2Icon }
+        : null;
+  const ActionIcon = action?.Icon;
+
+  return (
+    <div className="flex h-full min-h-0 items-center justify-center px-6">
+      {action && ActionIcon ? (
+        <Button type="button" size="sm" variant="outline" className="gap-2" onClick={action.onClick}>
+          <ActionIcon className="size-4" />
+          <span>{action.label}</span>
+        </Button>
+      ) : (
+        <p className="text-sm text-muted-foreground">Side chat is already active.</p>
+      )}
+    </div>
+  );
+}
+
 function ViewerPanelSurface(props: {
   panelMode: ChatRightPanel | null;
   threadId: ThreadId;
@@ -188,112 +356,94 @@ function ViewerPanelSurface(props: {
   onClosePanel: () => void;
   onCloseFiles?: (() => void) | undefined;
   onRevealFile?: (path: string) => void;
+  onSelectPanel: (panel: RightSidebarWorkspaceTabId) => void;
+  onOpenPicker: () => void;
+  surfaceMode: "single" | "split";
+  isFocusedPane: boolean;
+  onSplitSurface?: (() => void) | undefined;
+  onMaximizeSurface?: (() => void) | undefined;
 }) {
   if (props.panelMode === null) {
-    if (!props.filesOpen) {
-      return null;
-    }
-    return props.railOverlay ? (
-      <div className="absolute inset-y-0 right-0 z-30 w-full border-l border-border/50 bg-background shadow-xl sm:w-[min(82vw,22rem)]">
-        <WorkspaceFilesRail
-          threadId={props.threadId}
-          cwd={props.cwd}
-          className="w-full bg-background"
-          onClose={props.onClosePanel}
-          onRevealFile={props.onRevealFile}
-        />
-      </div>
-    ) : (
-      <WorkspaceFilesRail
-        threadId={props.threadId}
-        cwd={props.cwd}
-        onRevealFile={props.onRevealFile}
-      />
-    );
+    return null;
   }
 
-  if (props.panelMode === "browser") {
-    return (
-      <IntegratedBrowserPane
-        activeProjectId={props.threadBrowserContext?.projectId ?? null}
-        activeThreadId={props.threadId}
-        activeRuntimeMode={props.threadBrowserContext?.runtimeMode ?? null}
-        open={true}
-        layout="panel"
-        {...(props.expanded !== undefined ? { expanded: props.expanded } : {})}
-        {...(props.onToggleExpanded ? { onToggleExpanded: props.onToggleExpanded } : {})}
-        onRequestOpen={() => {}}
-        onRequestClose={props.onClosePanel}
-      />
-    );
-  }
+  const tabs: ReadonlyArray<RightSidebarWorkspaceTab> = RIGHT_PANEL_TABS.map((tab) => ({
+    id: tab.id,
+    label: tab.label,
+    Icon: tab.Icon,
+    keepMounted: tab.id !== "browser",
+    render: () => {
+      if (tab.id === "browser") {
+        return (
+          <IntegratedBrowserPane
+            activeProjectId={props.threadBrowserContext?.projectId ?? null}
+            activeThreadId={props.threadId}
+            activeRuntimeMode={props.threadBrowserContext?.runtimeMode ?? null}
+            open={true}
+            layout="panel"
+            {...(props.expanded !== undefined ? { expanded: props.expanded } : {})}
+            {...(props.onToggleExpanded ? { onToggleExpanded: props.onToggleExpanded } : {})}
+            onRequestOpen={() => {}}
+            onRequestClose={props.onClosePanel}
+          />
+        );
+      }
 
-  return (
-    <div className="relative flex h-full min-w-0 flex-1 overflow-hidden">
-      {props.panelMode === "diff" ? (
-        <div className="absolute right-3 top-3 z-20 flex items-center gap-1">
-          {props.onToggleExpanded ? (
-            <Button
-              type="button"
-              size="icon-xs"
-              variant="ghost"
-              className="rounded-full bg-background/80 shadow-sm backdrop-blur hover:bg-accent"
-              aria-label={props.expanded ? "Collapse panel" : "Expand panel"}
-              title={props.expanded ? "Collapse panel" : "Expand panel"}
-              onClick={props.onToggleExpanded}
-            >
-              {props.expanded ? (
-                <Minimize2Icon className="size-3.5" />
-              ) : (
-                <Maximize2Icon className="size-3.5" />
-              )}
-            </Button>
-          ) : null}
-          <Button
-            type="button"
-            size="icon-xs"
-            variant="ghost"
-            className="rounded-full bg-background/80 shadow-sm backdrop-blur hover:bg-accent"
-            aria-label="Toggle diff panel"
-            title="Toggle diff panel"
-            onClick={props.onClosePanel}
-          >
-            <PanelLeftIcon className="size-3.5" />
-          </Button>
-        </div>
-      ) : null}
-      <div
-        className="min-w-0 flex-1 overflow-hidden"
-        style={
-          props.railOverlay
-            ? undefined
-            : ({ minWidth: `${VIEWER_PANEL_MIN_WIDTH_PX}px` } as React.CSSProperties)
-        }
-      >
-        <Suspense fallback={<DiffLoadingFallback inline />}>
-          <DiffPanel mode={props.railOverlay ? "sheet" : "sidebar"} />
-        </Suspense>
-      </div>
-      {props.filesOpen ? (
-        props.railOverlay ? (
-          <div className="absolute inset-y-0 right-0 z-30 w-full border-l border-border/50 bg-background shadow-xl sm:w-[min(82vw,22rem)]">
+      if (tab.id === "files") {
+        return (
+          <div className="flex h-full w-full min-w-0 overflow-hidden">
+            <ThreadFileViewerSurface threadId={props.threadId} cwd={props.cwd} />
             <WorkspaceFilesRail
               threadId={props.threadId}
               cwd={props.cwd}
-              className="w-full bg-background"
-              onClose={props.onCloseFiles}
-              onRevealFile={props.onRevealFile}
+              className="w-56 border-l border-border/50 bg-background/45 xl:w-72"
             />
           </div>
-        ) : (
-          <WorkspaceFilesRail
-            threadId={props.threadId}
-            cwd={props.cwd}
-            onRevealFile={props.onRevealFile}
+        );
+      }
+
+      if (tab.id === "terminal") {
+        return <ThreadTerminalPanelSurface threadId={props.threadId} cwd={props.cwd} />;
+      }
+
+      if (tab.id === "side-chat") {
+        return (
+          <SideChatPanelSurface
+            surfaceMode={props.surfaceMode}
+            isFocusedPane={props.isFocusedPane}
+            {...(props.onSplitSurface ? { onSplitSurface: props.onSplitSurface } : {})}
+            {...(props.onMaximizeSurface ? { onMaximizeSurface: props.onMaximizeSurface } : {})}
           />
-        )
-      ) : null}
-    </div>
+        );
+      }
+
+      return (
+        <div
+          className="flex h-full w-full min-w-0 flex-1 overflow-hidden"
+          style={
+            props.railOverlay
+              ? undefined
+              : ({ minWidth: `${VIEWER_PANEL_MIN_WIDTH_PX}px` } as React.CSSProperties)
+          }
+        >
+          <Suspense fallback={<DiffLoadingFallback inline />}>
+            <DiffPanel mode={props.railOverlay ? "sheet" : "sidebar"} hideReviewTabHeader />
+          </Suspense>
+        </div>
+      );
+    },
+  }));
+
+  return (
+    <RightSidebarWorkspace
+      activeTab={props.panelMode}
+      tabs={tabs}
+      onSelectTab={props.onSelectPanel}
+      onOpenPicker={props.onOpenPicker}
+      onClose={props.onClosePanel}
+      {...(props.expanded !== undefined ? { expanded: props.expanded } : {})}
+      {...(props.onToggleExpanded ? { onToggleExpanded: props.onToggleExpanded } : {})}
+    />
   );
 }
 
@@ -350,6 +500,8 @@ const PanePanelInlineSidebar = (props: {
   filesOpen: boolean;
   onClosePanel: () => void;
   onOpenPanel: () => void;
+  onSelectPanel: (panel: RightSidebarWorkspaceTabId) => void;
+  onOpenPicker: () => void;
   onRevealFile: (path: string) => void;
   onToggleExpanded?: (() => void) | undefined;
   expanded?: boolean | undefined;
@@ -361,6 +513,10 @@ const PanePanelInlineSidebar = (props: {
     runtimeMode: RuntimeMode | null;
     cwd: string | null;
   };
+  surfaceMode: "single" | "split";
+  isFocusedPane: boolean;
+  onSplitSurface?: (() => void) | undefined;
+  onMaximizeSurface?: (() => void) | undefined;
   paneScopeId?: string;
 }) => {
   const {
@@ -368,6 +524,8 @@ const PanePanelInlineSidebar = (props: {
     filesOpen,
     onClosePanel,
     onOpenPanel,
+    onSelectPanel,
+    onOpenPicker,
     onRevealFile,
     onToggleExpanded,
     expanded,
@@ -375,9 +533,33 @@ const PanePanelInlineSidebar = (props: {
     panel,
     threadId,
     threadBrowserContext,
+    surfaceMode,
+    isFocusedPane,
+    onSplitSurface,
+    onMaximizeSurface,
     paneScopeId,
   } = props;
   const filesOnly = panel === null && filesOpen;
+  const [viewportWidth, setViewportWidth] = useState(() =>
+    typeof window === "undefined" ? 1440 : window.innerWidth,
+  );
+  const panelMinimumWidth = rightPanelMinimumWidth(panel, filesOpen);
+  const panelMaxWidth = Math.max(
+    panelMinimumWidth,
+    Math.min(RIGHT_PANEL_MAX_WIDTH_PX, viewportWidth - RIGHT_PANEL_CHAT_READABLE_WIDTH_PX),
+  );
+
+  useEffect(() => {
+    const onResize = () => {
+      setViewportWidth(window.innerWidth);
+    };
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+    };
+  }, []);
+
   const onOpenChange = useCallback(
     (open: boolean) => {
       if (open) {
@@ -390,11 +572,7 @@ const PanePanelInlineSidebar = (props: {
   );
   const shouldAcceptInlineSidebarWidth = useCallback(
     ({ nextWidth, wrapper }: { nextWidth: number; wrapper: HTMLElement }) => {
-      const minimumWidth =
-        panel === "diff" && filesOpen
-          ? VIEWER_PANEL_MIN_WIDTH_PX + FILES_RAIL_WIDTH_PX
-          : SINGLE_PANEL_MIN_WIDTH;
-      if (nextWidth < minimumWidth) {
+      if (nextWidth < panelMinimumWidth || nextWidth > panelMaxWidth) {
         return false;
       }
       const previousSidebarWidth = wrapper.style.getPropertyValue("--sidebar-width");
@@ -413,7 +591,7 @@ const PanePanelInlineSidebar = (props: {
         },
       });
     },
-    [filesOpen, paneScopeId, panel],
+    [paneScopeId, panelMaxWidth, panelMinimumWidth],
   );
 
   return (
@@ -424,7 +602,11 @@ const PanePanelInlineSidebar = (props: {
       className="w-auto min-h-0 flex-none bg-transparent"
       style={
         {
-          "--sidebar-width": filesOnly ? FILES_RAIL_WIDTH : DIFF_INLINE_DEFAULT_WIDTH,
+          "--sidebar-width": filesOnly
+            ? FILES_RAIL_WIDTH
+            : panel === "files"
+              ? `${panelMinimumWidth}px`
+              : DIFF_INLINE_DEFAULT_WIDTH,
         } as React.CSSProperties
       }
     >
@@ -437,9 +619,8 @@ const PanePanelInlineSidebar = (props: {
             ? false
             : {
                 minWidth:
-                  panel === "diff" && filesOpen
-                    ? VIEWER_PANEL_MIN_WIDTH_PX + FILES_RAIL_WIDTH_PX
-                    : SINGLE_PANEL_MIN_WIDTH,
+                  panelMinimumWidth,
+                maxWidth: panelMaxWidth,
                 shouldAcceptWidth: shouldAcceptInlineSidebarWidth,
                 storageKey: RIGHT_PANEL_SIDEBAR_WIDTH_STORAGE_KEY,
               }
@@ -456,6 +637,12 @@ const PanePanelInlineSidebar = (props: {
             {...(onToggleExpanded ? { onToggleExpanded } : {})}
             onClosePanel={onClosePanel}
             onRevealFile={onRevealFile}
+            onSelectPanel={onSelectPanel}
+            onOpenPicker={onOpenPicker}
+            surfaceMode={surfaceMode}
+            isFocusedPane={isFocusedPane}
+            {...(onSplitSurface ? { onSplitSurface } : {})}
+            {...(onMaximizeSurface ? { onMaximizeSurface } : {})}
           />
         ) : null}
         <SidebarRail />
@@ -475,7 +662,10 @@ function SplitPaneEmbeddedPanel(props: {
   panel: ChatRightPanel | null | undefined;
   threadId: ThreadId | null;
   onClosePanel: () => void;
+  onSelectPanel: (panel: RightSidebarWorkspaceTabId) => void;
+  onOpenPicker: () => void;
   onRevealFile: (path: string) => void;
+  onMaximize: () => void;
   panelState: Pick<SplitViewPanePanelState, "panel" | "diffTurnId" | "diffFilePath">;
   onUpdatePanelState: (
     patch: Partial<
@@ -514,10 +704,7 @@ function SplitPaneEmbeddedPanel(props: {
     (nextWidth: number) => {
       const wrapper = wrapperRef.current;
       if (!wrapper) return true;
-      const minimumWidth =
-        props.panel === "diff" && props.filesOpen
-          ? VIEWER_PANEL_MIN_WIDTH_PX + FILES_RAIL_WIDTH_PX
-          : SINGLE_PANEL_MIN_WIDTH;
+      const minimumWidth = rightPanelMinimumWidth(props.panel, props.filesOpen);
       if (nextWidth < minimumWidth) {
         return false;
       }
@@ -545,10 +732,7 @@ function SplitPaneEmbeddedPanel(props: {
       event.stopPropagation();
       const startX = event.clientX;
       const startWidth = panelWidth;
-      const minimumWidth =
-        props.panel === "diff" && props.filesOpen
-          ? VIEWER_PANEL_MIN_WIDTH_PX + FILES_RAIL_WIDTH_PX
-          : SINGLE_PANEL_MIN_WIDTH;
+      const minimumWidth = rightPanelMinimumWidth(props.panel, props.filesOpen);
       const maxWidth = Math.max(minimumWidth, parent.clientWidth - SPLIT_PANE_CHAT_MIN_WIDTH);
 
       const onPointerMove = (moveEvent: PointerEvent) => {
@@ -579,10 +763,7 @@ function SplitPaneEmbeddedPanel(props: {
   }
 
   const filesOnly = props.panel === null && props.filesOpen;
-  const minimumPanelWidth =
-    props.panel === "diff" && props.filesOpen
-      ? VIEWER_PANEL_MIN_WIDTH_PX + FILES_RAIL_WIDTH_PX
-      : SINGLE_PANEL_MIN_WIDTH;
+  const minimumPanelWidth = rightPanelMinimumWidth(props.panel, props.filesOpen);
   const effectivePanelWidth = filesOnly
     ? FILES_RAIL_WIDTH_PX
     : Math.max(panelWidth, minimumPanelWidth);
@@ -599,27 +780,20 @@ function SplitPaneEmbeddedPanel(props: {
           onPointerDown={startResize}
         />
       ) : null}
-      {props.panel === "browser" ? (
-        <ViewerPanelSurface
-          panelMode="browser"
-          threadId={props.threadId}
-          cwd={threadBrowserContext.cwd}
-          threadBrowserContext={threadBrowserContext}
-          filesOpen={false}
-          onClosePanel={props.onClosePanel}
-          onRevealFile={props.onRevealFile}
-        />
-      ) : (
-        <ViewerPanelSurface
-          panelMode={props.panel ?? null}
-          threadId={props.threadId}
-          cwd={threadBrowserContext.cwd}
-          threadBrowserContext={threadBrowserContext}
-          filesOpen={props.filesOpen}
-          onClosePanel={props.onClosePanel}
-          onRevealFile={props.onRevealFile}
-        />
-      )}
+      <ViewerPanelSurface
+        panelMode={props.panel ?? null}
+        threadId={props.threadId}
+        cwd={threadBrowserContext.cwd}
+        threadBrowserContext={threadBrowserContext}
+        filesOpen={props.filesOpen}
+        onClosePanel={props.onClosePanel}
+        onRevealFile={props.onRevealFile}
+        onSelectPanel={props.onSelectPanel}
+        onOpenPicker={props.onOpenPicker}
+        surfaceMode="split"
+        isFocusedPane
+        onMaximizeSurface={props.onMaximize}
+      />
     </div>
   );
 }
@@ -696,13 +870,14 @@ function SplitPaneSurface(props: {
   onToggleDiff: () => void;
   onToggleBrowser: () => void;
   onToggleFiles: () => void;
+  onToggleRightPanel: () => void;
+  onSelectPanel: (panel: RightSidebarWorkspaceTabId) => void;
+  onOpenPicker: () => void;
   onOpenFileViewer: (path: string) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onClosePanel: () => void;
   onUpdatePanelState: (
-    patch: Partial<
-      Pick<SplitViewPanePanelState, "panel" | "filesOpen" | "diffTurnId" | "diffFilePath">
-    >,
+    patch: Partial<SplitViewPanePanelState>,
   ) => void;
   onMaximize: () => void;
   onChooseThread: () => void;
@@ -753,6 +928,10 @@ function SplitPaneSurface(props: {
             surfaceMode="split"
             isFocusedPane={props.isFocused}
             panelState={panelState}
+            rightPanelOpen={panelOpen}
+            onToggleRightPanel={props.onToggleRightPanel}
+            terminalPanelOpen={panelState.panel === "terminal"}
+            onOpenTerminalPanel={() => props.onSelectPanel("terminal")}
             onToggleDiffPanel={props.onToggleDiff}
             onToggleBrowserPanel={props.onToggleBrowser}
             onToggleFilesPanel={props.onToggleFiles}
@@ -780,7 +959,10 @@ function SplitPaneSurface(props: {
         panel={panelState.panel}
         threadId={props.threadId}
         onClosePanel={props.onClosePanel}
+        onSelectPanel={props.onSelectPanel}
+        onOpenPicker={props.onOpenPicker}
         onRevealFile={props.onOpenFileViewer}
+        onMaximize={props.onMaximize}
         panelState={panelState}
         onUpdatePanelState={props.onUpdatePanelState}
       />
@@ -888,23 +1070,22 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
   );
 
   const updatePanePanelState = useCallback(
-    (
-      pane: SplitViewPane,
-      patch: Partial<
-        Pick<SplitViewPanePanelState, "panel" | "filesOpen" | "diffTurnId" | "diffFilePath">
-      >,
-    ) => {
+    (pane: SplitViewPane, patch: Partial<SplitViewPanePanelState>) => {
       if (!activeSplitView) return;
       const previousState =
         pane === "left" ? activeSplitView.leftPanel : activeSplitView.rightPanel;
+      const hasPanelPatch = Object.hasOwn(patch, "panel");
+      const nextPanel = hasPanelPatch ? (patch.panel ?? null) : previousState.panel;
       setPanePanelState(activeSplitView.id, pane, {
         ...patch,
-        hasOpenedPanel:
-          previousState.hasOpenedPanel || (patch.panel ?? previousState.panel) !== null,
-        lastOpenPanel:
-          patch.panel === "browser" || patch.panel === "diff"
-            ? patch.panel
-            : previousState.lastOpenPanel,
+        hasOpenedPanel: previousState.hasOpenedPanel || nextPanel !== null,
+        lastOpenPanel: isToolTabPanel(nextPanel) ? nextPanel : previousState.lastOpenPanel,
+        lastPanelClosedAt:
+          patch.panel === null
+            ? Date.now()
+            : isToolTabPanel(nextPanel)
+              ? null
+              : (patch.lastPanelClosedAt ?? previousState.lastPanelClosedAt),
       });
     },
     [activeSplitView, setPanePanelState],
@@ -922,7 +1103,7 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
         pane === "left" ? activeSplitView.leftPanel : activeSplitView.rightPanel;
       updatePanePanelState(pane, {
         panel: previousState.panel === panel ? null : panel,
-        filesOpen: panel === "browser" ? false : previousState.filesOpen,
+        filesOpen: false,
         diffTurnId: panel === "diff" ? previousState.diffTurnId : null,
         diffFilePath: panel === "diff" ? previousState.diffFilePath : null,
       });
@@ -930,16 +1111,59 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
     [activeSplitView, updatePanePanelState],
   );
 
-  const togglePaneFiles = useCallback(
+  const selectPanePanel = useCallback(
+    (pane: SplitViewPane, panel: RightSidebarWorkspaceTabId) => {
+      updatePanePanelState(pane, {
+        panel,
+        filesOpen: false,
+        ...(panel === "diff" ? {} : { diffTurnId: null, diffFilePath: null }),
+      });
+    },
+    [updatePanePanelState],
+  );
+
+  const openPanePicker = useCallback(
+    (pane: SplitViewPane) => {
+      updatePanePanelState(pane, {
+        panel: "picker",
+        filesOpen: false,
+        diffTurnId: null,
+        diffFilePath: null,
+      });
+    },
+    [updatePanePanelState],
+  );
+
+  const togglePaneRightPanel = useCallback(
     (pane: SplitViewPane) => {
       if (!activeSplitView) return;
       const previousState =
         pane === "left" ? activeSplitView.leftPanel : activeSplitView.rightPanel;
+      if (previousState.panel !== null || previousState.filesOpen) {
+        updatePanePanelState(pane, {
+          panel: null,
+          filesOpen: false,
+        });
+        return;
+      }
+
+      const panel =
+        previousState.lastOpenPanel && isRecentPanelClose(previousState.lastPanelClosedAt)
+          ? previousState.lastOpenPanel
+          : "picker";
       updatePanePanelState(pane, {
-        filesOpen: !previousState.filesOpen,
+        panel,
+        filesOpen: false,
       });
     },
     [activeSplitView, updatePanePanelState],
+  );
+
+  const togglePaneFiles = useCallback(
+    (pane: SplitViewPane) => {
+      selectPanePanel(pane, "files");
+    },
+    [selectPanePanel],
   );
 
   const closePanePanel = useCallback(
@@ -966,7 +1190,7 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
   const openPaneFileViewer = useCallback(
     (pane: SplitViewPane, _path: string) => {
       updatePanePanelState(pane, {
-        panel: "diff",
+        panel: "files",
       });
     },
     [updatePanePanelState],
@@ -989,14 +1213,13 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
       params: { threadId: nextThreadId },
       replace: true,
       search: () => {
-        const filesSearch = focusedPanelState.filesOpen ? { files: "1" as const } : {};
-        if (focusedPanelState.panel === "browser") {
-          return { ...filesSearch, panel: "browser" as const };
+        if (focusedPanelState.panel) {
+          return withRightPanelMode({}, focusedPanelState.panel);
         }
-        if (focusedPanelState.panel === "diff") {
-          return { ...filesSearch, panel: "diff" as const, diff: "1" as const };
+        if (focusedPanelState.filesOpen) {
+          return withRightPanelMode({}, "files");
         }
-        return filesSearch;
+        return {};
       },
     });
   }, [activeSplitView, focusedThreadId, navigate, removeSplitView]);
@@ -1120,6 +1343,9 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
             onToggleDiff={() => togglePanePanel("left", "diff")}
             onToggleBrowser={() => togglePanePanel("left", "browser")}
             onToggleFiles={() => togglePaneFiles("left")}
+            onToggleRightPanel={() => togglePaneRightPanel("left")}
+            onSelectPanel={(panel) => selectPanePanel("left", panel)}
+            onOpenPicker={() => openPanePicker("left")}
             onOpenFileViewer={(path) => openPaneFileViewer("left", path)}
             onOpenTurnDiff={(turnId, filePath) => openPaneTurnDiff("left", turnId, filePath)}
             onClosePanel={() => closePanePanel("left")}
@@ -1151,6 +1377,9 @@ function SplitChatSurface(props: { splitViewId: SplitViewId; routeThreadId: Thre
             onToggleDiff={() => togglePanePanel("right", "diff")}
             onToggleBrowser={() => togglePanePanel("right", "browser")}
             onToggleFiles={() => togglePaneFiles("right")}
+            onToggleRightPanel={() => togglePaneRightPanel("right")}
+            onSelectPanel={(panel) => selectPanePanel("right", panel)}
+            onOpenPicker={() => openPanePicker("right")}
             onOpenFileViewer={(path) => openPaneFileViewer("right", path)}
             onOpenTurnDiff={(turnId, filePath) => openPaneTurnDiff("right", turnId, filePath)}
             onClosePanel={() => closePanePanel("right")}
@@ -1238,10 +1467,13 @@ function SingleChatSurface(props: {
   const navigate = useNavigate();
   const shouldUseDiffSheet = useMediaQuery(DIFF_INLINE_LAYOUT_MEDIA_QUERY);
   const createSplitView = useSplitViewStore((store) => store.createFromThread);
-  const activePanel = props.panelMode === "none" ? null : props.panelMode;
-  const panelOpen = activePanel !== null || props.filesOpen;
+  const activePanel = props.panelMode === "none" ? (props.filesOpen ? "files" : null) : props.panelMode;
+  const panelOpen = activePanel !== null;
   const [hasOpenedPanel, setHasOpenedPanel] = useState(panelOpen);
-  const [lastOpenPanel, setLastOpenPanel] = useState<ChatRightPanel>(activePanel ?? "browser");
+  const [lastOpenPanel, setLastOpenPanel] = useState<RightSidebarWorkspaceTabId | null>(
+    isToolTabPanel(activePanel) ? activePanel : null,
+  );
+  const [lastPanelClosedAt, setLastPanelClosedAt] = useState<number | null>(null);
   const [viewerExpanded, setViewerExpanded] = useState(false);
   const onBrowserPanelClosed = props.onBrowserPanelClosed;
   const threadId = props.threadId;
@@ -1250,6 +1482,7 @@ function SingleChatSurface(props: {
     if (activePanel === "browser") {
       onBrowserPanelClosed?.();
     }
+    setLastPanelClosedAt(Date.now());
     void navigate({
       to: "/$threadId",
       params: { threadId },
@@ -1261,18 +1494,36 @@ function SingleChatSurface(props: {
     });
   }, [activePanel, navigate, onBrowserPanelClosed, threadId]);
 
-  const openPanel = useCallback(() => {
+  const selectPanel = useCallback(
+    (panel: RightSidebarWorkspaceTabId) => {
+      setLastOpenPanel(panel);
+      setLastPanelClosedAt(null);
+      void navigate({
+        to: "/$threadId",
+        params: { threadId: props.threadId },
+        search: (previous) => withRightPanelMode(previous as Record<string, unknown>, panel),
+      });
+    },
+    [navigate, props.threadId],
+  );
+
+  const openPicker = useCallback(() => {
     void navigate({
       to: "/$threadId",
       params: { threadId: props.threadId },
-      search: (previous) => {
-        const rest = stripDiffSearchParams(previous);
-        return lastOpenPanel === "browser"
-          ? { ...rest, panel: "browser" }
-          : { ...rest, panel: "diff", diff: "1", ...(props.filesOpen ? { files: "1" } : {}) };
-      },
+      search: (previous) => withRightPanelMode(previous as Record<string, unknown>, "picker"),
     });
-  }, [lastOpenPanel, navigate, props.filesOpen, props.threadId]);
+  }, [navigate, props.threadId]);
+
+  const openPanel = useCallback(() => {
+    const nextPanel =
+      lastOpenPanel && isRecentPanelClose(lastPanelClosedAt) ? lastOpenPanel : "picker";
+    void navigate({
+      to: "/$threadId",
+      params: { threadId: props.threadId },
+      search: (previous) => withRightPanelMode(previous as Record<string, unknown>, nextPanel),
+    });
+  }, [lastOpenPanel, lastPanelClosedAt, navigate, props.threadId]);
 
   const openFileViewer = useCallback(
     (_path: string) => {
@@ -1281,26 +1532,17 @@ function SingleChatSurface(props: {
         params: { threadId: props.threadId },
         replace: true,
         search: (previous) => {
-          const next = withRightPanelMode(previous as Record<string, unknown>, "diff");
-          return props.filesOpen ? withFilesRailOpen(next, true) : next;
+          const next = withRightPanelMode(previous as Record<string, unknown>, "files");
+          return next;
         },
       });
     },
-    [navigate, props.filesOpen, props.threadId],
+    [navigate, props.threadId],
   );
 
   const toggleFiles = useCallback(() => {
-    void navigate({
-      to: "/$threadId",
-      params: { threadId: props.threadId },
-      search: (previous) => {
-        const currentlyOpen = resolveFilesRailOpen(
-          parseDiffRouteSearch(previous as Record<string, unknown>),
-        );
-        return withFilesRailOpen(previous as Record<string, unknown>, !currentlyOpen);
-      },
-    });
-  }, [navigate, props.threadId]);
+    selectPanel("files");
+  }, [selectPanel]);
 
   const closeFiles = useCallback(() => {
     void navigate({
@@ -1331,8 +1573,9 @@ function SingleChatSurface(props: {
   }, [panelOpen, props.filesOpen]);
 
   useEffect(() => {
-    if (activePanel) {
+    if (isToolTabPanel(activePanel)) {
       setLastOpenPanel(activePanel);
+      setLastPanelClosedAt(null);
     }
   }, [activePanel]);
 
@@ -1353,6 +1596,10 @@ function SingleChatSurface(props: {
             key={props.threadId}
             threadId={props.threadId}
             onSplitSurface={handleSplitSurface}
+            rightPanelOpen={panelOpen}
+            onToggleRightPanel={panelOpen ? closePanel : openPanel}
+            terminalPanelOpen={activePanel === "terminal"}
+            onOpenTerminalPanel={() => selectPanel("terminal")}
             onToggleFilesPanel={toggleFiles}
             floatingComposer={viewerExpanded && activePanel === "diff"}
           />
@@ -1362,6 +1609,8 @@ function SingleChatSurface(props: {
           filesOpen={props.filesOpen}
           onClosePanel={closePanel}
           onOpenPanel={openPanel}
+          onSelectPanel={selectPanel}
+          onOpenPicker={openPicker}
           onRevealFile={openFileViewer}
           renderPanelContent={
             shouldRenderPanelContent && !(viewerExpanded && activePanel !== null)
@@ -1369,6 +1618,9 @@ function SingleChatSurface(props: {
           panel={activePanel}
           threadId={props.threadId}
           threadBrowserContext={props.threadBrowserContext}
+          surfaceMode="single"
+          isFocusedPane
+          onSplitSurface={handleSplitSurface}
           {...(activePanel !== null
             ? {
                 onToggleExpanded: () => setViewerExpanded((expanded) => !expanded),
@@ -1377,19 +1629,26 @@ function SingleChatSurface(props: {
             : {})}
         />
         {viewerExpanded && activePanel !== null && shouldRenderPanelContent ? (
-          <div className="absolute inset-0 z-40 flex min-h-0 min-w-0 bg-background">
-            <ViewerPanelSurface
-              panelMode={activePanel}
-              threadId={props.threadId}
-              cwd={props.threadBrowserContext.cwd}
-              threadBrowserContext={props.threadBrowserContext}
-              filesOpen={props.filesOpen}
-              expanded
-              onToggleExpanded={() => setViewerExpanded(false)}
-              onClosePanel={closePanel}
-              onCloseFiles={closeFiles}
-              onRevealFile={openFileViewer}
-            />
+          <div className="fixed inset-x-0 bottom-0 top-[var(--desktop-native-titlebar-height)] z-[80] flex min-h-0 min-w-0 bg-background">
+            <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden bg-background">
+              <ViewerPanelSurface
+                panelMode={activePanel}
+                threadId={props.threadId}
+                cwd={props.threadBrowserContext.cwd}
+                threadBrowserContext={props.threadBrowserContext}
+                filesOpen={props.filesOpen}
+                expanded
+                onToggleExpanded={() => setViewerExpanded(false)}
+                onClosePanel={closePanel}
+                onCloseFiles={closeFiles}
+                onRevealFile={openFileViewer}
+                onSelectPanel={selectPanel}
+                onOpenPicker={openPicker}
+                surfaceMode="single"
+                isFocusedPane
+                onSplitSurface={handleSplitSurface}
+              />
+            </div>
           </div>
         ) : null}
       </div>
@@ -1403,34 +1662,31 @@ function SingleChatSurface(props: {
           key={props.threadId}
           threadId={props.threadId}
           onSplitSurface={handleSplitSurface}
+          rightPanelOpen={panelOpen}
+          onToggleRightPanel={panelOpen ? closePanel : openPanel}
+          terminalPanelOpen={activePanel === "terminal"}
+          onOpenTerminalPanel={() => selectPanel("terminal")}
           onToggleFilesPanel={toggleFiles}
         />
       </SidebarInset>
       <RightPanelSheet panelOpen={panelOpen} onClosePanel={closePanel}>
         {shouldRenderPanelContent ? (
-          activePanel === "browser" ? (
-            <IntegratedBrowserPane
-              activeProjectId={props.threadBrowserContext.projectId}
-              activeThreadId={props.threadId}
-              activeRuntimeMode={props.threadBrowserContext.runtimeMode}
-              open={true}
-              layout="panel"
-              onRequestOpen={openPanel}
-              onRequestClose={closePanel}
-            />
-          ) : (
-            <ViewerPanelSurface
-              panelMode="diff"
-              threadId={props.threadId}
-              cwd={props.threadBrowserContext.cwd}
-              threadBrowserContext={props.threadBrowserContext}
-              filesOpen={props.filesOpen}
-              railOverlay
-              onClosePanel={closePanel}
-              onCloseFiles={closeFiles}
-              onRevealFile={openFileViewer}
-            />
-          )
+          <ViewerPanelSurface
+            panelMode={activePanel}
+            threadId={props.threadId}
+            cwd={props.threadBrowserContext.cwd}
+            threadBrowserContext={props.threadBrowserContext}
+            filesOpen={props.filesOpen}
+            railOverlay
+            onClosePanel={closePanel}
+            onCloseFiles={closeFiles}
+            onRevealFile={openFileViewer}
+            onSelectPanel={selectPanel}
+            onOpenPicker={openPicker}
+            surfaceMode="single"
+            isFocusedPane
+            onSplitSurface={handleSplitSurface}
+          />
         ) : null}
       </RightPanelSheet>
     </>

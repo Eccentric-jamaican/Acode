@@ -437,6 +437,7 @@ interface ThreadTerminalDrawerProps {
   threadId: ThreadId;
   cwd: string;
   runtimeEnv?: Record<string, string>;
+  layout?: "drawer" | "panel";
   height: number;
   terminalIds: string[];
   activeTerminalId: string;
@@ -486,6 +487,7 @@ export default function ThreadTerminalDrawer({
   threadId,
   cwd,
   runtimeEnv,
+  layout = "drawer",
   height,
   terminalIds,
   activeTerminalId,
@@ -726,18 +728,24 @@ export default function ThreadTerminalDrawer({
     };
   }, [syncHeight]);
 
+  const isPanelLayout = layout === "panel";
+
   return (
     <aside
-      className="thread-terminal-drawer relative flex min-w-0 shrink-0 flex-col overflow-hidden border-t border-border/80 bg-background"
-      style={{ height: `${drawerHeight}px` }}
+      className={`thread-terminal-drawer relative flex min-w-0 shrink-0 flex-col overflow-hidden bg-background ${
+        isPanelLayout ? "h-full border-0" : "border-t border-border/80"
+      }`}
+      style={isPanelLayout ? undefined : { height: `${drawerHeight}px` }}
     >
-      <div
-        className="absolute inset-x-0 top-0 z-20 h-1.5 cursor-row-resize"
-        onPointerDown={handleResizePointerDown}
-        onPointerMove={handleResizePointerMove}
-        onPointerUp={handleResizePointerEnd}
-        onPointerCancel={handleResizePointerEnd}
-      />
+      {!isPanelLayout ? (
+        <div
+          className="absolute inset-x-0 top-0 z-20 h-1.5 cursor-row-resize"
+          onPointerDown={handleResizePointerDown}
+          onPointerMove={handleResizePointerMove}
+          onPointerUp={handleResizePointerEnd}
+          onPointerCancel={handleResizePointerEnd}
+        />
+      ) : null}
 
       {!hasTerminalSidebar && (
         <div className="pointer-events-none absolute right-2 top-2 z-20">
