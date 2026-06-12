@@ -40,6 +40,7 @@ import type {
   TerminalEvent,
   TerminalOpenInput,
   TerminalResizeInput,
+  TerminalSessionSummary,
   TerminalSessionSnapshot,
   TerminalWriteInput,
 } from "@t3tools/contracts";
@@ -369,6 +370,23 @@ class MockTerminalManager implements TerminalManagerShape {
         }
       }
     });
+
+  readonly list: TerminalManagerShape["list"] = () =>
+    Effect.sync(() => ({
+      sessions: [...this.sessions.values()].map(
+        (snapshot): TerminalSessionSummary => ({
+          threadId: snapshot.threadId,
+          terminalId: snapshot.terminalId,
+          cwd: snapshot.cwd,
+          status: snapshot.status,
+          pid: snapshot.pid,
+          hasRunningSubprocess: false,
+          recentOutput: snapshot.history,
+          metadata: null,
+          updatedAt: snapshot.updatedAt,
+        }),
+      ),
+    }));
 
   readonly subscribe: TerminalManagerShape["subscribe"] = (listener) =>
     Effect.sync(() => {

@@ -1311,6 +1311,7 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
     }
     if (
       method === WS_METHODS.terminalOpen ||
+      method === WS_METHODS.terminalList ||
       method === WS_METHODS.terminalWrite ||
       method === WS_METHODS.terminalResize ||
       method === WS_METHODS.terminalClose
@@ -2594,6 +2595,11 @@ export const createServer = Effect.fn(function* (): Effect.fn.Return<
       case WS_METHODS.terminalClose: {
         const body = stripRequestTag(request.body);
         return yield* terminalManager.close(body);
+      }
+
+      case WS_METHODS.terminalList: {
+        const body = stripRequestTag(request.body);
+        return yield* terminalManager.list(body);
       }
 
       case WS_METHODS.serverGetConfig:

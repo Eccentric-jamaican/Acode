@@ -16,7 +16,7 @@ import {
   type PtyProcess,
   type PtySpawnInput,
 } from "../Services/PTY";
-import { TerminalManagerRuntime } from "./Manager";
+import { __terminalManagerInternals, TerminalManagerRuntime } from "./Manager";
 import { Effect, Encoding } from "effect";
 
 class FakePtyProcess implements PtyProcess {
@@ -172,6 +172,20 @@ describe("TerminalManager", () => {
     options: {
       shellResolver?: () => string;
       subprocessChecker?: (terminalPid: number) => Promise<boolean>;
+      externalServerDiscoverer?: (
+        filter: { projectRoot?: string; cwd?: string },
+      ) => Promise<
+        Array<{
+          pid: number;
+          port: number;
+          address: string;
+          name: string | null;
+          commandLine: string | null;
+          parentPid: number | null;
+          createdAt: string | null;
+        }>
+      >;
+      externalProcessKiller?: (pid: number) => Promise<void>;
       subprocessPollIntervalMs?: number;
       processKillGraceMs?: number;
       maxRetainedInactiveSessions?: number;
@@ -187,6 +201,10 @@ describe("TerminalManager", () => {
       historyLineLimit,
       shellResolver: options.shellResolver ?? (() => "/bin/bash"),
       ...(options.subprocessChecker ? { subprocessChecker: options.subprocessChecker } : {}),
+      ...(options.externalServerDiscoverer
+        ? { externalServerDiscoverer: options.externalServerDiscoverer }
+        : {}),
+      ...(options.externalProcessKiller ? { externalProcessKiller: options.externalProcessKiller } : {}),
       ...(options.subprocessPollIntervalMs
         ? { subprocessPollIntervalMs: options.subprocessPollIntervalMs }
         : {}),
@@ -197,6 +215,45 @@ describe("TerminalManager", () => {
     });
     return { logsDir, ptyAdapter, manager };
   }
+
+  it("matches command lines for project roots that contain spaces", () => {
+    const commandLine =
+      'node "C:\\Users\\First Last\\source\\repos\\t3code-main\\apps\\web\\node_modules\\vite\\bin\\vite.js"';
+    const result = __terminalManagerInternals.commandMatchesProjectRoot(commandLine, [
+      "C:\\Users\\First Last\\source\\repos\\t3code-main",
+    ]);
+
+    expect(result).toBe(true);
+  });
+
+  it("does not match project roots by substring collision", () => {
+    const commandLine =
+      'node "C:\\Users\\Addis\\source\\repos\\t3code-main-2\\apps\\web\\node_modules\\vite\\bin\\vite.js"';
+    const result = __terminalManagerInternals.commandMatchesProjectRoot(commandLine, [
+      "C:\\Users\\Addis\\source\\repos\\t3code-main",
+    ]);
+
+    expect(result).toBe(false);
+  });
+
+  it("rejects stopping external pids that were not registered for the thread", async () => {
+    const killedPids: number[] = [];
+    const { manager } = makeManager(5, {
+      externalProcessKiller: async (pid) => {
+        killedPids.push(pid);
+      },
+    });
+
+    await expect(
+      manager.close({
+        threadId: "thread-1",
+        terminalId: "external:51515",
+      }),
+    ).rejects.toThrow(/not registered for thread/i);
+    expect(killedPids).toEqual([]);
+
+    manager.dispose();
+  });
 
   it("spawns lazily and reuses running terminal per thread", async () => {
     const { manager, ptyAdapter } = makeManager();

@@ -91,6 +91,8 @@ import type {
   TerminalClearInput,
   TerminalCloseInput,
   TerminalEvent,
+  TerminalListInput,
+  TerminalListResult,
   TerminalOpenInput,
   TerminalResizeInput,
   TerminalSessionSnapshot,
@@ -312,6 +314,7 @@ export interface NativeApi {
     clear: (input: TerminalClearInput) => Promise<void>;
     restart: (input: TerminalOpenInput) => Promise<TerminalSessionSnapshot>;
     close: (input: TerminalCloseInput) => Promise<void>;
+    list: (input: TerminalListInput) => Promise<TerminalListResult>;
     onEvent: (callback: (event: TerminalEvent) => void) => () => void;
   };
   projects: {

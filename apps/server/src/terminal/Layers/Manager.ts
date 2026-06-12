@@ -6,10 +6,14 @@ import {
   DEFAULT_TERMINAL_ID,
   TerminalClearInput,
   TerminalCloseInput,
+  TerminalListInput,
   TerminalOpenInput,
   TerminalResizeInput,
+  TerminalSessionMetadata,
   TerminalWriteInput,
   type TerminalEvent,
+  type TerminalListResult,
+  type TerminalSessionSummary,
   type TerminalSessionSnapshot,
 } from "@t3tools/contracts";
 import { Effect, Encoding, Layer, Path, Schema } from "effect";
@@ -34,6 +38,10 @@ const DEFAULT_PROCESS_KILL_GRACE_MS = 1_000;
 const DEFAULT_MAX_RETAINED_INACTIVE_SESSIONS = 128;
 const DEFAULT_OPEN_COLS = 120;
 const DEFAULT_OPEN_ROWS = 30;
+const DEFAULT_RECENT_OUTPUT_LINE_LIMIT = 160;
+const DEFAULT_RECENT_OUTPUT_CHAR_LIMIT = 24_000;
+const DEFAULT_EXTERNAL_SERVER_SCAN_TIMEOUT_MS = 4_000;
+const EXTERNAL_TERMINAL_ID_PREFIX = "external:";
 const TERMINAL_ENV_BLOCKLIST = new Set(["PORT", "ELECTRON_RENDERER_PORT", "ELECTRON_RUN_AS_NODE"]);
 
 const decodeTerminalOpenInput = Schema.decodeUnknownSync(TerminalOpenInput);
@@ -41,8 +49,28 @@ const decodeTerminalWriteInput = Schema.decodeUnknownSync(TerminalWriteInput);
 const decodeTerminalResizeInput = Schema.decodeUnknownSync(TerminalResizeInput);
 const decodeTerminalClearInput = Schema.decodeUnknownSync(TerminalClearInput);
 const decodeTerminalCloseInput = Schema.decodeUnknownSync(TerminalCloseInput);
+const decodeTerminalListInput = Schema.decodeUnknownSync(TerminalListInput);
+const decodeTerminalSessionMetadata = Schema.decodeUnknownSync(TerminalSessionMetadata);
 
 type TerminalSubprocessChecker = (terminalPid: number) => Promise<boolean>;
+
+interface ExternalServerFilter {
+  projectRoot?: string;
+  cwd?: string;
+}
+
+interface ExternalServerDescriptor {
+  pid: number;
+  port: number;
+  address: string;
+  name: string | null;
+  commandLine: string | null;
+  parentPid: number | null;
+  createdAt: string | null;
+}
+
+type ExternalServerDiscoverer = (filter: ExternalServerFilter) => Promise<ExternalServerDescriptor[]>;
+type ExternalProcessKiller = (pid: number) => Promise<void>;
 
 function defaultShellResolver(): string {
   if (process.platform === "win32") {
@@ -252,6 +280,312 @@ function capHistory(history: string, maxLines: number): string {
   return hasTrailingNewline ? `${capped}\n` : capped;
 }
 
+function tailTerminalOutput(history: string): string {
+  if (history.length === 0) return history;
+  const lines = history.split(/\r?\n/g);
+  const recentLines = lines.slice(Math.max(0, lines.length - DEFAULT_RECENT_OUTPUT_LINE_LIMIT));
+  const recent = recentLines.join("\n");
+  if (recent.length <= DEFAULT_RECENT_OUTPUT_CHAR_LIMIT) {
+    return recent;
+  }
+  return recent.slice(recent.length - DEFAULT_RECENT_OUTPUT_CHAR_LIMIT);
+}
+
+function normalizeComparablePath(value: string): string {
+  const resolved = path.resolve(value);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function samePath(left: string, right: string): boolean {
+  return normalizeComparablePath(left) === normalizeComparablePath(right);
+}
+
+function pathContains(parent: string, child: string): boolean {
+  const relativePath = path.relative(path.resolve(parent), path.resolve(child));
+  return (
+    relativePath.length === 0 ||
+    (!relativePath.startsWith("..") && !path.isAbsolute(relativePath))
+  );
+}
+
+function normalizeTerminalMetadata(
+  metadata: TerminalSessionMetadata | undefined,
+  runtimeEnv: Record<string, string> | undefined,
+): TerminalSessionMetadata | null {
+  const candidate = {
+    ...(runtimeEnv?.T3CODE_PROJECT_ROOT ? { projectRoot: runtimeEnv.T3CODE_PROJECT_ROOT } : {}),
+    ...metadata,
+  };
+  if (Object.keys(candidate).length === 0) {
+    return null;
+  }
+  return decodeTerminalSessionMetadata(candidate);
+}
+
+function encodePowershellCommand(script: string): string {
+  return Buffer.from(script, "utf16le").toString("base64");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function normalizeProjectRootForMatch(value: string): string {
+  return value
+    .trim()
+    .replaceAll("\\", "/")
+    .replace(/\/+/g, "/")
+    .replace(/\/+$/g, "")
+    .toLowerCase();
+}
+
+function encodePowershellCommand(script: string): string {
+  return Buffer.from(script, "utf16le").toString("base64");
+}
+
+function normalizeProjectRootForMatch(value: string): string {
+  return value
+    .trim()
+    .replaceAll("\\", "/")
+    .replace(/\/+/g, "/")
+    .replace(/\/+$/g, "")
+    .toLowerCase();
+}
+
+function parseJsonArrayOrObject<T>(value: string): T[] {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) {
+    return [];
+  }
+  const parsed = JSON.parse(trimmed) as T | T[];
+  return Array.isArray(parsed) ? parsed : [parsed];
+}
+
+function normalizeExternalServerAddress(address: string, port: number): string {
+  const normalizedAddress = address.trim();
+  if (
+    normalizedAddress === "127.0.0.1" ||
+    normalizedAddress === "::1" ||
+    normalizedAddress === "[::1]" ||
+    normalizedAddress === "0.0.0.0" ||
+    normalizedAddress === "::" ||
+    normalizedAddress === "[::]"
+  ) {
+    return `localhost:${port}`;
+  }
+  return `${normalizedAddress}:${port}`;
+}
+
+function commandMatchesProjectRoot(
+  commandLine: string | null,
+  projectRoots: readonly string[],
+): boolean {
+  if (!commandLine) {
+    return false;
+  }
+  const normalizedCommandLine = normalizeProjectRootForMatch(commandLine).replaceAll('"', "");
+  return projectRoots.some((root) => {
+    const normalizedRoot = normalizeProjectRootForMatch(root);
+    const boundaryPattern = new RegExp(
+      `(^|\\s)${escapeRegExp(normalizedRoot)}(?:/|\\s|$)`,
+      "i",
+    );
+    return (
+      normalizedCommandLine === normalizedRoot ||
+      normalizedCommandLine.includes(`${normalizedRoot}/`) ||
+      boundaryPattern.test(normalizedCommandLine)
+    );
+  });
+}
+
+function extractRecentOutputPorts(value: string): Set<number> {
+  const ports = new Set<number>();
+  for (const match of value.matchAll(/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|::1):(\d{2,5})/gi)) {
+    const port = Number(match[1]);
+    if (Number.isInteger(port) && port > 0) {
+      ports.add(port);
+    }
+  }
+  return ports;
+}
+
+async function discoverWindowsExternalServers(
+  filter: ExternalServerFilter,
+): Promise<ExternalServerDescriptor[]> {
+  const projectRoots = [filter.projectRoot, filter.cwd]
+    .filter((value): value is string => Boolean(value))
+    .map(normalizeProjectRootForMatch);
+  if (projectRoots.length === 0) {
+    return [];
+  }
+
+  const command = [
+    "$connections = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |",
+    "  Where-Object { $_.OwningProcess -gt 0 -and $_.LocalPort -gt 0 -and $_.LocalAddress -in @('127.0.0.1','::1','0.0.0.0','::') }",
+    "if (-not $connections) { '[]'; exit 0 }",
+    "$processIds = $connections | Select-Object -ExpandProperty OwningProcess -Unique",
+    "$processMap = @{}",
+    "$processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $processIds -contains $_.ProcessId }",
+    "foreach ($proc in $processes) {",
+    "  $processMap[$proc.ProcessId] = $proc",
+    "}",
+    "$result = foreach ($connection in $connections) {",
+    "  $proc = $processMap[$connection.OwningProcess]",
+    "  if ($null -eq $proc) { continue }",
+    "  [pscustomobject]@{",
+    "    pid = [int]$proc.ProcessId",
+    "    port = [int]$connection.LocalPort",
+    "    address = [string]$connection.LocalAddress",
+    "    name = [string]$proc.Name",
+    "    commandLine = [string]$proc.CommandLine",
+    "    parentPid = if ($null -ne $proc.ParentProcessId) { [int]$proc.ParentProcessId } else { $null }",
+    "    createdAt = if ($null -ne $proc.CreationDate) { [string]$proc.CreationDate } else { $null }",
+    "  }",
+    "}",
+    "$result | ConvertTo-Json -Compress",
+  ].join("\n");
+
+  const result = await runProcess(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-EncodedCommand", encodePowershellCommand(command)],
+    {
+      timeoutMs: DEFAULT_EXTERNAL_SERVER_SCAN_TIMEOUT_MS,
+      allowNonZeroExit: true,
+      maxBufferBytes: 512_000,
+      outputMode: "truncate",
+    },
+  );
+  if (result.code !== 0) {
+    return [];
+  }
+
+  return parseJsonArrayOrObject<ExternalServerDescriptor>(result.stdout).filter((server) =>
+    commandMatchesProjectRoot(server.commandLine, projectRoots),
+  );
+}
+
+export const __terminalManagerInternals = {
+  commandMatchesProjectRoot,
+};
+
+async function discoverPosixExternalServers(
+  filter: ExternalServerFilter,
+): Promise<ExternalServerDescriptor[]> {
+  const projectRoots = [filter.projectRoot, filter.cwd]
+    .filter((value): value is string => Boolean(value))
+    .map(normalizeProjectRootForMatch);
+  if (projectRoots.length === 0) {
+    return [];
+  }
+
+  let rawListeners = "";
+  try {
+    const result = await runProcess("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN", "-F", "pcPn"], {
+      timeoutMs: DEFAULT_EXTERNAL_SERVER_SCAN_TIMEOUT_MS,
+      allowNonZeroExit: true,
+      maxBufferBytes: 512_000,
+      outputMode: "truncate",
+    });
+    rawListeners = result.stdout;
+  } catch {
+    return [];
+  }
+
+  const descriptors: ExternalServerDescriptor[] = [];
+  let currentPid: number | null = null;
+  let currentName: string | null = null;
+
+  for (const line of rawListeners.split(/\r?\n/g)) {
+    if (line.startsWith("p")) {
+      const pid = Number(line.slice(1).trim());
+      currentPid = Number.isInteger(pid) && pid > 0 ? pid : null;
+      currentName = null;
+      continue;
+    }
+    if (line.startsWith("c")) {
+      currentName = line.slice(1).trim() || null;
+      continue;
+    }
+    if (!line.startsWith("n") || currentPid === null) {
+      continue;
+    }
+
+    const addressValue = line.slice(1).trim();
+    const portMatch = /:(\d+)(?:->|$)/.exec(addressValue);
+    const port = Number(portMatch?.[1] ?? NaN);
+    if (!Number.isInteger(port) || port <= 0) {
+      continue;
+    }
+
+    let commandLine = "";
+    let parentPid: number | null = null;
+    try {
+      const psResult = await runProcess(
+        "ps",
+        ["-p", String(currentPid), "-o", "ppid=,command="],
+        {
+          timeoutMs: 1_500,
+          allowNonZeroExit: true,
+          maxBufferBytes: 65_536,
+          outputMode: "truncate",
+        },
+      );
+      const raw = psResult.stdout.trim();
+      const firstSpace = raw.search(/\s/);
+      if (firstSpace > 0) {
+        parentPid = Number(raw.slice(0, firstSpace).trim());
+        commandLine = raw.slice(firstSpace).trim();
+      } else {
+        commandLine = raw;
+      }
+    } catch {
+      commandLine = currentName ?? "";
+    }
+
+    descriptors.push({
+      pid: currentPid,
+      port,
+      address: addressValue,
+      name: currentName,
+      commandLine,
+      parentPid: Number.isInteger(parentPid) ? parentPid : null,
+      createdAt: null,
+    });
+  }
+
+  return descriptors.filter((server) => commandMatchesProjectRoot(server.commandLine, projectRoots));
+}
+
+async function defaultExternalServerDiscoverer(
+  filter: ExternalServerFilter,
+): Promise<ExternalServerDescriptor[]> {
+  if (process.platform === "win32") {
+    return discoverWindowsExternalServers(filter);
+  }
+  return discoverPosixExternalServers(filter);
+}
+
+async function defaultExternalProcessKiller(pid: number): Promise<void> {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return;
+  }
+  if (process.platform === "win32") {
+    await runProcess("taskkill", ["/PID", String(pid), "/T", "/F"], {
+      timeoutMs: DEFAULT_EXTERNAL_SERVER_SCAN_TIMEOUT_MS,
+      allowNonZeroExit: true,
+      maxBufferBytes: 32_768,
+      outputMode: "truncate",
+    });
+    return;
+  }
+  await runProcess("kill", ["-TERM", String(pid)], {
+    timeoutMs: 1_500,
+    allowNonZeroExit: true,
+    maxBufferBytes: 32_768,
+    outputMode: "truncate",
+  });
+}
+
 function legacySafeThreadId(threadId: string): string {
   return threadId.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
@@ -316,6 +650,8 @@ interface TerminalManagerOptions {
   ptyAdapter: PtyAdapterShape;
   shellResolver?: () => string;
   subprocessChecker?: TerminalSubprocessChecker;
+  externalServerDiscoverer?: ExternalServerDiscoverer;
+  externalProcessKiller?: ExternalProcessKiller;
   subprocessPollIntervalMs?: number;
   processKillGraceMs?: number;
   maxRetainedInactiveSessions?: number;
@@ -323,6 +659,7 @@ interface TerminalManagerOptions {
 
 export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> {
   private readonly sessions = new Map<string, TerminalSessionState>();
+  private readonly externalServerPidsByThread = new Map<string, Set<number>>();
   private readonly logsDir: string;
   private readonly historyLineLimit: number;
   private readonly ptyAdapter: PtyAdapterShape;
@@ -333,6 +670,8 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
   private readonly threadLocks = new Map<string, Promise<void>>();
   private readonly persistDebounceMs: number;
   private readonly subprocessChecker: TerminalSubprocessChecker;
+  private readonly externalServerDiscoverer: ExternalServerDiscoverer;
+  private readonly externalProcessKiller: ExternalProcessKiller;
   private readonly subprocessPollIntervalMs: number;
   private readonly processKillGraceMs: number;
   private readonly maxRetainedInactiveSessions: number;
@@ -349,6 +688,9 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     this.shellResolver = options.shellResolver ?? defaultShellResolver;
     this.persistDebounceMs = DEFAULT_PERSIST_DEBOUNCE_MS;
     this.subprocessChecker = options.subprocessChecker ?? defaultSubprocessChecker;
+    this.externalServerDiscoverer =
+      options.externalServerDiscoverer ?? defaultExternalServerDiscoverer;
+    this.externalProcessKiller = options.externalProcessKiller ?? defaultExternalProcessKiller;
     this.subprocessPollIntervalMs =
       options.subprocessPollIntervalMs ?? DEFAULT_SUBPROCESS_POLL_INTERVAL_MS;
     this.processKillGraceMs = options.processKillGraceMs ?? DEFAULT_PROCESS_KILL_GRACE_MS;
@@ -361,6 +703,8 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     const input = decodeTerminalOpenInput(raw);
     return this.runWithThreadLock(input.threadId, async () => {
       await this.assertValidCwd(input.cwd);
+      const nextMetadata = normalizeTerminalMetadata(input.metadata, input.env);
+      const metadataProvided = input.metadata !== undefined;
 
       const sessionKey = toSessionKey(input.threadId, input.terminalId);
       const existing = this.sessions.get(sessionKey);
@@ -386,6 +730,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           unsubscribeExit: null,
           hasRunningSubprocess: false,
           runtimeEnv: normalizedRuntimeEnv(input.env),
+          metadata: nextMetadata,
         };
         this.sessions.set(sessionKey, session);
         this.evictInactiveSessionsIfNeeded();
@@ -399,19 +744,31 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       const targetRows = input.rows ?? existing.rows;
       const runtimeEnvChanged =
         JSON.stringify(currentRuntimeEnv) !== JSON.stringify(nextRuntimeEnv);
+      if (metadataProvided || !existing.metadata) {
+        existing.metadata = nextMetadata;
+      }
 
       if (existing.cwd !== input.cwd || runtimeEnvChanged) {
         this.stopProcess(existing);
         existing.cwd = input.cwd;
         existing.runtimeEnv = nextRuntimeEnv;
+        if (!metadataProvided) {
+          existing.metadata = nextMetadata;
+        }
         existing.history = "";
         await this.persistHistory(existing.threadId, existing.terminalId, existing.history);
       } else if (existing.status === "exited" || existing.status === "error") {
         existing.runtimeEnv = nextRuntimeEnv;
+        if (!metadataProvided) {
+          existing.metadata = nextMetadata;
+        }
         existing.history = "";
         await this.persistHistory(existing.threadId, existing.terminalId, existing.history);
       } else if (currentRuntimeEnv !== nextRuntimeEnv) {
         existing.runtimeEnv = nextRuntimeEnv;
+        if (!metadataProvided) {
+          existing.metadata = nextMetadata;
+        }
       }
 
       if (!existing.process) {
@@ -482,6 +839,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     const input = decodeTerminalOpenInput(raw);
     return this.runWithThreadLock(input.threadId, async () => {
       await this.assertValidCwd(input.cwd);
+      const nextMetadata = normalizeTerminalMetadata(input.metadata, input.env);
 
       const sessionKey = toSessionKey(input.threadId, input.terminalId);
       let session = this.sessions.get(sessionKey);
@@ -505,6 +863,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
           unsubscribeExit: null,
           hasRunningSubprocess: false,
           runtimeEnv: normalizedRuntimeEnv(input.env),
+          metadata: nextMetadata,
         };
         this.sessions.set(sessionKey, session);
         this.evictInactiveSessionsIfNeeded();
@@ -512,6 +871,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
         this.stopProcess(session);
         session.cwd = input.cwd;
         session.runtimeEnv = normalizedRuntimeEnv(input.env);
+        session.metadata = nextMetadata;
       }
 
       const cols = input.cols ?? session.cols;
@@ -524,10 +884,50 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     });
   }
 
+  async list(raw: TerminalListInput): Promise<TerminalListResult> {
+    const input = decodeTerminalListInput(raw);
+    const includeInactive = input.includeInactive === true;
+    const managedSessions = [...this.sessions.values()]
+      .filter((session) => includeInactive || session.status === "running")
+      .filter((session) => !input.threadId || session.threadId === input.threadId)
+      .filter((session) => !input.cwd || samePath(session.cwd, input.cwd))
+      .filter((session) => !input.projectRoot || this.sessionMatchesProjectRoot(session, input.projectRoot))
+      .map((session) => this.summary(session))
+      .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+
+    const managedPorts = new Set<number>();
+    for (const session of managedSessions) {
+      for (const port of extractRecentOutputPorts(session.recentOutput)) {
+        managedPorts.add(port);
+      }
+    }
+
+    const externalSessions = await this.listExternalSessions(input, managedPorts);
+    const sessions = [...managedSessions, ...externalSessions].toSorted((left, right) =>
+      right.updatedAt.localeCompare(left.updatedAt),
+    );
+    return { sessions };
+  }
+
   async close(raw: TerminalCloseInput): Promise<void> {
     const input = decodeTerminalCloseInput(raw);
     await this.runWithThreadLock(input.threadId, async () => {
       if (input.terminalId) {
+        const externalPid = this.externalPidFromTerminalId(input.terminalId);
+        if (externalPid !== null) {
+          const allowedPids = this.externalServerPidsByThread.get(input.threadId);
+          if (!allowedPids?.has(externalPid)) {
+            throw new Error(
+              `External server is not registered for thread: ${input.threadId}, terminal: ${input.terminalId}`,
+            );
+          }
+          await this.externalProcessKiller(externalPid);
+          allowedPids.delete(externalPid);
+          if (allowedPids.size === 0) {
+            this.externalServerPidsByThread.delete(input.threadId);
+          }
+          return;
+        }
         await this.closeSession(input.threadId, input.terminalId, input.deleteHistory === true);
         return;
       }
@@ -565,6 +965,7 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       clearTimeout(timer);
     }
     this.killEscalationTimers.clear();
+    this.externalServerPidsByThread.clear();
     this.pendingPersistHistory.clear();
     this.threadLocks.clear();
     this.persistQueues.clear();
@@ -1133,6 +1534,92 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
     return session;
   }
 
+  private sessionMatchesProjectRoot(session: TerminalSessionState, projectRoot: string): boolean {
+    const metadataRoot = session.metadata?.projectRoot ?? session.runtimeEnv?.T3CODE_PROJECT_ROOT;
+    if (metadataRoot && samePath(metadataRoot, projectRoot)) {
+      return true;
+    }
+    return pathContains(projectRoot, session.cwd);
+  }
+
+  private externalPidFromTerminalId(terminalId: string): number | null {
+    if (!terminalId.startsWith(EXTERNAL_TERMINAL_ID_PREFIX)) {
+      return null;
+    }
+    const pid = Number(terminalId.slice(EXTERNAL_TERMINAL_ID_PREFIX.length));
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  }
+
+  private async listExternalSessions(
+    input: TerminalListInput,
+    managedPorts: ReadonlySet<number>,
+  ): Promise<TerminalSessionSummary[]> {
+    const filter: ExternalServerFilter = {
+      ...(input.projectRoot ? { projectRoot: input.projectRoot } : {}),
+      ...(input.cwd ? { cwd: input.cwd } : {}),
+    };
+    const discovered = await this.externalServerDiscoverer(filter).catch((error) => {
+      this.logger.warn("failed to discover external local servers", {
+        error: error instanceof Error ? error.message : String(error),
+        ...filter,
+      });
+      return [];
+    });
+
+    const fallbackCwd = input.projectRoot ?? input.cwd ?? process.cwd();
+    const threadId = input.threadId ?? "external-local-server";
+    const seenPorts = new Set<number>();
+    const sessions = discovered
+      .filter((server) => !managedPorts.has(server.port))
+      .filter((server) => !seenPorts.has(server.port) && seenPorts.add(server.port))
+      .map((server) => this.externalSummary(server, threadId, fallbackCwd));
+
+    this.externalServerPidsByThread.set(
+      threadId,
+      new Set(sessions.map((session) => session.pid).filter((pid): pid is number => pid !== null)),
+    );
+
+    return sessions;
+  }
+
+  private summary(session: TerminalSessionState): TerminalSessionSummary {
+    return {
+      threadId: session.threadId,
+      terminalId: session.terminalId,
+      cwd: session.cwd,
+      status: session.status,
+      pid: session.pid,
+      hasRunningSubprocess: session.hasRunningSubprocess,
+      recentOutput: tailTerminalOutput(session.history),
+      metadata: session.metadata,
+      updatedAt: session.updatedAt,
+    };
+  }
+
+  private externalSummary(
+    server: ExternalServerDescriptor,
+    threadId: string,
+    cwd: string,
+  ): TerminalSessionSummary {
+    const title = normalizeExternalServerAddress(server.address, server.port);
+    const command = server.commandLine?.trim() || server.name?.trim() || title;
+    return {
+      threadId,
+      terminalId: `${EXTERNAL_TERMINAL_ID_PREFIX}${String(server.pid)}`,
+      cwd,
+      status: "running",
+      pid: server.pid,
+      hasRunningSubprocess: true,
+      recentOutput: "",
+      metadata: {
+        title,
+        command,
+        ...(cwd.trim().length > 0 ? { projectRoot: cwd } : {}),
+      },
+      updatedAt: server.createdAt ?? new Date().toISOString(),
+    };
+  }
+
   private snapshot(session: TerminalSessionState): TerminalSessionSnapshot {
     return {
       threadId: session.threadId,
@@ -1225,6 +1712,11 @@ export const TerminalManagerLive = Layer.effect(
         Effect.tryPromise({
           try: () => runtime.close(input),
           catch: (cause) => new TerminalError({ message: "Failed to close terminal", cause }),
+        }),
+      list: (input) =>
+        Effect.tryPromise({
+          try: () => runtime.list(input),
+          catch: (cause) => new TerminalError({ message: "Failed to list terminals", cause }),
         }),
       subscribe: (listener) =>
         Effect.sync(() => {

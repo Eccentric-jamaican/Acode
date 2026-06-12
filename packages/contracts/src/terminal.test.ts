@@ -6,6 +6,8 @@ import {
   TerminalClearInput,
   TerminalCloseInput,
   TerminalEvent,
+  TerminalListInput,
+  TerminalListResult,
   TerminalOpenInput,
   TerminalResizeInput,
   TerminalSessionSnapshot,
@@ -74,6 +76,21 @@ describe("TerminalOpenInput", () => {
       T3CODE_PROJECT_ROOT: "/tmp/project",
       CUSTOM_FLAG: "1",
     });
+  });
+
+  it("accepts optional metadata", () => {
+    const parsed = decodeSync(TerminalOpenInput, {
+      threadId: "thread-1",
+      cwd: "/tmp/project",
+      metadata: {
+        projectId: "project-1",
+        projectRoot: "/tmp/project",
+        scriptId: "dev",
+        title: "Dev server",
+        command: "bun run dev",
+      },
+    });
+    expect(parsed.metadata?.title).toBe("Dev server");
   });
 
   it("rejects invalid env keys", () => {
@@ -150,6 +167,17 @@ describe("TerminalCloseInput", () => {
   });
 });
 
+describe("TerminalListInput", () => {
+  it("accepts optional filters", () => {
+    expect(
+      decodes(TerminalListInput, {
+        projectRoot: "/tmp/project",
+        includeInactive: true,
+      }),
+    ).toBe(true);
+  });
+});
+
 describe("TerminalSessionSnapshot", () => {
   it("accepts running snapshots", () => {
     expect(
@@ -163,6 +191,32 @@ describe("TerminalSessionSnapshot", () => {
         exitCode: null,
         exitSignal: null,
         updatedAt: new Date().toISOString(),
+      }),
+    ).toBe(true);
+  });
+});
+
+describe("TerminalListResult", () => {
+  it("accepts session summaries", () => {
+    expect(
+      decodes(TerminalListResult, {
+        sessions: [
+          {
+            threadId: "thread-1",
+            terminalId: DEFAULT_TERMINAL_ID,
+            cwd: "/tmp/project",
+            status: "running",
+            pid: 1234,
+            hasRunningSubprocess: true,
+            recentOutput: "Local: http://localhost:5173\n",
+            metadata: {
+              projectRoot: "/tmp/project",
+              title: "Dev server",
+              command: "bun run dev",
+            },
+            updatedAt: new Date().toISOString(),
+          },
+        ],
       }),
     ).toBe(true);
   });
