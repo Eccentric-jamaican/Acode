@@ -3475,7 +3475,8 @@ export default function ChatView({
         return;
       }
       const api = readNativeApi();
-      if (!api?.browser) {
+      const hasIntegratedBrowser = typeof window !== "undefined" && Boolean(window.desktopBridge?.browser);
+      if (!api?.browser || !hasIntegratedBrowser) {
         window.open(url, "_blank", "noopener,noreferrer");
         return;
       }
@@ -3497,7 +3498,8 @@ export default function ChatView({
       const api = readNativeApi();
       const projectId = activeProject?.id;
       const url = pathToBrowserFileUrl(path, options?.cwd ?? threadWorkspaceCwd ?? undefined);
-      if (!api?.browser || !projectId) {
+      const hasIntegratedBrowser = typeof window !== "undefined" && Boolean(window.desktopBridge?.browser);
+      if (!api?.browser || !projectId || !hasIntegratedBrowser) {
         window.open(url, "_blank", "noopener,noreferrer");
         return;
       }
