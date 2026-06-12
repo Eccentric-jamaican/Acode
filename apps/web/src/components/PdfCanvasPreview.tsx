@@ -8,6 +8,7 @@ import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { Maximize2Icon, MessageCircleIcon, MinusIcon, PlusIcon } from "lucide-react";
 import {
   type PointerEvent,
+  type RefObject,
   type TouchEvent,
   useCallback,
   useEffect,
@@ -54,6 +55,11 @@ const EMBEDDED_PADDING_X_PX = 24;
 const WHEEL_ZOOM_SENSITIVITY = 0.002;
 const RENDER_SCALE_SETTLE_MS = 140;
 const RENDER_SCALE_QUALITY_GAP = 0.18;
+const PDF_RENDER_ROOT_MARGIN = "240px 0px";
+const ESTIMATED_PAGE_SIZE = {
+  height: 792,
+  width: 612,
+};
 
 function pdfJsMapGetOrInsertComputed(
   this: Map<unknown, unknown>,
@@ -155,6 +161,7 @@ export function PdfCanvasPreview(props: {
   const [pageSizesByPage, setPageSizesByPage] = useState<
     Record<number, { width: number; height: number }>
   >({});
+  const [renderablePages, setRenderablePages] = useState<ReadonlySet<number>>(() => new Set([1]));
 
   useEffect(() => {
     const element = viewportRef.current;
@@ -179,6 +186,7 @@ export function PdfCanvasPreview(props: {
     let cancelled = false;
     setPdfDocument(null);
     setPageSizesByPage({});
+    setRenderablePages(new Set([1]));
     setError(null);
     const loadingTask = getDocument({
       data: props.bytes.slice(),
@@ -208,7 +216,10 @@ export function PdfCanvasPreview(props: {
     };
   }, [props.bytes]);
 
-  const pageSizes = useMemo(() => Object.values(pageSizesByPage), [pageSizesByPage]);
+  const pageSizes = useMemo(() => {
+    const measuredSizes = Object.values(pageSizesByPage);
+    return measuredSizes.length > 0 ? measuredSizes : [ESTIMATED_PAGE_SIZE];
+  }, [pageSizesByPage]);
   const fitScales = useMemo(() => {
     const maxPageWidth = Math.max(...pageSizes.map((size) => size.width), 0);
     const maxPageHeight = Math.max(...pageSizes.map((size) => size.height), 0);
@@ -440,6 +451,17 @@ export function PdfCanvasPreview(props: {
     });
   }, []);
 
+  const markPageRenderable = useCallback((pageNumber: number) => {
+    setRenderablePages((current) => {
+      if (current.has(pageNumber)) {
+        return current;
+      }
+      const next = new Set(current);
+      next.add(pageNumber);
+      return next;
+    });
+  }, []);
+
   if (error) {
     return <PdfPreviewEmptyState message={error} />;
   }
@@ -572,12 +594,15 @@ export function PdfCanvasPreview(props: {
                 document={pdfDocument}
                 pageNumber={pageNumber}
                 renderScale={renderScale}
+                scrollRootRef={scrollAreaRef}
+                shouldRender={renderablePages.has(pageNumber)}
                 visualScale={effectiveScale}
                 annotationMode={annotationMode}
                 annotationMarkers={annotationMarkers.filter(
                   (marker) => marker.pageNumber === pageNumber,
                 )}
                 filePath={props.filePath}
+                onPageNearViewport={markPageRenderable}
                 onPageSize={recordPageSize}
                 onAnnotationCapture={canAnnotate ? handleAnnotationCapture : undefined}
               />
@@ -596,8 +621,11 @@ function PdfPage(props: {
   filePath: string;
   pageNumber: number;
   renderScale: number;
+  scrollRootRef: RefObject<HTMLDivElement | null>;
+  shouldRender: boolean;
   visualScale: number;
   onAnnotationCapture?: ((capture: PdfAnnotationCapture) => void) | undefined;
+  onPageNearViewport: (pageNumber: number) => void;
   onPageSize: (pageNumber: number, size: { width: number; height: number }) => void;
 }) {
   const {
@@ -606,16 +634,21 @@ function PdfPage(props: {
     document,
     filePath,
     onAnnotationCapture,
+    onPageNearViewport,
     onPageSize,
     pageNumber,
     renderScale,
+    scrollRootRef,
+    shouldRender,
     visualScale,
   } = props;
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const pageRootRef = useRef<HTMLDivElement | null>(null);
   const selectionPointerIdRef = useRef<number | null>(null);
   const hasRenderedPageRef = useRef(false);
-  const [renderState, setRenderState] = useState<"loading" | "rendered" | "error">("loading");
+  const [renderState, setRenderState] = useState<"queued" | "loading" | "rendered" | "error">(
+    shouldRender ? "loading" : "queued",
+  );
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [basePageSize, setBasePageSize] = useState<{ height: number; width: number } | null>(null);
   const [draftSelection, setDraftSelection] = useState<{
@@ -626,6 +659,41 @@ function PdfPage(props: {
   } | null>(null);
 
   useEffect(() => {
+    const root = pageRootRef.current;
+    const scrollRoot = scrollRootRef.current;
+    if (!root) {
+      return;
+    }
+    if (pageNumber === 1 || typeof IntersectionObserver === "undefined" || !scrollRoot) {
+      onPageNearViewport(pageNumber);
+      return;
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          onPageNearViewport(pageNumber);
+          observer.disconnect();
+        }
+      },
+      {
+        root: scrollRoot,
+        rootMargin: PDF_RENDER_ROOT_MARGIN,
+        threshold: 0,
+      },
+    );
+    observer.observe(root);
+    return () => observer.disconnect();
+  }, [onPageNearViewport, pageNumber, scrollRootRef]);
+
+  useEffect(() => {
+    if (!shouldRender) {
+      if (!hasRenderedPageRef.current) {
+        setRenderState("queued");
+      }
+      return;
+    }
+
     let cancelled = false;
     const canvas = canvasRef.current;
     if (!canvas) {
@@ -704,29 +772,27 @@ function PdfPage(props: {
       cancelled = true;
       cleanupRender?.();
     };
-  }, [document, onPageSize, pageNumber, renderScale]);
+  }, [document, onPageSize, pageNumber, renderScale, shouldRender]);
 
-  const visualPageSize = basePageSize
-    ? {
-        height: Math.ceil(basePageSize.height * visualScale),
-        width: Math.ceil(basePageSize.width * visualScale),
-      }
+  const effectivePageSize = basePageSize ?? ESTIMATED_PAGE_SIZE;
+  const visualPageSize = {
+    height: Math.ceil(effectivePageSize.height * visualScale),
+    width: Math.ceil(effectivePageSize.width * visualScale),
+  };
+  const draftBoundingBox = draftSelection
+    ? normalizeCssRectToBoundingBox({
+        x1: draftSelection.startX,
+        y1: draftSelection.startY,
+        x2: draftSelection.currentX,
+        y2: draftSelection.currentY,
+        width: visualPageSize.width,
+        height: visualPageSize.height,
+      })
     : null;
-  const draftBoundingBox =
-    draftSelection && visualPageSize
-      ? normalizeCssRectToBoundingBox({
-          x1: draftSelection.startX,
-          y1: draftSelection.startY,
-          x2: draftSelection.currentX,
-          y2: draftSelection.currentY,
-          width: visualPageSize.width,
-          height: visualPageSize.height,
-        })
-      : null;
 
   const handleAnnotationPointerDown = useCallback(
     (event: PointerEvent<HTMLDivElement>) => {
-      if (!annotationMode || !onAnnotationCapture || event.button !== 0) {
+      if (!annotationMode || renderState !== "rendered" || !onAnnotationCapture || event.button !== 0) {
         return;
       }
 
@@ -749,7 +815,7 @@ function PdfPage(props: {
         currentY: startY,
       });
     },
-    [annotationMode, onAnnotationCapture],
+    [annotationMode, onAnnotationCapture, renderState],
   );
 
   const handleAnnotationPointerMove = useCallback(
@@ -829,8 +895,8 @@ function PdfPage(props: {
       ref={pageRootRef}
       className="relative max-w-full rounded-md border border-border/55 bg-white shadow-sm transition-[width] duration-150 ease-out"
       style={{
-        aspectRatio: basePageSize ? `${basePageSize.width} / ${basePageSize.height}` : undefined,
-        width: visualPageSize ? `${visualPageSize.width}px` : "min(100%, 820px)",
+        aspectRatio: `${effectivePageSize.width} / ${effectivePageSize.height}`,
+        width: `${visualPageSize.width}px`,
       }}
       onPointerCancel={finishAnnotationSelection}
       onPointerDown={handleAnnotationPointerDown}
@@ -849,7 +915,9 @@ function PdfPage(props: {
         <div className="absolute inset-0 flex items-center justify-center rounded-md bg-white/75 text-xs text-muted-foreground/70">
           {renderState === "error"
             ? (errorMessage ?? "Unable to render this page.")
-            : "Rendering page..."}
+            : renderState === "queued"
+              ? "Page preview queued"
+              : "Rendering page..."}
         </div>
       ) : null}
       {annotationMarkers.map((marker, markerIndex) => (

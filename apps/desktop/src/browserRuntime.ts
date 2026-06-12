@@ -621,12 +621,11 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     projectRuntime.tabOrder = projectRuntime.tabOrder.filter((entry) => entry !== tabId);
     this.closeTabWebContents(tab);
 
-    if (projectRuntime.tabOrder.length === 0) {
-      await this.createTab(projectRuntime, { url: DEFAULT_NEW_TAB_URL, activate: true });
-    } else if (
-      projectRuntime.activeTabId === tabId ||
-      !projectRuntime.activeTabId ||
-      !projectRuntime.tabs.has(projectRuntime.activeTabId)
+    if (
+      projectRuntime.tabOrder.length > 0 &&
+      (projectRuntime.activeTabId === tabId ||
+        !projectRuntime.activeTabId ||
+        !projectRuntime.tabs.has(projectRuntime.activeTabId))
     ) {
       const nextIndex = Math.min(
         Math.max(closedIndex, 0),
@@ -634,6 +633,8 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
       );
       projectRuntime.activeTabId =
         projectRuntime.tabOrder[nextIndex] ?? projectRuntime.tabOrder[0] ?? null;
+    } else if (projectRuntime.tabOrder.length === 0) {
+      projectRuntime.activeTabId = null;
     }
 
     if (this.window && this.paneOpen && this.paneProjectId === projectId && this.paneBounds) {
@@ -771,7 +772,10 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
       CAPTURE_SELECTION_SCRIPT,
       true,
     )) as
-      | (Omit<BrowserInspectCapture, "sessionId" | "projectId" | "screenshotDataUrl" | "capturedAt"> & {
+      | (Omit<
+          BrowserInspectCapture,
+          "sessionId" | "projectId" | "screenshotDataUrl" | "capturedAt"
+        > & {
           boundingBox: BrowserInspectCapture["boundingBox"];
         })
       | null;
@@ -839,7 +843,10 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     });
   }
 
-  async waitFor(projectId: ProjectId, input: { selector?: string; text?: string; timeoutMs?: number }) {
+  async waitFor(
+    projectId: ProjectId,
+    input: { selector?: string; text?: string; timeoutMs?: number },
+  ) {
     const tab = await this.ensureActiveTab(projectId);
     const timeoutMs = Math.max(100, Math.min(input.timeoutMs ?? 10_000, 60_000));
     const startedAt = Date.now();
@@ -871,7 +878,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     await tab.view.webContents.executeJavaScript(
       selectorInteractionScript(
         selector,
-      `
+        `
       window.__t3BrowserAgentCursor?.moveTo(x, y, "click");
       element.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, clientX: x, clientY: y }));
       element.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: x, clientY: y }));
@@ -889,7 +896,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     await tab.view.webContents.executeJavaScript(
       selectorInteractionScript(
         selector,
-      `
+        `
       element.dispatchEvent(new MouseEvent("mouseover", { bubbles: true, clientX: x, clientY: y }));
       element.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, clientX: x, clientY: y }));
       `,
@@ -903,7 +910,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     await tab.view.webContents.executeJavaScript(
       selectorInteractionScript(
         input.selector,
-      `
+        `
       if (!("value" in element)) {
         throw new Error("Target element does not support value assignment.");
       }
@@ -923,7 +930,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     await tab.view.webContents.executeJavaScript(
       selectorInteractionScript(
         input.selector,
-      `
+        `
       if (!("value" in element)) {
         throw new Error("Target element does not support text input.");
       }
@@ -1171,10 +1178,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
       } else if (nudgedBounds.height > 1) {
         nudgedBounds.height -= 1;
       }
-      if (
-        nudgedBounds.width !== nextBounds.width ||
-        nudgedBounds.height !== nextBounds.height
-      ) {
+      if (nudgedBounds.width !== nextBounds.width || nudgedBounds.height !== nextBounds.height) {
         tab.view.setBounds(nudgedBounds);
       }
     }
@@ -1189,19 +1193,25 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
       .catch(() => undefined);
   }
 
-  private attachActiveTab(window: BrowserWindow, projectId: ProjectId, bounds: BrowserPaneBounds): void {
+  private attachActiveTab(
+    window: BrowserWindow,
+    projectId: ProjectId,
+    bounds: BrowserPaneBounds,
+  ): void {
     const projectRuntime = this.runtimes.get(projectId);
     const activeTab = this.getActiveTab(projectRuntime);
     if (!activeTab) {
       return;
     }
 
-    const contentView = (window as BrowserWindow & {
-      contentView: {
-        addChildView: (view: Electron.WebContentsView) => void;
-        removeChildView: (view: Electron.WebContentsView) => void;
-      };
-    }).contentView;
+    const contentView = (
+      window as BrowserWindow & {
+        contentView: {
+          addChildView: (view: Electron.WebContentsView) => void;
+          removeChildView: (view: Electron.WebContentsView) => void;
+        };
+      }
+    ).contentView;
 
     const sameAttachment =
       this.attachedProjectId === projectId && this.attachedTabId === activeTab.tabId;
@@ -1264,9 +1274,11 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
         this.attachedViews.delete(view);
         return;
       }
-      const contentView = (window as BrowserWindow & {
-        contentView: { removeChildView: (view: Electron.WebContentsView) => void };
-      }).contentView;
+      const contentView = (
+        window as BrowserWindow & {
+          contentView: { removeChildView: (view: Electron.WebContentsView) => void };
+        }
+      ).contentView;
       hideView(view);
       contentView.removeChildView(view);
       this.attachedViews.delete(view);
@@ -1353,9 +1365,7 @@ export class BrowserRuntimeRegistry extends EventEmitter<{
     }
   }
 
-  private findTabByWebContentsId(
-    webContentsId: number,
-  ): { tab: BrowserTabRuntimeRecord } | null {
+  private findTabByWebContentsId(webContentsId: number): { tab: BrowserTabRuntimeRecord } | null {
     for (const projectRuntime of this.runtimes.values()) {
       for (const tab of projectRuntime.tabs.values()) {
         if (tab.view.webContents.id === webContentsId) {

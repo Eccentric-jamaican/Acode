@@ -1,6 +1,6 @@
 import { TurnId } from "@t3tools/contracts";
 
-export type RightPanelMode = "diff" | "browser";
+export type RightPanelMode = "picker" | "diff" | "browser" | "files" | "terminal" | "side-chat";
 export type ResolvedRightPanelMode = RightPanelMode | "none";
 export type ChatRightPanel = RightPanelMode;
 
@@ -27,15 +27,34 @@ function normalizeSearchString(value: unknown): string | undefined {
 
 function normalizePanelMode(value: unknown): RightPanelMode | undefined {
   const normalized = normalizeSearchString(value);
-  if (normalized === "diff" || normalized === "browser") {
+  if (
+    normalized === "picker" ||
+    normalized === "diff" ||
+    normalized === "browser" ||
+    normalized === "files" ||
+    normalized === "terminal" ||
+    normalized === "side-chat"
+  ) {
     return normalized;
   }
   return undefined;
 }
 
 export function resolveRightPanelMode(search: Pick<DiffRouteSearch, "panel" | "diff">): ResolvedRightPanelMode {
+  if (search.panel === "picker") {
+    return "picker";
+  }
   if (search.panel === "browser") {
     return "browser";
+  }
+  if (search.panel === "files") {
+    return "files";
+  }
+  if (search.panel === "terminal") {
+    return "terminal";
+  }
+  if (search.panel === "side-chat") {
+    return "side-chat";
   }
   if (search.panel === "diff" || search.diff === "1") {
     return "diff";
@@ -70,10 +89,10 @@ export function withRightPanelMode<T extends Record<string, unknown>>(
 ): Record<string, unknown> {
   const rest = stripDiffSearchParams(params);
   if (mode === "diff") {
-      return { ...rest, panel: "diff", diff: "1" };
+    return { ...rest, panel: "diff" };
   }
-  if (mode === "browser") {
-    return { ...rest, panel: "browser" };
+  if (mode !== "none") {
+    return { ...rest, panel: mode };
   }
   return rest;
 }
@@ -107,7 +126,6 @@ export function parseDiffRouteSearch(search: Record<string, unknown>): DiffRoute
   const panel = normalizePanelMode(search.panel);
   const legacyDiffOpen = isDiffOpenValue(search.diff);
   const resolvedMode: RightPanelMode | undefined = panel ?? (legacyDiffOpen ? "diff" : undefined);
-  const diff = resolvedMode === "diff" ? "1" : undefined;
   const files = isDiffOpenValue(search.files) ? "1" : undefined;
   const diffTurnIdRaw = resolvedMode === "diff" ? normalizeSearchString(search.diffTurnId) : undefined;
   const diffTurnId = diffTurnIdRaw ? TurnId.makeUnsafe(diffTurnIdRaw) : undefined;
@@ -117,7 +135,6 @@ export function parseDiffRouteSearch(search: Record<string, unknown>): DiffRoute
 
   return {
     ...(resolvedMode ? { panel: resolvedMode } : {}),
-    ...(diff ? { diff } : {}),
     ...(files ? { files } : {}),
     ...(diffTurnId ? { diffTurnId } : {}),
     ...(diffFilePath ? { diffFilePath } : {}),

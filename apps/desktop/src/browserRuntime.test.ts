@@ -171,7 +171,10 @@ interface TestProjectRuntime {
   activeTabId: string | null;
 }
 
-function getProjectRuntime(registry: BrowserRuntimeRegistry, projectId: ProjectId): TestProjectRuntime {
+function getProjectRuntime(
+  registry: BrowserRuntimeRegistry,
+  projectId: ProjectId,
+): TestProjectRuntime {
   const runtime = ((registry as any).runtimes as Map<ProjectId, TestProjectRuntime>).get(projectId);
   expect(runtime).toBeDefined();
   return runtime!;
@@ -181,7 +184,10 @@ function hasProjectRuntime(registry: BrowserRuntimeRegistry, projectId: ProjectI
   return ((registry as any).runtimes as Map<ProjectId, TestProjectRuntime>).has(projectId);
 }
 
-function getActiveTabRuntime(registry: BrowserRuntimeRegistry, projectId: ProjectId): TestTabRuntime {
+function getActiveTabRuntime(
+  registry: BrowserRuntimeRegistry,
+  projectId: ProjectId,
+): TestTabRuntime {
   const projectRuntime = getProjectRuntime(registry, projectId);
   expect(projectRuntime.activeTabId).toBeTruthy();
   const tab = projectRuntime.activeTabId
@@ -234,7 +240,9 @@ describe("BrowserRuntimeRegistry", () => {
       throw new Error("ERR_ABORTED");
     };
 
-    await expect(registry.navigate(projectId, "https://example.com")).rejects.toThrow("ERR_ABORTED");
+    await expect(registry.navigate(projectId, "https://example.com")).rejects.toThrow(
+      "ERR_ABORTED",
+    );
   });
 
   it("uses the shared persistent browser partition", async () => {
@@ -565,7 +573,12 @@ describe("BrowserRuntimeRegistry", () => {
 
     const staleOpen = registry.open(projectId, { x: 540, y: 35, width: 200, height: 360 });
     await Promise.resolve();
-    const latestSnapshot = await registry.open(projectId, { x: 420, y: 35, width: 260, height: 360 });
+    const latestSnapshot = await registry.open(projectId, {
+      x: 420,
+      y: 35,
+      width: 260,
+      height: 360,
+    });
     resolveFirstOpen();
     await staleOpen;
     vi.runAllTimers();
@@ -750,7 +763,7 @@ describe("BrowserRuntimeRegistry", () => {
     expect(closed.activeTabId).not.toBe(firstTabId);
   });
 
-  it("recreates a default-start replacement tab when closing the last tab", async () => {
+  it("leaves an empty browser state when closing the last tab", async () => {
     const registry = new BrowserRuntimeRegistry({ browserPreloadPath: "test-preload.js" });
     const projectId = ProjectId.makeUnsafe("project-tabs-2");
 
@@ -762,10 +775,9 @@ describe("BrowserRuntimeRegistry", () => {
     }
 
     const afterClose = await registry.closeTab(projectId, initialTabId);
-    expect(afterClose.tabs).toHaveLength(1);
-    expect(afterClose.activeTabId).toBeTruthy();
-    expect(afterClose.activeTabId).not.toBe(initialTabId);
-    expect(afterClose.session?.navigation.url).toBe("https://www.google.com");
+    expect(afterClose.tabs).toHaveLength(0);
+    expect(afterClose.activeTabId).toBeNull();
+    expect(afterClose.session).toBeNull();
   });
 
   it("injects a visible agent cursor for browser interactions", async () => {

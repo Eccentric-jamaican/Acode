@@ -762,7 +762,8 @@ function createDesktopBrowserBridge(projectId: ProjectId): DesktopBridge["browse
     closePane: async () => undefined,
     newTab: async () => {
       const tabId = `tab-${tabs.length + 1}`;
-      const base = buildSnapshot().tabs?.[0];
+      const base =
+        buildSnapshot().tabs?.[0] ?? createDesktopBrowserSnapshot(projectId, paneBounds).tabs?.[0];
       if (!base) {
         return buildSnapshot();
       }
@@ -790,12 +791,6 @@ function createDesktopBrowserBridge(projectId: ProjectId): DesktopBridge["browse
     },
     closeTab: async (input) => {
       tabs = tabs.filter((tab) => tab.tabId !== input.tabId);
-      if (tabs.length === 0) {
-        const fallback = createDesktopBrowserSnapshot(projectId, paneBounds).tabs?.[0];
-        if (fallback) {
-          tabs = [fallback];
-        }
-      }
       if (!tabs.some((tab) => tab.tabId === activeTabId)) {
         activeTabId = tabs[0]?.tabId ?? null;
       }

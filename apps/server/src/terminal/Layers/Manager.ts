@@ -69,7 +69,9 @@ interface ExternalServerDescriptor {
   createdAt: string | null;
 }
 
-type ExternalServerDiscoverer = (filter: ExternalServerFilter) => Promise<ExternalServerDescriptor[]>;
+type ExternalServerDiscoverer = (
+  filter: ExternalServerFilter,
+) => Promise<ExternalServerDescriptor[]>;
 type ExternalProcessKiller = (pid: number) => Promise<void>;
 
 function defaultShellResolver(): string {
@@ -303,8 +305,7 @@ function samePath(left: string, right: string): boolean {
 function pathContains(parent: string, child: string): boolean {
   const relativePath = path.relative(path.resolve(parent), path.resolve(child));
   return (
-    relativePath.length === 0 ||
-    (!relativePath.startsWith("..") && !path.isAbsolute(relativePath))
+    relativePath.length === 0 || (!relativePath.startsWith("..") && !path.isAbsolute(relativePath))
   );
 }
 
@@ -331,25 +332,7 @@ function escapeRegExp(value: string): string {
 }
 
 function normalizeProjectRootForMatch(value: string): string {
-  return value
-    .trim()
-    .replaceAll("\\", "/")
-    .replace(/\/+/g, "/")
-    .replace(/\/+$/g, "")
-    .toLowerCase();
-}
-
-function encodePowershellCommand(script: string): string {
-  return Buffer.from(script, "utf16le").toString("base64");
-}
-
-function normalizeProjectRootForMatch(value: string): string {
-  return value
-    .trim()
-    .replaceAll("\\", "/")
-    .replace(/\/+/g, "/")
-    .replace(/\/+$/g, "")
-    .toLowerCase();
+  return value.trim().replaceAll("\\", "/").replace(/\/+/g, "/").replace(/\/+$/g, "").toLowerCase();
 }
 
 function parseJsonArrayOrObject<T>(value: string): T[] {
@@ -386,10 +369,7 @@ function commandMatchesProjectRoot(
   const normalizedCommandLine = normalizeProjectRootForMatch(commandLine).replaceAll('"', "");
   return projectRoots.some((root) => {
     const normalizedRoot = normalizeProjectRootForMatch(root);
-    const boundaryPattern = new RegExp(
-      `(^|\\s)${escapeRegExp(normalizedRoot)}(?:/|\\s|$)`,
-      "i",
-    );
+    const boundaryPattern = new RegExp(`(^|\\s)${escapeRegExp(normalizedRoot)}(?:/|\\s|$)`, "i");
     return (
       normalizedCommandLine === normalizedRoot ||
       normalizedCommandLine.includes(`${normalizedRoot}/`) ||
@@ -400,7 +380,9 @@ function commandMatchesProjectRoot(
 
 function extractRecentOutputPorts(value: string): Set<number> {
   const ports = new Set<number>();
-  for (const match of value.matchAll(/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|::1):(\d{2,5})/gi)) {
+  for (const match of value.matchAll(
+    /(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|::1):(\d{2,5})/gi,
+  )) {
     const port = Number(match[1]);
     if (Number.isInteger(port) && port > 0) {
       ports.add(port);
@@ -520,16 +502,12 @@ async function discoverPosixExternalServers(
     let commandLine = "";
     let parentPid: number | null = null;
     try {
-      const psResult = await runProcess(
-        "ps",
-        ["-p", String(currentPid), "-o", "ppid=,command="],
-        {
-          timeoutMs: 1_500,
-          allowNonZeroExit: true,
-          maxBufferBytes: 65_536,
-          outputMode: "truncate",
-        },
-      );
+      const psResult = await runProcess("ps", ["-p", String(currentPid), "-o", "ppid=,command="], {
+        timeoutMs: 1_500,
+        allowNonZeroExit: true,
+        maxBufferBytes: 65_536,
+        outputMode: "truncate",
+      });
       const raw = psResult.stdout.trim();
       const firstSpace = raw.search(/\s/);
       if (firstSpace > 0) {
@@ -553,7 +531,9 @@ async function discoverPosixExternalServers(
     });
   }
 
-  return descriptors.filter((server) => commandMatchesProjectRoot(server.commandLine, projectRoots));
+  return descriptors.filter((server) =>
+    commandMatchesProjectRoot(server.commandLine, projectRoots),
+  );
 }
 
 async function defaultExternalServerDiscoverer(
@@ -891,7 +871,10 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
       .filter((session) => includeInactive || session.status === "running")
       .filter((session) => !input.threadId || session.threadId === input.threadId)
       .filter((session) => !input.cwd || samePath(session.cwd, input.cwd))
-      .filter((session) => !input.projectRoot || this.sessionMatchesProjectRoot(session, input.projectRoot))
+      .filter(
+        (session) =>
+          !input.projectRoot || this.sessionMatchesProjectRoot(session, input.projectRoot),
+      )
       .map((session) => this.summary(session))
       .toSorted((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 
@@ -1324,7 +1307,8 @@ export class TerminalManagerRuntime extends EventEmitter<TerminalManagerEvents> 
         } catch (migrationError) {
           this.logger.warn("failed to rename legacy terminal history", {
             threadId,
-            error: migrationError instanceof Error ? migrationError.message : String(migrationError),
+            error:
+              migrationError instanceof Error ? migrationError.message : String(migrationError),
           });
         }
       }

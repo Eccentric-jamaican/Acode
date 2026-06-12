@@ -20,7 +20,6 @@ describe("parseDiffRouteSearch", () => {
 
     expect(parsed).toEqual({
       panel: "diff",
-      diff: "1",
       diffTurnId: "turn-1",
       diffFilePath: "src/app.ts",
     });
@@ -34,7 +33,6 @@ describe("parseDiffRouteSearch", () => {
       }),
     ).toEqual({
       panel: "diff",
-      diff: "1",
       diffTurnId: "turn-1",
     });
 
@@ -45,7 +43,6 @@ describe("parseDiffRouteSearch", () => {
       }),
     ).toEqual({
       panel: "diff",
-      diff: "1",
       diffTurnId: "turn-1",
     });
   });
@@ -69,7 +66,6 @@ describe("parseDiffRouteSearch", () => {
 
     expect(parsed).toEqual({
       panel: "diff",
-      diff: "1",
     });
   });
 
@@ -83,7 +79,6 @@ describe("parseDiffRouteSearch", () => {
 
     expect(parsed).toEqual({
       panel: "diff",
-      diff: "1",
     });
   });
 
@@ -151,7 +146,6 @@ describe("right panel search helpers", () => {
       ),
     ).toEqual({
       panel: "diff",
-      diff: "1",
       diffTurnId: "turn-2",
       diffFilePath: "src/index.ts",
       q: "hello",

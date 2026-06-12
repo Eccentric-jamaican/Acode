@@ -1526,7 +1526,8 @@ function createDesktopBrowserBridge(
     closePane: async () => undefined,
     newTab: async () => {
       const tabId = `tab-${tabs.length + 1}`;
-      const base = buildSnapshot().tabs?.[0];
+      const base =
+        buildSnapshot().tabs?.[0] ?? createDesktopBrowserSnapshot(projectId, paneBounds).tabs?.[0];
       if (!base) {
         return buildSnapshot();
       }
@@ -1554,12 +1555,6 @@ function createDesktopBrowserBridge(
     },
     closeTab: async (input) => {
       tabs = tabs.filter((tab) => tab.tabId !== input.tabId);
-      if (tabs.length === 0) {
-        const fallback = createDesktopBrowserSnapshot(projectId, paneBounds).tabs?.[0];
-        if (fallback) {
-          tabs = [fallback];
-        }
-      }
       if (!tabs.some((tab) => tab.tabId === activeTabId)) {
         activeTabId = tabs[0]?.tabId ?? null;
       }
@@ -2322,7 +2317,7 @@ describe("ChatView timeline estimator parity (full app)", () => {
       await expect.element(page.getByLabelText("Reload")).toBeVisible();
       await expect.element(page.getByLabelText("Browser URL")).toBeVisible();
       await expect.element(page.getByLabelText("Inspect element")).toBeVisible();
-      await expect.element(page.getByLabelText("Collapse browser")).toBeVisible();
+      await expect.element(page.getByLabelText("Collapse browser")).not.toBeInTheDocument();
       await expect
         .poll(() => elementHeightByTestId("integrated-browser-top-header"))
         .toBeGreaterThanOrEqual(40);

@@ -9,8 +9,7 @@ import type {
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
-  Maximize2Icon,
-  Minimize2Icon,
+  PlusIcon,
   RefreshCwIcon,
   SearchIcon,
   XIcon,
@@ -42,6 +41,7 @@ const BOUNDS_SETTLE_DELAYS_MS = [0, 50, 150, 300] as const;
 const CHAT_MIN_WIDTH_PX = 540;
 const BROWSER_MIN_EFFECTIVE_WIDTH_PX = 280;
 const EMPTY_BROWSER_TABS: ReadonlyArray<NonNullable<BrowserSessionSnapshot["tabs"]>[number]> = [];
+const BROWSER_NATIVE_OVERLAY_BLOCK_EVENT = "t3code:browser-native-overlay-block";
 
 interface BrowserUrlInputProps {
   value: string;
@@ -163,7 +163,12 @@ function BrowserTabsStrip(props: BrowserTabsStripProps) {
   const { tabs, activeTabId, controlsDisabled, onActivateTab, onCloseTab } = props;
 
   return (
-    <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+    <div className="flex min-w-0 max-w-[calc(100%-2.25rem)] flex-none items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+      {tabs.length === 0 ? (
+        <div className="flex h-7 min-w-0 items-center rounded-md border border-dashed border-border/50 px-2.5 text-xs text-muted-foreground/80">
+          No pages open
+        </div>
+      ) : null}
       {tabs.map((tab) => {
         const isActive = tab.tabId === activeTabId;
         const tabLabel = tab.navigation.title?.trim() || tab.navigation.url || "New tab";
@@ -171,16 +176,16 @@ function BrowserTabsStrip(props: BrowserTabsStripProps) {
           <div
             key={tab.tabId}
             className={cn(
-              "group flex min-w-0 max-w-[180px] items-center rounded border text-xs",
+              "group flex h-7 min-w-0 max-w-[190px] shrink-0 items-center rounded-md border text-xs transition-colors",
               isActive
-                ? "border-border bg-muted/70 text-foreground"
-                : "border-transparent bg-muted/40 text-muted-foreground hover:border-border/70 hover:text-foreground",
+                ? "border-border/80 bg-background text-foreground shadow-sm"
+                : "border-transparent bg-muted/35 text-muted-foreground hover:bg-muted/65 hover:text-foreground",
             )}
             title={tabLabel}
           >
             <button
               type="button"
-              className="min-w-0 flex-1 truncate py-0.5 pl-2 pr-1 text-left"
+              className="min-w-0 flex-1 truncate py-0 pl-2.5 pr-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
               disabled={controlsDisabled}
               onClick={() => onActivateTab(tab.tabId)}
             >
@@ -208,16 +213,34 @@ function BrowserTabsStrip(props: BrowserTabsStripProps) {
   );
 }
 
+function BrowserEmptyState(props: { onCreateTab: () => void; disabled: boolean }) {
+  return (
+    <div className="absolute inset-0 flex items-center justify-center bg-background text-sm text-muted-foreground">
+      <div className="flex w-[min(18rem,calc(100%-3rem))] flex-col items-center gap-3 text-center">
+        <div className="flex size-10 items-center justify-center rounded-lg border border-border/60 bg-muted/35 text-foreground">
+          <PlusIcon className="size-4" />
+        </div>
+        <div className="space-y-1">
+          <div className="font-medium text-foreground">Open a browser tab</div>
+          <div className="text-xs leading-5">Start a new page when you are ready.</div>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          disabled={props.disabled}
+          onClick={props.onCreateTab}
+        >
+          <PlusIcon className="size-3.5" />
+          New tab
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 export default function IntegratedBrowserPane(props: BrowserPaneProps) {
-  const {
-    activeProjectId,
-    activeThreadId,
-    expanded = false,
-    open,
-    layout = "aside",
-    onToggleExpanded,
-    onRequestClose,
-  } = props;
+  const { activeProjectId, activeThreadId, open, layout = "aside" } = props;
   const usesAsideLayout = layout === "aside";
   const { settings } = useAppSettings();
   const width = useBrowserPaneStore((state) => state.width);
@@ -228,6 +251,7 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [snapshot, setSnapshot] = useState<BrowserSessionSnapshot | null>(null);
   const [urlInput, setUrlInput] = useState("");
+  const [nativeOverlayBlocked, setNativeOverlayBlocked] = useState(false);
   const [containerWidth, setContainerWidth] = useState(() =>
     typeof window === "undefined" ? 0 : window.innerWidth,
   );
@@ -276,6 +300,18 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
     },
     [handleBrowserError],
   );
+
+  useEffect(() => {
+    const handleNativeOverlayBlock = (event: Event) => {
+      const blocked = Boolean((event as CustomEvent<{ blocked?: boolean }>).detail?.blocked);
+      setNativeOverlayBlocked(blocked);
+    };
+
+    window.addEventListener(BROWSER_NATIVE_OVERLAY_BLOCK_EVENT, handleNativeOverlayBlock);
+    return () => {
+      window.removeEventListener(BROWSER_NATIVE_OVERLAY_BLOCK_EVENT, handleNativeOverlayBlock);
+    };
+  }, []);
 
   useEffect(() => {
     activeProjectIdRef.current = activeProjectId;
@@ -447,6 +483,19 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
       return;
     }
 
+    if (nativeOverlayBlocked) {
+      latestBoundsRequestSeqRef.current += 1;
+      latestBoundsResponseSeqRef.current = latestBoundsRequestSeqRef.current;
+      lastDispatchedBoundsRef.current = null;
+      void api.browser
+        .open({
+          projectId: activeProjectId,
+          bounds: { x: 0, y: 0, width: 0, height: 0 },
+        })
+        .catch(() => undefined);
+      return;
+    }
+
     let cancelled = false;
     let animationFrameId: number | null = null;
     const readBounds = (): BrowserPaneBounds | null => {
@@ -528,7 +577,7 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
       window.removeEventListener("resize", requestBoundsSyncOnNextFrame);
       window.removeEventListener("scroll", requestBoundsSyncOnNextFrame, true);
     };
-  }, [activeProjectId, api, effectivePaneWidth, open, runBrowserAction]);
+  }, [activeProjectId, api, effectivePaneWidth, nativeOverlayBlocked, open, runBrowserAction]);
 
   const onResizeStart = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!paneRef.current) {
@@ -608,14 +657,6 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
     });
   };
 
-  const requestClose = useCallback(() => {
-    lastDispatchedBoundsRef.current = null;
-    latestBoundsRequestSeqRef.current += 1;
-    latestBoundsResponseSeqRef.current = latestBoundsRequestSeqRef.current;
-    void api?.browser?.closePane().catch(() => undefined);
-    onRequestClose();
-  }, [api, onRequestClose]);
-
   const browserOpen = open && isDesktopBrowserAvailable && activeProjectId !== null;
   const controlsDisabled = !browserOpen || !activeProjectId || !api?.browser;
 
@@ -623,175 +664,150 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
     return null;
   }
 
-  if (!usesAsideLayout) {
-    return (
-      <div className="flex min-h-0 flex-1 flex-col">
-        <div
-          className={cn("relative z-[60] flex min-w-0 shrink-0 flex-col border-b border-border")}
-          data-testid="integrated-browser-top-header"
-        >
-          <div className="flex h-8 min-w-0 items-center gap-1 px-2">
-            <BrowserTabsStrip
-              tabs={tabs}
-              activeTabId={activeTab?.tabId ?? null}
-              controlsDisabled={controlsDisabled}
-              onActivateTab={activateTab}
-              onCloseTab={closeTab}
-            />
+  const browserContent = (
+    <div className="flex min-w-0 flex-1 flex-col">
+      <div
+        className="relative z-[60] flex min-w-0 shrink-0 flex-col border-b border-border/65 bg-background/95"
+        data-testid="integrated-browser-top-header"
+      >
+        <div className="flex h-9 min-w-0 items-center gap-1.5 border-b border-border/35 px-2">
+          <BrowserTabsStrip
+            tabs={tabs}
+            activeTabId={activeTab?.tabId ?? null}
+            controlsDisabled={controlsDisabled}
+            onActivateTab={activateTab}
+            onCloseTab={closeTab}
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            aria-label="New tab"
+            disabled={controlsDisabled}
+            className="h-7 w-7 shrink-0 rounded-md text-muted-foreground hover:text-foreground"
+            onClick={createTab}
+          >
+            <PlusIcon className="size-3.5" />
+          </Button>
+        </div>
+        <div className="flex h-10 min-w-0 items-center gap-2 px-2">
+          <div className="flex shrink-0 items-center gap-0.5 overflow-visible rounded-md bg-muted/30 p-0.5">
             <Button
               type="button"
               variant="ghost"
               size="icon-xs"
-              aria-label="New tab"
-              disabled={controlsDisabled}
-              onClick={createTab}
+              aria-label="Back"
+              disabled={controlsDisabled || !activeTab?.navigation.canGoBack}
+              onClick={() => {
+                if (!activeProjectId) {
+                  return;
+                }
+                void runBrowserAction("go back", () =>
+                  api.browser.back({ projectId: activeProjectId }),
+                ).then((nextSnapshot) => {
+                  if (nextSnapshot) {
+                    setSnapshot(nextSnapshot);
+                  }
+                });
+              }}
             >
-              +
+              <ArrowLeftIcon />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Forward"
+              disabled={controlsDisabled || !activeTab?.navigation.canGoForward}
+              onClick={() => {
+                if (!activeProjectId) {
+                  return;
+                }
+                void runBrowserAction("go forward", () =>
+                  api.browser.forward({ projectId: activeProjectId }),
+                ).then((nextSnapshot) => {
+                  if (nextSnapshot) {
+                    setSnapshot(nextSnapshot);
+                  }
+                });
+              }}
+            >
+              <ArrowRightIcon />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              aria-label="Reload"
+              disabled={controlsDisabled || !activeTab}
+              onClick={() => {
+                if (!activeProjectId) {
+                  return;
+                }
+                void runBrowserAction("reload page", () =>
+                  api.browser.reload({ projectId: activeProjectId }),
+                ).then((nextSnapshot) => {
+                  if (nextSnapshot) {
+                    setSnapshot(nextSnapshot);
+                  }
+                });
+              }}
+            >
+              <RefreshCwIcon className={cn(activeTab?.navigation.isLoading && "animate-spin")} />
             </Button>
           </div>
-          <div className="flex h-9 min-w-0 items-center gap-2 px-2">
-            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-visible">
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                aria-label="Back"
-                disabled={controlsDisabled || !activeTab?.navigation.canGoBack}
-                onClick={() => {
-                  if (!activeProjectId) {
-                    return;
+          <BrowserUrlInput
+            value={urlInput}
+            onChange={setUrlInput}
+            onSubmit={(nextValue) => {
+              void navigate(nextValue);
+            }}
+            disabled={controlsDisabled || !activeTab}
+            className="h-8 min-w-[120px] flex-1 basis-0 rounded-lg border-border/70 bg-muted/35 px-3 font-mono text-xs shadow-inner shadow-black/[0.025] focus-visible:bg-background"
+            ariaLabel="Browser URL"
+          />
+          <div
+            className="flex shrink-0 items-center gap-1"
+            data-testid="integrated-browser-header-actions"
+          >
+            <Toggle
+              pressed={activeTab?.inspectMode === true}
+              onPressedChange={(next) => {
+                if (!activeProjectId) {
+                  return;
+                }
+                void runBrowserAction("toggle inspect mode", () =>
+                  api.browser.setInspectMode({ projectId: activeProjectId, enabled: next }),
+                ).then((nextSnapshot) => {
+                  if (nextSnapshot) {
+                    setSnapshot(nextSnapshot);
                   }
-                  void runBrowserAction("go back", () =>
-                    api.browser.back({ projectId: activeProjectId }),
-                  ).then((nextSnapshot) => {
-                    if (nextSnapshot) {
-                      setSnapshot(nextSnapshot);
-                    }
-                  });
-                }}
-              >
-                <ArrowLeftIcon />
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                aria-label="Forward"
-                disabled={controlsDisabled || !activeTab?.navigation.canGoForward}
-                onClick={() => {
-                  if (!activeProjectId) {
-                    return;
-                  }
-                  void runBrowserAction("go forward", () =>
-                    api.browser.forward({ projectId: activeProjectId }),
-                  ).then((nextSnapshot) => {
-                    if (nextSnapshot) {
-                      setSnapshot(nextSnapshot);
-                    }
-                  });
-                }}
-              >
-                <ArrowRightIcon />
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                aria-label="Reload"
-                disabled={controlsDisabled}
-                onClick={() => {
-                  if (!activeProjectId) {
-                    return;
-                  }
-                  void runBrowserAction("reload page", () =>
-                    api.browser.reload({ projectId: activeProjectId }),
-                  ).then((nextSnapshot) => {
-                    if (nextSnapshot) {
-                      setSnapshot(nextSnapshot);
-                    }
-                  });
-                }}
-              >
-                <RefreshCwIcon className={cn(activeTab?.navigation.isLoading && "animate-spin")} />
-              </Button>
-              <BrowserUrlInput
-                value={urlInput}
-                onChange={setUrlInput}
-                onSubmit={(nextValue) => {
-                  void navigate(nextValue);
-                }}
-                disabled={controlsDisabled}
-                className="h-8 min-w-[120px] flex-1 basis-0 rounded-md border-border bg-muted/40 text-xs"
-                ariaLabel="Browser URL"
-              />
-            </div>
-            <div
-              className="flex shrink-0 items-center gap-1"
-              data-testid="integrated-browser-header-actions"
+                });
+              }}
+              variant="outline"
+              size="sm"
+              aria-label="Inspect element"
+              disabled={controlsDisabled || !activeTab}
+              className="h-8 rounded-lg border-border/65 bg-background px-2"
             >
-              {onToggleExpanded ? (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  aria-label={expanded ? "Collapse expanded browser" : "Expand browser"}
-                  title={expanded ? "Collapse expanded browser" : "Expand browser"}
-                  onClick={onToggleExpanded}
-                >
-                  {expanded ? (
-                    <Minimize2Icon className="size-3.5" />
-                  ) : (
-                    <Maximize2Icon className="size-3.5" />
-                  )}
-                </Button>
-              ) : null}
-              <Toggle
-                pressed={activeTab?.inspectMode === true}
-                onPressedChange={(next) => {
-                  if (!activeProjectId) {
-                    return;
-                  }
-                  void runBrowserAction("toggle inspect mode", () =>
-                    api.browser.setInspectMode({ projectId: activeProjectId, enabled: next }),
-                  ).then((nextSnapshot) => {
-                    if (nextSnapshot) {
-                      setSnapshot(nextSnapshot);
-                    }
-                  });
-                }}
-                variant="outline"
-                size="sm"
-                aria-label="Inspect element"
-                disabled={controlsDisabled}
-              >
-                <SearchIcon className="size-3.5" />
-              </Toggle>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                aria-label="Collapse browser"
-                onClick={requestClose}
-              >
-                <XIcon />
-              </Button>
-            </div>
+              <SearchIcon className="size-3.5" />
+            </Toggle>
           </div>
         </div>
-        <div className="relative min-h-0 flex-1">
-          <div
-            ref={viewportRef}
-            className="absolute inset-0"
-            data-integrated-browser-native-viewport="true"
-          />
-          {!activeTab && (
-            <div className="absolute inset-0 flex items-center justify-center bg-background/80 text-xs text-muted-foreground">
-              Loading browser...
-            </div>
-          )}
-        </div>
       </div>
-    );
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={viewportRef}
+          className="absolute inset-0"
+          data-integrated-browser-native-viewport="true"
+        />
+        {!activeTab && <BrowserEmptyState onCreateTab={createTab} disabled={controlsDisabled} />}
+      </div>
+    </div>
+  );
+
+  if (!usesAsideLayout) {
+    return <div className="flex min-h-0 flex-1 flex-col">{browserContent}</div>;
   }
 
   return (
@@ -810,172 +826,7 @@ export default function IntegratedBrowserPane(props: BrowserPaneProps) {
         className="absolute inset-y-0 left-0 z-20 w-1 cursor-col-resize"
         onPointerDown={onResizeStart}
       />
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div
-          className={cn("relative z-[60] flex min-w-0 shrink-0 flex-col border-b border-border")}
-          data-testid="integrated-browser-top-header"
-        >
-          <div className="flex h-8 min-w-0 items-center gap-1 px-2">
-            <BrowserTabsStrip
-              tabs={tabs}
-              activeTabId={activeTab?.tabId ?? null}
-              controlsDisabled={controlsDisabled}
-              onActivateTab={activateTab}
-              onCloseTab={closeTab}
-            />
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-xs"
-              aria-label="New tab"
-              disabled={controlsDisabled}
-              onClick={createTab}
-            >
-              +
-            </Button>
-          </div>
-          <div className="flex h-9 min-w-0 items-center gap-2 px-2">
-            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-visible">
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                aria-label="Back"
-                disabled={controlsDisabled || !activeTab?.navigation.canGoBack}
-                onClick={() => {
-                  if (!activeProjectId) {
-                    return;
-                  }
-                  void runBrowserAction("go back", () =>
-                    api.browser.back({ projectId: activeProjectId }),
-                  ).then((nextSnapshot) => {
-                    if (nextSnapshot) {
-                      setSnapshot(nextSnapshot);
-                    }
-                  });
-                }}
-              >
-                <ArrowLeftIcon />
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                aria-label="Forward"
-                disabled={controlsDisabled || !activeTab?.navigation.canGoForward}
-                onClick={() => {
-                  if (!activeProjectId) {
-                    return;
-                  }
-                  void runBrowserAction("go forward", () =>
-                    api.browser.forward({ projectId: activeProjectId }),
-                  ).then((nextSnapshot) => {
-                    if (nextSnapshot) {
-                      setSnapshot(nextSnapshot);
-                    }
-                  });
-                }}
-              >
-                <ArrowRightIcon />
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                aria-label="Reload"
-                disabled={controlsDisabled}
-                onClick={() => {
-                  if (!activeProjectId) {
-                    return;
-                  }
-                  void runBrowserAction("reload page", () =>
-                    api.browser.reload({ projectId: activeProjectId }),
-                  ).then((nextSnapshot) => {
-                    if (nextSnapshot) {
-                      setSnapshot(nextSnapshot);
-                    }
-                  });
-                }}
-              >
-                <RefreshCwIcon className={cn(activeTab?.navigation.isLoading && "animate-spin")} />
-              </Button>
-              <BrowserUrlInput
-                value={urlInput}
-                onChange={setUrlInput}
-                onSubmit={(nextValue) => {
-                  void navigate(nextValue);
-                }}
-                disabled={controlsDisabled}
-                className="h-8 min-w-[120px] flex-1 basis-0 rounded-md border-border bg-muted/40 text-xs"
-                ariaLabel="Browser URL"
-              />
-            </div>
-            <div
-              className="flex shrink-0 items-center gap-1"
-              data-testid="integrated-browser-header-actions"
-            >
-              {onToggleExpanded ? (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-xs"
-                  aria-label={expanded ? "Collapse expanded browser" : "Expand browser"}
-                  title={expanded ? "Collapse expanded browser" : "Expand browser"}
-                  onClick={onToggleExpanded}
-                >
-                  {expanded ? (
-                    <Minimize2Icon className="size-3.5" />
-                  ) : (
-                    <Maximize2Icon className="size-3.5" />
-                  )}
-                </Button>
-              ) : null}
-              <Toggle
-                pressed={activeTab?.inspectMode === true}
-                onPressedChange={(next) => {
-                  if (!activeProjectId) {
-                    return;
-                  }
-                  void runBrowserAction("toggle inspect mode", () =>
-                    api.browser.setInspectMode({ projectId: activeProjectId, enabled: next }),
-                  ).then((nextSnapshot) => {
-                    if (nextSnapshot) {
-                      setSnapshot(nextSnapshot);
-                    }
-                  });
-                }}
-                variant="outline"
-                size="sm"
-                aria-label="Inspect element"
-                disabled={controlsDisabled}
-              >
-                <SearchIcon className="size-3.5" />
-              </Toggle>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                aria-label="Collapse browser"
-                onClick={requestClose}
-              >
-                <XIcon />
-              </Button>
-            </div>
-          </div>
-        </div>
-        <div className="relative min-h-0 flex-1">
-          <div
-            ref={viewportRef}
-            className="absolute inset-0"
-            data-integrated-browser-native-viewport="true"
-          />
-          {!activeTab && (
-            <div className="absolute inset-0 flex items-center justify-center bg-background/80 text-xs text-muted-foreground">
-              Loading browser...
-            </div>
-          )}
-        </div>
-      </div>
+      {browserContent}
     </aside>
   );
 }

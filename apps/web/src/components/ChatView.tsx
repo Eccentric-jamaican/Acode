@@ -188,7 +188,7 @@ import {
   KanbanSquareIcon,
   HammerIcon,
   MessageSquareIcon,
-  PanelLeftIcon,
+  PanelRightOpenIcon,
   BoxIcon,
   GitBranchIcon,
   GitCommitIcon,
@@ -198,13 +198,11 @@ import {
   ListChecksIcon,
   MousePointer2Icon,
   PlusIcon,
-  Maximize2Icon,
   ArrowLeftRight,
   PlayIcon,
   ServerIcon,
   SettingsIcon,
   SquareIcon,
-  TerminalIcon,
   Undo2Icon,
   Trash2Icon,
   WrenchIcon,
@@ -366,8 +364,7 @@ const DESKTOP_APP_RESOLUTION_TIMEOUT_MS = 2_500;
 const POINTER_SCROLL_INTENT_THRESHOLD_PX = 6;
 
 function isTerminalUserInputSubmitFailure(error: unknown): boolean {
-  const message =
-    error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
   return (
     message.includes("Unknown pending") ||
     message.includes('Expected a string starting with "que"') ||
@@ -461,10 +458,7 @@ const THREAD_CONTEXT_ARTIFACT_PAGE_SIZE = 5;
 const THREAD_CONTEXT_MARKDOWN_ARTIFACT_EXTENSIONS = new Set(["md", "mdown", "mdx", "mkd"]);
 const LOCAL_SERVER_REFRESH_MS = 2_000;
 const LOCAL_SERVER_COPY_LINE_LIMIT = 160;
-const ANSI_ESCAPE_PATTERN = new RegExp(
-  `${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`,
-  "g",
-);
+const ANSI_ESCAPE_PATTERN = new RegExp(`${String.fromCharCode(27)}\\[[0-?]*[ -/]*[@-~]`, "g");
 const THREAD_CONTEXT_LOW_VALUE_ARTIFACT_FILENAMES = new Set([
   "agents.md",
   "authors.md",
@@ -564,8 +558,7 @@ function localServerPathMatches(root: string | null | undefined, candidate: stri
     return false;
   }
   return (
-    normalizedCandidate === normalizedRoot ||
-    normalizedCandidate.startsWith(`${normalizedRoot}/`)
+    normalizedCandidate === normalizedRoot || normalizedCandidate.startsWith(`${normalizedRoot}/`)
   );
 }
 
@@ -691,9 +684,7 @@ function buildLocalServerSessionView(
     title: resolveLocalServerSessionTitle(session, scripts),
     detail:
       latestArtifact?.label ??
-      (session.metadata?.command
-        ? friendlyCommandSummary(session.metadata.command)
-        : session.cwd),
+      (session.metadata?.command ? friendlyCommandSummary(session.metadata.command) : session.cwd),
   };
 }
 
@@ -2081,13 +2072,18 @@ interface ChatViewProps {
   surfaceMode?: "single" | "split";
   isFocusedPane?: boolean;
   panelState?: {
-    panel: "browser" | "diff" | null;
+    panel: "picker" | "browser" | "diff" | "files" | "terminal" | "side-chat" | null;
     filesOpen: boolean;
     diffTurnId: TurnId | null;
     diffFilePath: string | null;
     hasOpenedPanel: boolean;
-    lastOpenPanel: "browser" | "diff";
+    lastOpenPanel: "browser" | "diff" | "files" | "terminal" | "side-chat" | null;
+    lastPanelClosedAt?: number | null;
   };
+  rightPanelOpen?: boolean;
+  onToggleRightPanel?: () => void;
+  terminalPanelOpen?: boolean;
+  onOpenTerminalPanel?: () => void;
   onToggleDiffPanel?: () => void;
   onToggleBrowserPanel?: () => void;
   onToggleFilesPanel?: () => void;
@@ -2104,9 +2100,13 @@ export default function ChatView({
   surfaceMode = "single",
   isFocusedPane = true,
   panelState,
+  rightPanelOpen = false,
+  onToggleRightPanel,
+  terminalPanelOpen = false,
+  onOpenTerminalPanel,
   onToggleDiffPanel,
   onToggleBrowserPanel,
-  onToggleFilesPanel,
+  onToggleFilesPanel: _onToggleFilesPanel,
   onOpenFileViewerPanel,
   onOpenTurnDiffPanel: _onOpenTurnDiffPanel,
   floatingComposer = false,
@@ -3476,7 +3476,8 @@ export default function ChatView({
         return;
       }
       const api = readNativeApi();
-      const hasIntegratedBrowser = typeof window !== "undefined" && Boolean(window.desktopBridge?.browser);
+      const hasIntegratedBrowser =
+        typeof window !== "undefined" && Boolean(window.desktopBridge?.browser);
       if (!api?.browser || !hasIntegratedBrowser) {
         window.open(url, "_blank", "noopener,noreferrer");
         return;
@@ -3499,7 +3500,8 @@ export default function ChatView({
       const api = readNativeApi();
       const projectId = activeProject?.id;
       const url = pathToBrowserFileUrl(path, options?.cwd ?? threadWorkspaceCwd ?? undefined);
-      const hasIntegratedBrowser = typeof window !== "undefined" && Boolean(window.desktopBridge?.browser);
+      const hasIntegratedBrowser =
+        typeof window !== "undefined" && Boolean(window.desktopBridge?.browser);
       if (!api?.browser || !projectId || !hasIntegratedBrowser) {
         window.open(url, "_blank", "noopener,noreferrer");
         return;
@@ -3517,11 +3519,6 @@ export default function ChatView({
     },
     [activeProject?.id, onToggleBrowser, resolvedBrowserPaneOpen, threadWorkspaceCwd],
   );
-  const onToggleFiles = useCallback(() => {
-    if (onToggleFilesPanel) {
-      onToggleFilesPanel();
-    }
-  }, [onToggleFilesPanel]);
   const onOpenFilePath = useCallback(
     (path: string, options?: { cwd?: string | undefined; displayName?: string | undefined }) => {
       if (!activeThreadId) {
@@ -3602,8 +3599,19 @@ export default function ChatView({
   );
   const toggleTerminalVisibility = useCallback(() => {
     if (!activeThreadId) return;
+    if (onOpenTerminalPanel) {
+      onOpenTerminalPanel();
+      return;
+    }
     setTerminalOpen(!terminalState.terminalOpen);
-  }, [activeThreadId, setTerminalOpen, terminalState.terminalOpen]);
+  }, [activeThreadId, onOpenTerminalPanel, setTerminalOpen, terminalState.terminalOpen]);
+  const openTerminalSurface = useCallback(() => {
+    if (onOpenTerminalPanel) {
+      onOpenTerminalPanel();
+      return;
+    }
+    setTerminalOpen(true);
+  }, [onOpenTerminalPanel, setTerminalOpen]);
   const splitTerminal = useCallback(() => {
     if (!activeThreadId || hasReachedTerminalLimit) return;
     const terminalId = `terminal-${crypto.randomUUID()}`;
@@ -3684,7 +3692,7 @@ export default function ChatView({
         ? `terminal-${crypto.randomUUID()}`
         : baseTerminalId;
 
-      setTerminalOpen(true);
+      openTerminalSurface();
       if (shouldCreateNewTerminal) {
         storeNewTerminal(activeThreadId, targetTerminalId);
       } else {
@@ -3744,7 +3752,7 @@ export default function ChatView({
       activeThreadId,
       gitCwd,
       isServerThread,
-      setTerminalOpen,
+      openTerminalSurface,
       setThreadError,
       storeNewTerminal,
       storeSetActiveTerminal,
@@ -4005,7 +4013,10 @@ export default function ChatView({
   const scrollMessagesToBottom = useCallback((behavior: ScrollBehavior = "auto") => {
     const scrollContainer = messagesScrollRef.current;
     if (!scrollContainer) return;
-    const bottomScrollTop = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
+    const bottomScrollTop = Math.max(
+      0,
+      scrollContainer.scrollHeight - scrollContainer.clientHeight,
+    );
     scrollContainer.scrollTo({ top: scrollContainer.scrollHeight, behavior });
     lastKnownScrollTopRef.current = bottomScrollTop;
     shouldAutoScrollRef.current = true;
@@ -4462,8 +4473,8 @@ export default function ChatView({
       if (command === "terminal.split") {
         event.preventDefault();
         event.stopPropagation();
-        if (!terminalState.terminalOpen) {
-          setTerminalOpen(true);
+        if (!terminalState.terminalOpen && !terminalPanelOpen) {
+          openTerminalSurface();
         }
         splitTerminal();
         return;
@@ -4472,7 +4483,7 @@ export default function ChatView({
       if (command === "terminal.close") {
         event.preventDefault();
         event.stopPropagation();
-        if (!terminalState.terminalOpen) return;
+        if (!terminalState.terminalOpen && !terminalPanelOpen) return;
         closeTerminal(terminalState.activeTerminalId);
         return;
       }
@@ -4480,8 +4491,8 @@ export default function ChatView({
       if (command === "terminal.new") {
         event.preventDefault();
         event.stopPropagation();
-        if (!terminalState.terminalOpen) {
-          setTerminalOpen(true);
+        if (!terminalState.terminalOpen && !terminalPanelOpen) {
+          openTerminalSurface();
         }
         createNewTerminal();
         return;
@@ -4508,10 +4519,11 @@ export default function ChatView({
     activeProject,
     terminalState.terminalOpen,
     terminalState.activeTerminalId,
+    terminalPanelOpen,
     activeThreadId,
     closeTerminal,
     createNewTerminal,
-    setTerminalOpen,
+    openTerminalSurface,
     runProjectScript,
     splitTerminal,
     keybindings,
@@ -6775,10 +6787,9 @@ export default function ChatView({
           handoffTargetProviderCount={handoffTargetProviders.length}
           handoffBadgeSourceProvider={handoffBadgeSourceProvider}
           handoffBadgeTargetProvider={handoffBadgeTargetProvider}
-          terminalOpen={terminalState.terminalOpen}
-          filesRailOpen={filesRailOpen}
-          browserPaneOpen={resolvedBrowserPaneOpen}
-          diffOpen={resolvedDiffOpen}
+          rightPanelOpen={
+            rightPanelOpen || resolvedDiffOpen || resolvedBrowserPaneOpen || filesRailOpen
+          }
           surfaceMode={surfaceMode}
           isFocusedPane={isFocusedPane}
           {...(onSplitSurface ? { onSplitSurface } : {})}
@@ -6801,10 +6812,7 @@ export default function ChatView({
                 }
               : null
           }
-          onToggleTerminal={toggleTerminalVisibility}
-          onToggleFiles={onToggleFiles}
-          onToggleDiff={onToggleDiff}
-          onToggleBrowser={onToggleBrowser}
+          onToggleRightPanel={onToggleRightPanel ?? onToggleDiff}
           onCreateHandoff={onCreateProviderHandoffThread}
           onCycleHandoffTargetProvider={onCycleHandoffTargetProvider}
         />
@@ -7857,7 +7865,7 @@ export default function ChatView({
       </div>
 
       {(() => {
-        if (!terminalState.terminalOpen || !activeProject) {
+        if (!terminalState.terminalOpen || !activeProject || onOpenTerminalPanel) {
           return null;
         }
         return (
@@ -8035,9 +8043,15 @@ function LocalServersPopoverControl({
   const terminalSessionsSnapshot = terminalSessionsData ?? cachedTerminalSessions;
   const hasLoadedTerminalSessions = terminalSessionsSnapshot !== null;
   const isInitialServerCheckPending =
-    popoverOpen && terminalSessionsLoading && terminalSessionsData === undefined && !hasLoadedTerminalSessions;
+    popoverOpen &&
+    terminalSessionsLoading &&
+    terminalSessionsData === undefined &&
+    !hasLoadedTerminalSessions;
   const hasServerCheckError =
-    popoverOpen && terminalSessionsError && terminalSessionsData === undefined && !hasLoadedTerminalSessions;
+    popoverOpen &&
+    terminalSessionsError &&
+    terminalSessionsData === undefined &&
+    !hasLoadedTerminalSessions;
 
   const localServerSessions = useMemo(() => {
     const sessions = terminalSessionsSnapshot?.sessions ?? [];
@@ -8180,11 +8194,7 @@ function LocalServersPopoverControl({
         });
         useTerminalStateStore
           .getState()
-          .setTerminalActivity(
-            view.session.threadId as ThreadId,
-            view.session.terminalId,
-            false,
-          );
+          .setTerminalActivity(view.session.threadId as ThreadId, view.session.terminalId, false);
         await refetchTerminalSessions();
         toastManager.add({
           type: "success",
@@ -8254,11 +8264,7 @@ function LocalServersPopoverControl({
             )}
             <ChevronRightIcon className="size-4 shrink-0 text-muted-foreground" />
           </PopoverTrigger>
-          <PopoverPopup
-            align="start"
-            side="left"
-            className="w-72 max-w-[calc(100vw-2rem)] p-0"
-          >
+          <PopoverPopup align="start" side="left" className="w-72 max-w-[calc(100vw-2rem)] p-0">
             <div className="max-h-[min(28rem,calc(100vh-7rem))] overflow-y-auto p-1.5">
               <div className="flex items-center gap-2 px-1.5 pb-1">
                 <p className="min-w-0 flex-1 text-xs font-medium text-muted-foreground">
@@ -8425,9 +8431,7 @@ function LocalServersPopoverControl({
                               <span className="shrink-0 text-muted-foreground">
                                 {projectScriptIconNode(script.icon)}
                               </span>
-                              <span className="min-w-0 flex-1 truncate text-sm">
-                                {script.name}
-                              </span>
+                              <span className="min-w-0 flex-1 truncate text-sm">{script.name}</span>
                             </button>
                             <Button
                               type="button"
@@ -9344,10 +9348,7 @@ interface ChatHeaderProps {
   handoffTargetProviderCount: number;
   handoffBadgeSourceProvider: ProviderKind | null;
   handoffBadgeTargetProvider: ProviderKind | null;
-  terminalOpen: boolean;
-  filesRailOpen: boolean;
-  browserPaneOpen: boolean;
-  diffOpen: boolean;
+  rightPanelOpen: boolean;
   surfaceMode: "single" | "split";
   isFocusedPane: boolean;
   onSplitSurface?: () => void;
@@ -9356,10 +9357,7 @@ interface ChatHeaderProps {
   onAddProjectScript: (input: NewProjectScriptInput) => Promise<void>;
   onUpdateProjectScript: (scriptId: string, input: NewProjectScriptInput) => Promise<void>;
   onOpenTask: (() => void) | null;
-  onToggleTerminal: () => void;
-  onToggleFiles: () => void;
-  onToggleDiff: () => void;
-  onToggleBrowser: () => void;
+  onToggleRightPanel: () => void;
   onCreateHandoff: () => void;
   onCycleHandoffTargetProvider: (direction: 1 | -1) => void;
 }
@@ -9375,7 +9373,7 @@ const ChatHeader = memo(function ChatHeader({
   preferredScriptId: _preferredScriptId,
   keybindings,
   availableEditors,
-  diffToggleShortcutLabel,
+  diffToggleShortcutLabel: _diffToggleShortcutLabel,
   handoffBadgeLabel,
   handoffActionLabel: _handoffActionLabel,
   handoffDisabled: _handoffDisabled,
@@ -9383,22 +9381,16 @@ const ChatHeader = memo(function ChatHeader({
   handoffTargetProviderCount: _handoffTargetProviderCount,
   handoffBadgeSourceProvider,
   handoffBadgeTargetProvider,
-  terminalOpen,
-  filesRailOpen,
-  browserPaneOpen,
-  diffOpen,
+  rightPanelOpen,
   surfaceMode,
-  isFocusedPane,
-  onSplitSurface,
-  onMaximizeSurface,
+  isFocusedPane: _isFocusedPane,
+  onSplitSurface: _onSplitSurface,
+  onMaximizeSurface: _onMaximizeSurface,
   onRunProjectScript: _onRunProjectScript,
   onAddProjectScript: _onAddProjectScript,
   onUpdateProjectScript: _onUpdateProjectScript,
   onOpenTask: _onOpenTask,
-  onToggleTerminal,
-  onToggleFiles,
-  onToggleDiff,
-  onToggleBrowser,
+  onToggleRightPanel,
   onCreateHandoff: _onCreateHandoff,
   onCycleHandoffTargetProvider: _onCycleHandoffTargetProvider,
 }: ChatHeaderProps) {
@@ -9407,12 +9399,6 @@ const ChatHeader = memo(function ChatHeader({
   const headerRef = useRef<HTMLDivElement>(null);
   const [compact, setCompact] = useState(false);
   const isDisposableThread = useIsDisposableThread(activeThreadId);
-  const chatLayoutAction =
-    surfaceMode === "single" && onSplitSurface
-      ? { kind: "split" as const, label: "Split chat", onClick: onSplitSurface }
-      : surfaceMode === "split" && isFocusedPane && onMaximizeSurface
-        ? { kind: "maximize" as const, label: "Expand this chat", onClick: onMaximizeSurface }
-        : null;
   const renderProviderIcon = (provider: ProviderKind | null, className: string) => {
     if (provider === "claudeAgent") {
       return <ClaudeAI className={cn("text-[#d97757]", className)} />;
@@ -9494,103 +9480,23 @@ const ChatHeader = memo(function ChatHeader({
           availableEditors={availableEditors}
           openInCwd={openInCwd}
         />
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Toggle
-                className="shrink-0"
-                pressed={filesRailOpen}
-                onPressedChange={onToggleFiles}
-                aria-label="Toggle files rail"
-                variant="outline"
-                size="xs"
-              >
-                <FilesIcon className="size-3.5" />
-              </Toggle>
-            }
-          />
-          <TooltipPopup side="bottom">Toggle files rail</TooltipPopup>
-        </Tooltip>
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Toggle
-                className="shrink-0"
-                pressed={terminalOpen}
-                onPressedChange={onToggleTerminal}
-                aria-label="Toggle terminal drawer"
-                variant="outline"
-                size="xs"
-              >
-                <TerminalIcon className="size-3.5" />
-              </Toggle>
-            }
-          />
-          <TooltipPopup side="bottom">Toggle terminal drawer</TooltipPopup>
-        </Tooltip>
-        {chatLayoutAction ? (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Button
-                  type="button"
-                  size="icon-xs"
-                  variant="outline"
-                  className="shrink-0"
-                  aria-label={chatLayoutAction.label}
-                  onClick={chatLayoutAction.onClick}
-                />
-              }
-            >
-              {chatLayoutAction.kind === "split" ? (
-                <ArrowLeftRight className="size-3.5" />
-              ) : (
-                <Maximize2Icon className="size-3.5" />
-              )}
-            </TooltipTrigger>
-            <TooltipPopup side="bottom">{chatLayoutAction.label}</TooltipPopup>
-          </Tooltip>
-        ) : null}
-        {isElectron ? (
+        {!rightPanelOpen ? (
           <Tooltip>
             <TooltipTrigger
               render={
                 <Toggle
                   className="shrink-0"
-                  pressed={browserPaneOpen}
-                  onPressedChange={onToggleBrowser}
-                  aria-label="Toggle browser pane"
+                  pressed={rightPanelOpen}
+                  onPressedChange={onToggleRightPanel}
+                  aria-label="Open right sidebar workspace"
                   variant="outline"
                   size="xs"
                 >
-                  <GlobeIcon className="size-3" />
+                  <PanelRightOpenIcon className="size-3.5 text-muted-foreground" />
                 </Toggle>
               }
             />
-            <TooltipPopup side="bottom">Toggle browser pane</TooltipPopup>
-          </Tooltip>
-        ) : null}
-        {!diffOpen ? (
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <Toggle
-                  className="shrink-0"
-                  pressed={diffOpen}
-                  onPressedChange={onToggleDiff}
-                  aria-label="Toggle diff panel"
-                  variant="outline"
-                  size="xs"
-                >
-                  <PanelLeftIcon className="size-3.5 text-muted-foreground" />
-                </Toggle>
-              }
-            />
-            <TooltipPopup side="bottom">
-              {diffToggleShortcutLabel
-                ? `Toggle diff panel (${diffToggleShortcutLabel})`
-                : "Toggle diff panel"}
-            </TooltipPopup>
+            <TooltipPopup side="bottom">Open right workspace</TooltipPopup>
           </Tooltip>
         ) : null}
       </div>
